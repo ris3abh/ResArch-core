@@ -1,14 +1,48 @@
-# test_database.py - Test database connection and models
+# test_database.py - Run this from the SpinScribe root directory
 import sys
 import os
-from pathlib import Path
 
-# Add the app directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+print("🧪 Testing SpinScribe Database Setup...")
+print(f"🔍 Current directory: {os.getcwd()}")
+print(f"🔍 Directory contents: {os.listdir('.')}")
+
+# Check if we're in the right directory
+if not os.path.exists('app'):
+    print("❌ 'app' directory not found!")
+    print("💡 Make sure you're running this from the SpinScribe project root directory")
+    sys.exit(1)
+
+# Check if required files exist
+required_files = [
+    'app/__init__.py',
+    'app/core/__init__.py',
+    'app/core/config.py',
+    'app/database/__init__.py',
+    'app/database/connection.py',
+    'app/database/models/__init__.py',
+    'app/database/models/project.py'
+]
+
+print("\n📁 Checking required files...")
+missing_files = []
+for file_path in required_files:
+    if os.path.exists(file_path):
+        print(f"✅ {file_path}")
+    else:
+        print(f"❌ {file_path} - MISSING")
+        missing_files.append(file_path)
+
+if missing_files:
+    print(f"\n❌ Missing {len(missing_files)} required files!")
+    print("💡 Please create these files first:")
+    for file_path in missing_files:
+        print(f"   - {file_path}")
+    sys.exit(1)
+
+print("\n📦 All required files found!")
 
 def test_database():
     """Test database connection and basic operations"""
-    print("🧪 Testing SpinScribe Database Setup...")
     
     try:
         # Test 1: Import database modules
@@ -21,8 +55,8 @@ def test_database():
         print("\n2️⃣ Testing database connection...")
         if not check_db_connection():
             print("❌ Database connection failed!")
-            print("💡 Make sure PostgreSQL is running and accessible")
-            print("💡 Default connection: postgresql://spinscribe:spinscribe123@localhost:5432/spinscribe")
+            print("💡 Make sure your PostgreSQL Docker container is running:")
+            print("💡 docker ps | grep spinscribe-postgres")
             return False
         
         # Test 3: Get database info
@@ -69,14 +103,17 @@ def test_database():
             
             if queried_project:
                 print(f"✅ Project retrieved from database: {queried_project.client_name}")
-                print(f"📊 Project data: {queried_project.to_dict()}")
+                project_dict = queried_project.to_dict()
+                print(f"📊 Project ID: {project_dict['project_id'][:8]}...")
+                print(f"📊 Client: {project_dict['client_name']}")
+                print(f"📊 Status: {project_dict['status']}")
             else:
                 print("❌ Could not retrieve project from database")
                 return False
             
             # Test project methods
             queried_project.update_activity()
-            print(f"✅ Activity updated: {queried_project.last_activity_at}")
+            print(f"✅ Activity updated")
             
             # Test status changes
             print(f"🔍 Is active: {queried_project.is_active()}")
@@ -96,6 +133,8 @@ def test_database():
             
         except Exception as e:
             print(f"❌ Error during project operations: {e}")
+            import traceback
+            traceback.print_exc()
             db.rollback()
             return False
         finally:
@@ -122,7 +161,8 @@ def test_database():
         
     except ImportError as e:
         print(f"❌ Import error: {e}")
-        print("💡 Make sure all required packages are installed: pip install sqlalchemy psycopg2-binary")
+        import traceback
+        traceback.print_exc()
         return False
     except Exception as e:
         print(f"❌ Database test failed: {str(e)}")
@@ -130,39 +170,11 @@ def test_database():
         traceback.print_exc()
         return False
 
-def setup_postgresql_instructions():
-    """Print PostgreSQL setup instructions"""
-    print("\n" + "="*60)
-    print("🐘 PostgreSQL Setup Instructions")
-    print("="*60)
-    print()
-    print("If you don't have PostgreSQL set up, here's how to do it:")
-    print()
-    print("🔧 Option 1: Using Docker (Recommended)")
-    print("docker run --name spinscribe-postgres \\")
-    print("  -e POSTGRES_DB=spinscribe \\")
-    print("  -e POSTGRES_USER=spinscribe \\")
-    print("  -e POSTGRES_PASSWORD=spinscribe123 \\")
-    print("  -p 5432:5432 \\")
-    print("  -d postgres:15")
-    print()
-    print("🔧 Option 2: Local Installation")
-    print("1. Install PostgreSQL from https://postgresql.org/download/")
-    print("2. Create database and user:")
-    print("   sudo -u postgres psql")
-    print("   CREATE DATABASE spinscribe;")
-    print("   CREATE USER spinscribe WITH PASSWORD 'spinscribe123';")
-    print("   GRANT ALL PRIVILEGES ON DATABASE spinscribe TO spinscribe;")
-    print("   \\q")
-    print()
-    print("💡 Connection URL: postgresql://spinscribe:spinscribe123@localhost:5432/spinscribe")
-    print("="*60)
-
 if __name__ == "__main__":
     success = test_database()
     
     if not success:
-        setup_postgresql_instructions()
+        print("\n❌ Database test failed!")
         sys.exit(1)
     
     print("\n" + "="*50)

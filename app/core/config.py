@@ -1,8 +1,10 @@
 # app/core/config.py
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
-from typing import List, Optional
+from typing import List, Optional, Union
 from functools import lru_cache
 import os
+import json
 from pathlib import Path
 
 class Settings(BaseSettings):
@@ -19,15 +21,15 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     
-    # Database Settings
-    database_url: str = "postgresql://spinscribe:spinscribe123@localhost:5432/spinscribe"
+    # Database Settings - Use 127.0.0.1 instead of localhost
+    database_url: str = "postgresql://spinscribe:spinscribe123@127.0.0.1:5432/spinscribe"
     echo_sql: bool = False  # Set to True for SQL debugging
     
     # Redis Settings (for caching and sessions)
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://127.0.0.1:6379/0"
     
     # Vector Database Settings (Qdrant)
-    qdrant_host: str = "localhost"
+    qdrant_host: str = "127.0.0.1"
     qdrant_port: int = 6333
     qdrant_collection_prefix: str = "spinscribe_"
     vector_db_url: Optional[str] = None  # If using cloud Qdrant
@@ -51,12 +53,10 @@ class Settings(BaseSettings):
     secret_key: str = "your-super-secret-key-change-in-production"
     access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
     
-    # CORS Settings
-    backend_cors_origins: List[str] = [
-        "http://localhost:3000",  # React dev server
-        "http://localhost:8080",  # Vue dev server
-        "http://localhost:8000",  # FastAPI dev server
-    ]
+    # CORS Settings - Handle as Union to accept both string and list
+    backend_cors_origins: Union[List[str], str] = Field(
+        default=["http://localhost:3000", "http://localhost:8080", "http://localhost:8000"]
+    )
     
     # Storage Settings
     storage_root_dir: str = "./storage"
@@ -76,9 +76,26 @@ class Settings(BaseSettings):
     # Rate Limiting
     rate_limit_per_minute: int = 100
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    @field_validator('backend_cors_origins')
+    @classmethod
+    def parse_cors_origins(cls, v):
+        """Parse CORS origins from string or return list as-is"""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                # If it's a simple comma-separated string
+                return [origin.strip() for origin in v.split(',')]
+        elif isinstance(v, list):
+            return v
+        else:
+            return ["http://localhost:3000", "http://localhost:8080", "http://localhost:8000"]
+    
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": False,
+        "extra": "ignore"  # Ignore extra fields from environment
+    }
         
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

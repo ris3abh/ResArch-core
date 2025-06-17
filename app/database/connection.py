@@ -1,5 +1,5 @@
 # app/database/connection.py
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
@@ -51,7 +51,7 @@ def init_db() -> None:
     """
     try:
         # Import all models here to ensure they are registered with Base
-        from app.database.models import project, knowledge_item, chat_instance, chat_message, chat_participant, human_checkpoint
+        from app.database.models import project
         
         # Create all tables
         Base.metadata.create_all(bind=engine)
@@ -68,7 +68,7 @@ def check_db_connection() -> bool:
     try:
         with engine.connect() as connection:
             # Execute a simple query to test connection
-            result = connection.execute("SELECT 1 as test")
+            result = connection.execute(text("SELECT 1 as test"))
             test_value = result.fetchone()[0]
             
             if test_value == 1:
@@ -89,15 +89,15 @@ def get_db_info() -> dict:
     try:
         with engine.connect() as connection:
             # Get PostgreSQL version
-            result = connection.execute("SELECT version()")
+            result = connection.execute(text("SELECT version()"))
             version = result.fetchone()[0]
             
             # Get current database name
-            result = connection.execute("SELECT current_database()")
+            result = connection.execute(text("SELECT current_database()"))
             db_name = result.fetchone()[0]
             
             # Get current user
-            result = connection.execute("SELECT current_user")
+            result = connection.execute(text("SELECT current_user"))
             db_user = result.fetchone()[0]
             
             return {
