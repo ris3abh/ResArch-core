@@ -1,25 +1,14 @@
-# DealTalk
-a versatile, multi-tenant AI sales assistant platform that transforms business catalogs into intelligent conversation agents. 
+# SpinScribe - Multi-Agent Content Creation System
 
-# Getting the requirements ready!!
+Built with CAMEL AI Framework
 
-1. Create a virtual env
+## Quick Start
 
-```python3.12 -m venv venv```
+1. Install dependencies: `pip install -r requirements.txt`
+2. Set up environment: `cp .env.example .env`
+3. Run the application: `python -m app.main`
 
-2. In the venv file created add in pip.conf file with the following:
+## Documentation
 
-```
-[global]
-YOUR_PAT=
-index-url=https://username%40spinutech.com:YOUR_PAT_FOR_PACKAGE_READ@bsstfs.pkgs.visualstudio.com/DealFlow/_packaging/dealflow/pypi/simple/
-trusted-host=bsstfs.pkgs.visualstudio.com
-always-trusted=true
+See `docs/` directory for detailed documentation.
 
-[dev]
-extra-index-url=https://pypi.org/simple
-```
-
-3. Install packages:
-
-```pip install -r requirements.txt```

@@ -1,0 +1,15 @@
+database:
+  url: postgresql://user:password@localhost:5432/spinscribe_dev
+  echo: true
+  
+redis:
+  url: redis://localhost:6379/0
+  
+vector_db:
+  host: localhost
+  port: 6333
+  
+logging:
+  level: DEBUG
+  format: detailed
+
