@@ -1,4 +1,4 @@
-# app/core/config.py
+# app/core/config.py - Fixed for CAMEL compatibility
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 from typing import List, Optional, Union
@@ -140,18 +140,31 @@ class Settings(BaseSettings):
         return self.environment.lower() in ["production", "prod"]
     
     def get_model_config(self) -> dict:
-        """Get configuration for CAMEL model factory"""
+        """
+        Get configuration for CAMEL model factory.
+        NOTE: API keys are NOT included here - CAMEL gets them from environment variables.
+        """
         config = {
             "temperature": 0.7,
             "max_tokens": 2000,
         }
         
+        # Add platform-specific configurations (no API keys)
         if self.default_model_platform == "openai":
-            config["api_key"] = self.openai_api_key
+            config.update({
+                "top_p": 1.0,
+                "frequency_penalty": 0.0,
+                "presence_penalty": 0.0,
+            })
         elif self.default_model_platform == "anthropic":
-            config["api_key"] = self.anthropic_api_key
+            config.update({
+                "top_p": 1.0,
+            })
         elif self.default_model_platform == "mistral":
-            config["api_key"] = self.mistral_api_key
+            config.update({
+                "top_p": 1.0,
+                "safe_prompt": False,
+            })
             
         return config
     
@@ -167,12 +180,42 @@ class Settings(BaseSettings):
                 "host": self.qdrant_host,
                 "port": self.qdrant_port,
             }
+    
+    def get_api_key_status(self) -> dict:
+        """Check status of API keys without exposing them"""
+        return {
+            "openai": bool(self.openai_api_key and self.openai_api_key != "your_openai_api_key_here"),
+            "anthropic": bool(self.anthropic_api_key and self.anthropic_api_key != "your_anthropic_api_key_here"),
+            "mistral": bool(self.mistral_api_key and self.mistral_api_key != "your_mistral_api_key_here"),
+            "google": bool(self.google_api_key and self.google_api_key != "your_google_api_key_here"),
+        }
+    
+    def setup_environment_variables(self):
+        """Ensure API keys are set as environment variables for CAMEL"""
+        # Set OpenAI API key
+        if self.openai_api_key and self.openai_api_key != "your_openai_api_key_here":
+            os.environ['OPENAI_API_KEY'] = self.openai_api_key
+        
+        # Set Anthropic API key
+        if self.anthropic_api_key and self.anthropic_api_key != "your_anthropic_api_key_here":
+            os.environ['ANTHROPIC_API_KEY'] = self.anthropic_api_key
+        
+        # Set Mistral API key
+        if self.mistral_api_key and self.mistral_api_key != "your_mistral_api_key_here":
+            os.environ['MISTRAL_API_KEY'] = self.mistral_api_key
+        
+        # Set Google API key
+        if self.google_api_key and self.google_api_key != "your_google_api_key_here":
+            os.environ['GOOGLE_API_KEY'] = self.google_api_key
 
 # Global settings instance
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance"""
-    return Settings()
+    settings = Settings()
+    # Ensure environment variables are set for CAMEL
+    settings.setup_environment_variables()
+    return settings
 
 # Export settings for easy import
 settings = get_settings()
