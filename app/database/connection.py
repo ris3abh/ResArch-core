@@ -1,136 +1,171 @@
-# app/database/connection.py
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+# app/database/connection.py - UPDATED FOR SQLAlchemy 2.0
+"""
+Database connection and configuration with proper SQLAlchemy 2.0 setup.
+Updated to include type annotation mapping and modern best practices.
+"""
+from sqlalchemy import create_engine, JSON
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from sqlalchemy.pool import StaticPool
-import logging
-from typing import Generator
-
 from app.core.config import settings
+from typing import Dict, Any
+import logging
 
-# Configure logging
-logging.basicConfig()
-logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO if settings.echo_sql else logging.WARNING)
+logger = logging.getLogger(__name__)
 
-# Create the SQLAlchemy engine
-engine = create_engine(
-    settings.database_url,
-    echo=settings.echo_sql,
-    # For PostgreSQL, we don't need special connect_args
-    future=True,  # Use SQLAlchemy 2.0 style
-)
+class Base(DeclarativeBase):
+    """
+    Base class for all database models with proper type annotation mapping.
+    This ensures SQLAlchemy 2.0 knows how to handle our type hints.
+    """
+    # Type annotation map for SQLAlchemy 2.0
+    type_annotation_map = {
+        dict[str, Any]: JSON,
+        Dict[str, Any]: JSON,  # For Python < 3.9 compatibility
+    }
 
-# Create SessionLocal class
+# Database engine configuration
+def create_database_engine():
+    """Create database engine with proper configuration"""
+    
+    # SQLite specific configuration for development
+    if settings.database_url.startswith("sqlite"):
+        engine = create_engine(
+            settings.database_url,
+            poolclass=StaticPool,
+            connect_args={
+                "check_same_thread": False,  # Allow SQLite to work with FastAPI
+                "timeout": 20,  # Connection timeout
+            },
+            echo=settings.echo_sql,  # Log SQL queries in debug mode
+            future=True  # Use SQLAlchemy 2.0 style
+        )
+    else:
+        # PostgreSQL/other database configuration
+        engine = create_engine(
+            settings.database_url,
+            pool_pre_ping=True,  # Verify connections before use
+            pool_recycle=300,    # Recycle connections every 5 minutes
+            pool_size=5,         # Connection pool size
+            max_overflow=0,      # No overflow connections
+            echo=settings.echo_sql,
+            future=True
+        )
+    
+    return engine
+
+# Create the engine
+engine = create_database_engine()
+
+# Session factory
 SessionLocal = sessionmaker(
-    autocommit=False, 
-    autoflush=False, 
     bind=engine,
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,  # Keep objects usable after commit
     future=True  # Use SQLAlchemy 2.0 style
 )
 
-# Create Base class for models
-Base = declarative_base()
-
-def get_db() -> Generator[Session, None, None]:
+def get_db():
     """
-    Dependency function to get database session.
-    This will be used with FastAPI's Depends()
+    Database dependency for FastAPI.
+    Provides a database session that's automatically closed after use.
     """
     db = SessionLocal()
     try:
         yield db
     except Exception as e:
+        logger.error(f"Database session error: {e}")
         db.rollback()
-        raise e
+        raise
     finally:
         db.close()
 
-def init_db() -> None:
+def init_db():
     """
-    Initialize database - create all tables
+    Initialize database by creating all tables.
+    This should be called on application startup.
     """
     try:
-        # Import all models here to ensure they are registered with Base
-        from app.database.models import project
+        # Import all models to ensure they're registered
+        from app.database.models import (
+            Project, KnowledgeItem, ChatInstance, 
+            ChatMessage, ChatParticipant, HumanCheckpoint
+        )
         
         # Create all tables
         Base.metadata.create_all(bind=engine)
-        print("✅ Database tables created successfully")
+        logger.info("Database tables created successfully")
         
     except Exception as e:
-        print(f"❌ Error creating database tables: {e}")
+        logger.error(f"Failed to initialize database: {e}")
         raise
 
 def check_db_connection() -> bool:
     """
-    Check if database connection is working
+    Check if database connection is working.
+    Returns True if connection is successful, False otherwise.
     """
     try:
         with engine.connect() as connection:
-            # Execute a simple query to test connection
-            result = connection.execute(text("SELECT 1 as test"))
-            test_value = result.fetchone()[0]
-            
-            if test_value == 1:
-                print("✅ Database connection successful")
-                return True
-            else:
-                print("❌ Database connection test failed")
-                return False
-                
+            connection.execute("SELECT 1")
+        logger.info("Database connection successful")
+        return True
     except Exception as e:
-        print(f"❌ Database connection failed: {e}")
+        logger.error(f"Database connection failed: {e}")
         return False
 
-def get_db_info() -> dict:
+def get_db_info() -> Dict[str, Any]:
     """
-    Get database information for debugging
+    Get database information for debugging and monitoring.
     """
     try:
         with engine.connect() as connection:
-            # Get PostgreSQL version
-            result = connection.execute(text("SELECT version()"))
-            version = result.fetchone()[0]
+            # Get basic database info
+            result = connection.execute("SELECT 1 as test")
+            test_result = result.scalar()
             
-            # Get current database name
-            result = connection.execute(text("SELECT current_database()"))
-            db_name = result.fetchone()[0]
-            
-            # Get current user
-            result = connection.execute(text("SELECT current_user"))
-            db_user = result.fetchone()[0]
-            
-            return {
-                "version": version,
-                "database": db_name,
-                "user": db_user,
-                "url": settings.database_url.replace(settings.database_url.split('@')[0].split('://')[-1] + '@', '*****@') if '@' in settings.database_url else settings.database_url
+            info = {
+                "database_url": settings.database_url.split("@")[-1] if "@" in settings.database_url else settings.database_url,
+                "engine_name": engine.name,
+                "pool_size": getattr(engine.pool, 'size', None),
+                "checked_out_connections": getattr(engine.pool, 'checkedout', None),
+                "connection_test": test_result == 1,
+                "sqlalchemy_version": "2.0+",
+                "tables_created": len(Base.metadata.tables) > 0,
+                "table_names": list(Base.metadata.tables.keys())
             }
             
+            return info
+            
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Failed to get database info: {e}")
+        return {
+            "error": str(e),
+            "database_url": "Connection failed"
+        }
 
-# Event listeners for debugging (optional)
-if settings.debug:
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        """Event listener for database connections"""
-        print(f"🔌 New database connection established")
+def drop_all_tables():
+    """
+    Drop all tables. USE WITH CAUTION!
+    This is useful for development and testing only.
+    """
+    try:
+        Base.metadata.drop_all(bind=engine)
+        logger.warning("All database tables dropped")
+    except Exception as e:
+        logger.error(f"Failed to drop tables: {e}")
+        raise
 
-    @event.listens_for(engine, "begin")
-    def receive_begin(conn):
-        """Event listener for transaction begin"""
-        if settings.echo_sql:
-            print("🔄 Database transaction started")
-
-    @event.listens_for(engine, "commit")
-    def receive_commit(conn):
-        """Event listener for transaction commit"""
-        if settings.echo_sql:
-            print("✅ Database transaction committed")
-
-    @event.listens_for(engine, "rollback")
-    def receive_rollback(conn):
-        """Event listener for transaction rollback"""
-        if settings.echo_sql:
-            print("↩️ Database transaction rolled back")
+def reset_database():
+    """
+    Reset database by dropping and recreating all tables.
+    USE WITH EXTREME CAUTION! This will delete all data.
+    """
+    try:
+        logger.warning("Resetting database - all data will be lost!")
+        drop_all_tables()
+        init_db()
+        logger.info("Database reset completed")
+    except Exception as e:
+        logger.error(f"Failed to reset database: {e}")
+        raise

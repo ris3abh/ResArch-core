@@ -1,4 +1,4 @@
-# app/knowledge/base/knowledge_base.py
+# app/knowledge/base/knowledge_base.py - FIXED to remove duplicate model
 """
 Core Knowledge Base implementation for SpinScribe
 
@@ -17,54 +17,11 @@ import logging
 from pathlib import Path
 
 from sqlalchemy.orm import Session
-from sqlalchemy import Column, String, DateTime, JSON, Text, ForeignKey, func
-from sqlalchemy.orm import relationship
-
-from app.database.connection import Base, SessionLocal
+from app.database.connection import SessionLocal
+from app.database.models.knowledge_item import KnowledgeItem  # Import the correct model
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-
-class KnowledgeItem(Base):
-    """Database model for knowledge items"""
-    __tablename__ = "knowledge_items"
-    
-    # Primary key
-    knowledge_id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    
-    # Foreign key to projects
-    project_id = Column(String, ForeignKey("projects.project_id"), nullable=False, index=True)
-    
-    # Knowledge item details
-    knowledge_type = Column(String, nullable=False, index=True)  # content_sample, style_guide, analysis, etc.
-    title = Column(String, nullable=False)
-    content = Column(Text, nullable=True)  # Main text content
-    file_path = Column(String, nullable=True)  # Path to original file if applicable
-    
-    # Metadata and configuration (renamed from 'metadata' to avoid SQLAlchemy conflict)
-    meta_data = Column(JSON, nullable=True, default=dict)
-    
-    # Processing status
-    processing_status = Column(String, default="pending")  # pending, processed, failed
-    
-    # Timestamps
-    created_at = Column(DateTime, default=func.now(), nullable=False)
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for API responses"""
-        return {
-            "knowledge_id": self.knowledge_id,
-            "project_id": self.project_id,
-            "knowledge_type": self.knowledge_type,
-            "title": self.title,
-            "content": self.content,
-            "file_path": self.file_path,
-            "metadata": self.meta_data,  # Return as 'metadata' for API consistency
-            "processing_status": self.processing_status,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }
 
 class KnowledgeBase:
     """
@@ -108,15 +65,18 @@ class KnowledgeBase:
         try:
             db = SessionLocal()
             
-            knowledge_item = KnowledgeItem(
+            # Use the correct factory method from the model
+            knowledge_item = KnowledgeItem.create_content_sample(
                 project_id=self.project_id,
-                knowledge_type=document_data.get("type", "content_sample"),
                 title=document_data.get("title", "Untitled Document"),
                 content=document_data.get("content"),
-                file_path=document_data.get("file_path"),
-                meta_data=document_data.get("metadata", {}),  # Use meta_data column
-                processing_status="processed"
+                category=document_data.get("category"),
+                metadata=document_data.get("metadata", {})  # This gets mapped to meta_data in the factory method
             )
+            
+            # Override file path if provided
+            if document_data.get("file_path"):
+                knowledge_item.file_path = document_data.get("file_path")
             
             db.add(knowledge_item)
             db.commit()
@@ -165,14 +125,14 @@ class KnowledgeBase:
             return None
     
     async def list_knowledge_items(self, 
-                                  knowledge_type: str = None,
+                                  item_type: str = None,
                                   limit: int = 50,
                                   offset: int = 0) -> List[Dict[str, Any]]:
         """
         List knowledge items for the project.
         
         Args:
-            knowledge_type: Filter by knowledge type
+            item_type: Filter by item type (content_sample, brand_guide, etc.)
             limit: Maximum number of items to return
             offset: Number of items to skip
             
@@ -186,8 +146,8 @@ class KnowledgeBase:
                 KnowledgeItem.project_id == self.project_id
             )
             
-            if knowledge_type:
-                query = query.filter(KnowledgeItem.knowledge_type == knowledge_type)
+            if item_type:
+                query = query.filter(KnowledgeItem.item_type == item_type)
             
             items = query.order_by(KnowledgeItem.created_at.desc()).offset(offset).limit(limit).all()
             
@@ -211,49 +171,35 @@ class KnowledgeBase:
             analysis: Style analysis results
             
         Returns:
-            analysis_id: Unique identifier for the analysis
+            knowledge_id: ID of the stored analysis
         """
         try:
-            analysis_data = {
-                "type": "style_analysis",
-                "title": f"Style Analysis for {document_id}",
-                "content": json.dumps(analysis, indent=2),
-                "metadata": {
-                    "source_document_id": document_id,
-                    "analysis_type": "style_analysis",
-                    "analysis_timestamp": datetime.now().isoformat()
-                }
-            }
+            db = SessionLocal()
             
-            return await self.store_document(analysis_data)
+            # Create style analysis knowledge item
+            analysis_item = KnowledgeItem.create_style_analysis(
+                project_id=self.project_id,
+                title=f"Style Analysis - {analysis.get('title', 'Document')}",
+                analysis_results=analysis,
+                source_content_id=document_id
+            )
+            
+            db.add(analysis_item)
+            db.commit()
+            db.refresh(analysis_item)
+            
+            knowledge_id = analysis_item.knowledge_id
+            self.logger.info(f"Stored style analysis: {knowledge_id}")
+            
+            db.close()
+            return knowledge_id
             
         except Exception as e:
             self.logger.error(f"Error storing style analysis: {e}")
+            if 'db' in locals():
+                db.rollback()
+                db.close()
             raise
-    
-    async def get_style_analyses(self) -> List[Dict[str, Any]]:
-        """
-        Get all style analyses for the project.
-        
-        Returns:
-            List of style analysis results
-        """
-        try:
-            analyses = await self.list_knowledge_items(knowledge_type="style_analysis")
-            
-            # Parse the content back to JSON for each analysis
-            for analysis in analyses:
-                if analysis.get("content"):
-                    try:
-                        analysis["parsed_content"] = json.loads(analysis["content"])
-                    except json.JSONDecodeError:
-                        self.logger.warning(f"Could not parse analysis content for {analysis['knowledge_id']}")
-            
-            return analyses
-            
-        except Exception as e:
-            self.logger.error(f"Error retrieving style analyses: {e}")
-            return []
     
     async def update_knowledge_item(self, knowledge_id: str, updates: Dict[str, Any]) -> bool:
         """
@@ -279,7 +225,7 @@ class KnowledgeBase:
                 return False
             
             # Update allowed fields
-            allowed_fields = ['title', 'content', 'meta_data', 'processing_status']
+            allowed_fields = ['title', 'content', 'processing_status', 'is_active']
             for field, value in updates.items():
                 # Handle 'metadata' key by mapping to 'meta_data' column
                 if field == 'metadata':
@@ -346,18 +292,18 @@ class KnowledgeBase:
         try:
             db = SessionLocal()
             
-            # Count by knowledge type
+            # Count by item type
             type_counts = {}
-            types = db.query(KnowledgeItem.knowledge_type).filter(
+            types = db.query(KnowledgeItem.item_type).filter(
                 KnowledgeItem.project_id == self.project_id
             ).distinct().all()
             
-            for (knowledge_type,) in types:
+            for (item_type,) in types:
                 count = db.query(KnowledgeItem).filter(
                     KnowledgeItem.project_id == self.project_id,
-                    KnowledgeItem.knowledge_type == knowledge_type
+                    KnowledgeItem.item_type == item_type
                 ).count()
-                type_counts[knowledge_type] = count
+                type_counts[item_type] = count
             
             # Total count
             total_items = db.query(KnowledgeItem).filter(
@@ -388,3 +334,55 @@ class KnowledgeBase:
                 "items_by_type": {},
                 "error": str(e)
             }
+    
+    async def search_knowledge(self, 
+                             query: str, 
+                             item_types: List[str] = None,
+                             limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Search knowledge items by content.
+        
+        Args:
+            query: Search query
+            item_types: Filter by item types
+            limit: Maximum results to return
+            
+        Returns:
+            List of matching knowledge items
+        """
+        try:
+            db = SessionLocal()
+            
+            # Basic text search (this can be enhanced with vector search later)
+            query_filter = db.query(KnowledgeItem).filter(
+                KnowledgeItem.project_id == self.project_id,
+                KnowledgeItem.is_active == True
+            )
+            
+            # Add text search
+            if query:
+                query_filter = query_filter.filter(
+                    KnowledgeItem.content.contains(query) |
+                    KnowledgeItem.title.contains(query)
+                )
+            
+            # Filter by item types
+            if item_types:
+                query_filter = query_filter.filter(
+                    KnowledgeItem.item_type.in_(item_types)
+                )
+            
+            items = query_filter.order_by(
+                KnowledgeItem.created_at.desc()
+            ).limit(limit).all()
+            
+            result = [item.to_dict() for item in items]
+            db.close()
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error searching knowledge: {e}")
+            if 'db' in locals():
+                db.close()
+            return []

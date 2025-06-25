@@ -1,8 +1,13 @@
-# app/database/models/project.py
-from sqlalchemy import Column, String, DateTime, JSON, func, Text
-from sqlalchemy.orm import relationship
+# app/database/models/project.py - UPDATED FOR SQLAlchemy 2.0
+"""
+Project model with proper SQLAlchemy 2.0 syntax using Mapped annotations.
+Updated to follow modern best practices and fix relationship issues.
+"""
+from sqlalchemy import String, DateTime, JSON, Text, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 import uuid
 from datetime import datetime
+from typing import Dict, Any, List, Optional
 
 from app.database.connection import Base
 
@@ -17,33 +22,50 @@ class Project(Base):
     """
     __tablename__ = "projects"
 
-    # Primary key using UUID
-    project_id = Column(String, primary_key=True, default=generate_uuid, index=True)
+    # Primary key using UUID with proper Mapped annotation
+    project_id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid, index=True)
     
-    # Basic project information
-    client_name = Column(String, nullable=False, index=True)
-    description = Column(Text, nullable=True)
+    # Basic project information with proper type annotations
+    client_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
-    # Status tracking (e.g., "active", "archived", "completed", "paused")
-    status = Column(String, default="active", index=True)
+    # Status tracking
+    status: Mapped[str] = mapped_column(String, default="active", index=True)
     
     # Project-specific configuration stored as JSON
-    # This can include client preferences, style settings, etc.
-    configuration = Column(JSON, nullable=True, default=dict)
+    configuration: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True, default=dict)
     
-    # Timestamps
-    created_at = Column(DateTime, default=func.now(), nullable=False)
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
-    last_activity_at = Column(DateTime, default=func.now(), nullable=False)
+    # Timestamps with proper Mapped annotations
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    last_activity_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
     
-    # Relationships (we'll add these as we create other models)
-    # knowledge_items = relationship("KnowledgeItem", back_populates="project", cascade="all, delete-orphan")
-    # chat_instances = relationship("ChatInstance", back_populates="project", cascade="all, delete-orphan")
+    # Relationships with proper forward references and back_populates
+    knowledge_items: Mapped[List["KnowledgeItem"]] = relationship(
+        "KnowledgeItem", 
+        back_populates="project", 
+        cascade="all, delete-orphan",
+        lazy="select"
+    )
+    
+    chat_instances: Mapped[List["ChatInstance"]] = relationship(
+        "ChatInstance", 
+        back_populates="project", 
+        cascade="all, delete-orphan",
+        lazy="select"
+    )
+    
+    human_checkpoints: Mapped[List["HumanCheckpoint"]] = relationship(
+        "HumanCheckpoint", 
+        back_populates="project", 
+        cascade="all, delete-orphan",
+        lazy="select"
+    )
     
     def __repr__(self):
         return f"<Project(id={self.project_id}, client={self.client_name}, status={self.status})>"
     
-    def to_dict(self):
+    def to_dict(self) -> Dict[str, Any]:
         """Convert project to dictionary for API responses"""
         return {
             "project_id": self.project_id,
