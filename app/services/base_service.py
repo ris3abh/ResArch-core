@@ -1,490 +1,306 @@
 # app/services/base_service.py
 """
-Base Service Architecture for SpinScribe
-Provides common patterns, database session management, and utilities for all services.
+Base service class and service registry for SpinScribe.
+Provides common patterns and utilities for all service classes.
 """
 
-from typing import TypeVar, Generic, Optional, List, Dict, Any, Type
-from abc import ABC, abstractmethod
+from typing import TypeVar, Generic, List, Optional, Dict, Any, Type
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
-import logging
+from sqlalchemy import select, delete, update
 from datetime import datetime
-from contextlib import contextmanager
+import logging
 
 from app.database.connection import SessionLocal
-from app.core.exceptions import (
-    ServiceError, 
-    ValidationError, 
-    NotFoundError, 
-    ConflictError,
-    DatabaseError
-)
-
-# Type variables for generic service operations
-ModelType = TypeVar('ModelType')
-CreateSchemaType = TypeVar('CreateSchemaType')
-UpdateSchemaType = TypeVar('UpdateSchemaType')
+from app.core.exceptions import NotFoundError, ValidationError, ServiceError
 
 logger = logging.getLogger(__name__)
 
-class BaseService(Generic[ModelType], ABC):
+# Generic type for model classes
+ModelType = TypeVar('ModelType')
+
+class ServiceRegistry:
+    """Registry for service instances"""
+    _services: Dict[str, Any] = {}
+    
+    @classmethod
+    def register(cls, name: str):
+        """Decorator to register a service"""
+        def decorator(service_func):
+            cls._services[name] = service_func
+            return service_func
+        return decorator
+    
+    @classmethod
+    def get_service(cls, name: str):
+        """Get a registered service"""
+        if name in cls._services:
+            return cls._services[name]()
+        raise ServiceError(f"Service {name} not found in registry")
+
+class BaseService(Generic[ModelType]):
     """
-    Abstract base service class providing common patterns for all SpinScribe services.
-    
-    Handles:
-    - Database session management
-    - Common CRUD operations
-    - Error handling and logging
-    - Transaction management
-    - Validation patterns
+    Base service class providing common CRUD operations and utilities.
+    All service classes should inherit from this to maintain consistency.
     """
     
-    def __init__(self, model: Type[ModelType]):
-        self.model = model
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+    def __init__(self, model_class: Type[ModelType]):
+        self.model_class = model_class
+        self.logger = logger.getChild(self.__class__.__name__)
     
-    @contextmanager
-    def get_db_session(self):
-        """
-        Context manager for database sessions with automatic cleanup and error handling.
-        """
-        db = SessionLocal()
-        try:
-            yield db
-        except SQLAlchemyError as e:
-            db.rollback()
-            self.logger.error(f"Database error in {self.__class__.__name__}: {e}")
-            raise DatabaseError(f"Database operation failed: {str(e)}")
-        except Exception as e:
-            db.rollback()
-            self.logger.error(f"Unexpected error in {self.__class__.__name__}: {e}")
-            raise ServiceError(f"Service operation failed: {str(e)}")
-        finally:
-            db.close()
+    def get_db_session(self, db: Optional[Session] = None) -> Session:
+        """Get database session, use provided session or create new one"""
+        if db is not None:
+            return db
+        return SessionLocal()
     
-    def get_by_id(self, entity_id: str, db: Optional[Session] = None) -> Optional[ModelType]:
-        """
-        Get entity by ID with optional external session.
-        
-        Args:
-            entity_id: The ID of the entity to retrieve
-            db: Optional database session (creates new one if not provided)
-            
-        Returns:
-            Entity instance or None if not found
-            
-        Raises:
-            DatabaseError: If database operation fails
-        """
-        def _get_by_id(session: Session) -> Optional[ModelType]:
+    # Basic CRUD Operations
+    
+    def create(self, create_data: Any, db: Optional[Session] = None) -> ModelType:
+        """Create a new entity"""
+        with self._get_session_context(db) as session:
             try:
-                return session.get(self.model, entity_id)
-            except SQLAlchemyError as e:
-                self.logger.error(f"Failed to get {self.model.__name__} by ID {entity_id}: {e}")
-                raise DatabaseError(f"Failed to retrieve {self.model.__name__}")
-        
-        if db:
-            return _get_by_id(db)
-        else:
-            with self.get_db_session() as session:
-                return _get_by_id(session)
-    
-    def get_by_id_or_raise(self, entity_id: str, db: Optional[Session] = None) -> ModelType:
-        """
-        Get entity by ID or raise NotFoundError if not found.
-        
-        Args:
-            entity_id: The ID of the entity to retrieve
-            db: Optional database session
-            
-        Returns:
-            Entity instance
-            
-        Raises:
-            NotFoundError: If entity not found
-            DatabaseError: If database operation fails
-        """
-        entity = self.get_by_id(entity_id, db)
-        if not entity:
-            raise NotFoundError(f"{self.model.__name__} with ID {entity_id} not found")
-        return entity
-    
-    def create(self, entity_data: CreateSchemaType, db: Optional[Session] = None) -> ModelType:
-        """
-        Create new entity with validation and error handling.
-        
-        Args:
-            entity_data: Data for creating the entity
-            db: Optional database session
-            
-        Returns:
-            Created entity instance
-            
-        Raises:
-            ValidationError: If data validation fails
-            ConflictError: If entity already exists
-            DatabaseError: If database operation fails
-        """
-        def _create(session: Session) -> ModelType:
-            try:
-                # Validate data before creation
-                self._validate_create_data(entity_data, session)
+                # Convert data to model instance
+                if hasattr(create_data, '__dict__'):
+                    # If it's a dataclass or object with attributes
+                    model_data = {
+                        key: value for key, value in create_data.__dict__.items()
+                        if not key.startswith('_')
+                    }
+                else:
+                    # If it's a dictionary
+                    model_data = create_data
                 
-                # Create entity instance
-                entity = self._create_entity(entity_data, session)
-                
-                # Add to session and commit
+                entity = self.model_class(**model_data)
                 session.add(entity)
                 session.commit()
                 session.refresh(entity)
                 
-                self.logger.info(f"Created {self.model.__name__} with ID: {getattr(entity, 'id', 'unknown')}")
+                self.logger.info(f"Created {self.model_class.__name__} entity")
                 return entity
                 
-            except ValidationError:
-                raise
-            except ConflictError:
-                raise
-            except SQLAlchemyError as e:
+            except Exception as e:
                 session.rollback()
-                self.logger.error(f"Failed to create {self.model.__name__}: {e}")
-                raise DatabaseError(f"Failed to create {self.model.__name__}")
-        
-        if db:
-            return _create(db)
-        else:
-            with self.get_db_session() as session:
-                return _create(session)
+                self.logger.error(f"Failed to create {self.model_class.__name__}: {e}")
+                raise ServiceError(f"Failed to create entity: {e}")
     
-    def update(self, entity_id: str, update_data: UpdateSchemaType, db: Optional[Session] = None) -> ModelType:
-        """
-        Update existing entity with validation.
-        
-        Args:
-            entity_id: ID of entity to update
-            update_data: Update data
-            db: Optional database session
-            
-        Returns:
-            Updated entity instance
-            
-        Raises:
-            NotFoundError: If entity not found
-            ValidationError: If update data invalid
-            DatabaseError: If database operation fails
-        """
-        def _update(session: Session) -> ModelType:
+    def get_by_id(self, entity_id: str, db: Optional[Session] = None) -> Optional[ModelType]:
+        """Get entity by ID"""
+        with self._get_session_context(db) as session:
+            try:
+                # Assume primary key is the first column or 'id'
+                primary_key = self._get_primary_key_column()
+                entity = session.execute(
+                    select(self.model_class).where(getattr(self.model_class, primary_key) == entity_id)
+                ).scalar_one_or_none()
+                
+                return entity
+                
+            except Exception as e:
+                self.logger.error(f"Failed to get {self.model_class.__name__} by ID {entity_id}: {e}")
+                raise ServiceError(f"Failed to retrieve entity: {e}")
+    
+    def get_by_id_or_raise(self, entity_id: str, db: Optional[Session] = None) -> ModelType:
+        """Get entity by ID or raise NotFoundError"""
+        entity = self.get_by_id(entity_id, db)
+        if entity is None:
+            raise NotFoundError(f"{self.model_class.__name__} with ID {entity_id} not found")
+        return entity
+    
+    def get_all(
+        self, 
+        db: Optional[Session] = None, 
+        limit: int = 100, 
+        offset: int = 0,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[ModelType]:
+        """Get all entities with optional filtering and pagination"""
+        with self._get_session_context(db) as session:
+            try:
+                query = select(self.model_class)
+                
+                # Apply filters if provided
+                if filters:
+                    for key, value in filters.items():
+                        if hasattr(self.model_class, key):
+                            query = query.where(getattr(self.model_class, key) == value)
+                
+                # Apply pagination
+                query = query.offset(offset).limit(limit)
+                
+                entities = session.execute(query).scalars().all()
+                return list(entities)
+                
+            except Exception as e:
+                self.logger.error(f"Failed to get {self.model_class.__name__} entities: {e}")
+                raise ServiceError(f"Failed to retrieve entities: {e}")
+    
+    def update(
+        self, 
+        entity_id: str, 
+        update_data: Any, 
+        db: Optional[Session] = None
+    ) -> ModelType:
+        """Update an entity"""
+        with self._get_session_context(db) as session:
             try:
                 # Get existing entity
                 entity = self.get_by_id_or_raise(entity_id, session)
                 
-                # Validate update data
-                self._validate_update_data(entity, update_data, session)
+                # Convert update data to dictionary
+                if hasattr(update_data, '__dict__'):
+                    update_dict = {
+                        key: value for key, value in update_data.__dict__.items()
+                        if not key.startswith('_') and value is not None
+                    }
+                else:
+                    update_dict = {k: v for k, v in update_data.items() if v is not None}
                 
                 # Apply updates
-                entity = self._apply_updates(entity, update_data, session)
+                for key, value in update_dict.items():
+                    if hasattr(entity, key):
+                        setattr(entity, key, value)
                 
-                # Commit changes
+                # Set updated timestamp if available
+                if hasattr(entity, 'updated_at'):
+                    entity.updated_at = datetime.utcnow()
+                
                 session.commit()
                 session.refresh(entity)
                 
-                self.logger.info(f"Updated {self.model.__name__} with ID: {entity_id}")
+                self.logger.info(f"Updated {self.model_class.__name__} entity {entity_id}")
                 return entity
                 
-            except (NotFoundError, ValidationError):
-                raise
-            except SQLAlchemyError as e:
+            except Exception as e:
                 session.rollback()
-                self.logger.error(f"Failed to update {self.model.__name__} {entity_id}: {e}")
-                raise DatabaseError(f"Failed to update {self.model.__name__}")
-        
-        if db:
-            return _update(db)
-        else:
-            with self.get_db_session() as session:
-                return _update(session)
+                self.logger.error(f"Failed to update {self.model_class.__name__} {entity_id}: {e}")
+                raise ServiceError(f"Failed to update entity: {e}")
     
     def delete(self, entity_id: str, db: Optional[Session] = None) -> bool:
-        """
-        Delete entity by ID.
-        
-        Args:
-            entity_id: ID of entity to delete
-            db: Optional database session
-            
-        Returns:
-            True if deleted successfully
-            
-        Raises:
-            NotFoundError: If entity not found
-            DatabaseError: If database operation fails
-        """
-        def _delete(session: Session) -> bool:
+        """Delete an entity"""
+        with self._get_session_context(db) as session:
             try:
-                # Get existing entity
                 entity = self.get_by_id_or_raise(entity_id, session)
-                
-                # Check if deletion is allowed
-                self._validate_deletion(entity, session)
-                
-                # Delete entity
                 session.delete(entity)
                 session.commit()
                 
-                self.logger.info(f"Deleted {self.model.__name__} with ID: {entity_id}")
+                self.logger.info(f"Deleted {self.model_class.__name__} entity {entity_id}")
                 return True
                 
-            except (NotFoundError, ValidationError):
-                raise
-            except SQLAlchemyError as e:
+            except Exception as e:
                 session.rollback()
-                self.logger.error(f"Failed to delete {self.model.__name__} {entity_id}: {e}")
-                raise DatabaseError(f"Failed to delete {self.model.__name__}")
-        
-        if db:
-            return _delete(db)
-        else:
-            with self.get_db_session() as session:
-                return _delete(session)
+                self.logger.error(f"Failed to delete {self.model_class.__name__} {entity_id}: {e}")
+                raise ServiceError(f"Failed to delete entity: {e}")
     
-    def list_entities(
-        self, 
-        filters: Optional[Dict[str, Any]] = None,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        order_by: Optional[str] = None,
-        db: Optional[Session] = None
-    ) -> List[ModelType]:
-        """
-        List entities with filtering, pagination, and sorting.
-        
-        Args:
-            filters: Optional filtering criteria
-            limit: Maximum number of results
-            offset: Number of results to skip
-            order_by: Field to order by
-            db: Optional database session
-            
-        Returns:
-            List of entity instances
-            
-        Raises:
-            DatabaseError: If database operation fails
-        """
-        def _list_entities(session: Session) -> List[ModelType]:
+    def count(self, db: Optional[Session] = None, filters: Optional[Dict[str, Any]] = None) -> int:
+        """Count entities with optional filtering"""
+        with self._get_session_context(db) as session:
             try:
-                query = session.query(self.model)
+                query = select(self.model_class)
                 
-                # Apply filters
+                # Apply filters if provided
                 if filters:
-                    query = self._apply_filters(query, filters)
+                    for key, value in filters.items():
+                        if hasattr(self.model_class, key):
+                            query = query.where(getattr(self.model_class, key) == value)
                 
-                # Apply ordering
-                if order_by:
-                    query = self._apply_ordering(query, order_by)
+                count = session.execute(query).scalars().all()
+                return len(count)
                 
-                # Apply pagination
-                if offset:
-                    query = query.offset(offset)
-                if limit:
-                    query = query.limit(limit)
-                
-                return query.all()
-                
-            except SQLAlchemyError as e:
-                self.logger.error(f"Failed to list {self.model.__name__}: {e}")
-                raise DatabaseError(f"Failed to list {self.model.__name__}")
-        
-        if db:
-            return _list_entities(db)
-        else:
-            with self.get_db_session() as session:
-                return _list_entities(session)
-    
-    def count(self, filters: Optional[Dict[str, Any]] = None, db: Optional[Session] = None) -> int:
-        """
-        Count entities with optional filtering.
-        
-        Args:
-            filters: Optional filtering criteria
-            db: Optional database session
-            
-        Returns:
-            Count of matching entities
-        """
-        def _count(session: Session) -> int:
-            try:
-                query = session.query(self.model)
-                
-                if filters:
-                    query = self._apply_filters(query, filters)
-                
-                return query.count()
-                
-            except SQLAlchemyError as e:
-                self.logger.error(f"Failed to count {self.model.__name__}: {e}")
-                raise DatabaseError(f"Failed to count {self.model.__name__}")
-        
-        if db:
-            return _count(db)
-        else:
-            with self.get_db_session() as session:
-                return _count(session)
-    
-    # Abstract methods that subclasses must implement
-    
-    @abstractmethod
-    def _validate_create_data(self, data: CreateSchemaType, db: Session) -> None:
-        """Validate data for entity creation."""
-        pass
-    
-    @abstractmethod
-    def _validate_update_data(self, entity: ModelType, data: UpdateSchemaType, db: Session) -> None:
-        """Validate data for entity update."""
-        pass
-    
-    @abstractmethod
-    def _create_entity(self, data: CreateSchemaType, db: Session) -> ModelType:
-        """Create entity instance from data."""
-        pass
-    
-    @abstractmethod
-    def _apply_updates(self, entity: ModelType, data: UpdateSchemaType, db: Session) -> ModelType:
-        """Apply updates to entity."""
-        pass
-    
-    # Optional methods that subclasses can override
-    
-    def _validate_deletion(self, entity: ModelType, db: Session) -> None:
-        """Validate if entity can be deleted. Override if needed."""
-        pass
-    
-    def _apply_filters(self, query, filters: Dict[str, Any]):
-        """Apply filters to query. Override for custom filtering."""
-        for field, value in filters.items():
-            if hasattr(self.model, field):
-                query = query.filter(getattr(self.model, field) == value)
-        return query
-    
-    def _apply_ordering(self, query, order_by: str):
-        """Apply ordering to query. Override for custom ordering."""
-        if hasattr(self.model, order_by):
-            query = query.order_by(getattr(self.model, order_by))
-        return query
+            except Exception as e:
+                self.logger.error(f"Failed to count {self.model_class.__name__} entities: {e}")
+                raise ServiceError(f"Failed to count entities: {e}")
     
     # Utility methods
     
-    def log_operation(self, operation: str, entity_id: Optional[str] = None, **kwargs):
-        """Log service operations for debugging and monitoring."""
-        details = f" ID: {entity_id}" if entity_id else ""
-        extra_info = f" {kwargs}" if kwargs else ""
-        self.logger.info(f"{operation} {self.model.__name__}{details}{extra_info}")
+    def _get_session_context(self, db: Optional[Session] = None):
+        """Get session context manager"""
+        if db is not None:
+            return self._existing_session_context(db)
+        else:
+            return self._new_session_context()
     
-    def validate_required_fields(self, data: Dict[str, Any], required_fields: List[str]) -> None:
-        """Validate that required fields are present in data."""
-        missing_fields = [field for field in required_fields if field not in data or data[field] is None]
-        if missing_fields:
-            raise ValidationError(f"Missing required fields: {', '.join(missing_fields)}")
+    def _existing_session_context(self, db: Session):
+        """Context manager for existing session"""
+        from contextlib import contextmanager
+        
+        @contextmanager
+        def session_context():
+            yield db
+        
+        return session_context()
     
-    def sanitize_string_field(self, value: Optional[str], max_length: Optional[int] = None) -> Optional[str]:
-        """Sanitize string fields by trimming whitespace and checking length."""
-        if value is None:
-            return None
+    def _new_session_context(self):
+        """Context manager for new session"""
+        from contextlib import contextmanager
         
-        sanitized = value.strip()
-        if not sanitized:
-            return None
+        @contextmanager
+        def session_context():
+            session = SessionLocal()
+            try:
+                yield session
+            finally:
+                session.close()
         
-        if max_length and len(sanitized) > max_length:
-            raise ValidationError(f"Field exceeds maximum length of {max_length} characters")
-        
-        return sanitized
-
-
-class ServiceRegistry:
-    """
-    Registry for managing service instances and dependencies.
-    Provides singleton access to services and handles initialization.
-    """
+        return session_context()
     
-    _instances: Dict[str, Any] = {}
+    def _get_primary_key_column(self) -> str:
+        """Get primary key column name"""
+        # Try common primary key patterns
+        if hasattr(self.model_class, 'id'):
+            return 'id'
+        elif hasattr(self.model_class, 'project_id'):
+            return 'project_id'
+        elif hasattr(self.model_class, 'chat_id'):
+            return 'chat_id'
+        elif hasattr(self.model_class, 'item_id'):
+            return 'item_id'
+        elif hasattr(self.model_class, 'message_id'):
+            return 'message_id'
+        elif hasattr(self.model_class, 'checkpoint_id'):
+            return 'checkpoint_id'
+        else:
+            # Fallback to first column
+            return list(self.model_class.__table__.columns.keys())[0]
     
-    @classmethod
-    def get_service(cls, service_class: Type) -> Any:
-        """Get service instance, creating if not exists."""
-        service_name = service_class.__name__
-        
-        if service_name not in cls._instances:
-            cls._instances[service_name] = service_class()
-        
-        return cls._instances[service_name]
+    # Validation methods
     
-    @classmethod
-    def clear_registry(cls):
-        """Clear all service instances (useful for testing)."""
-        cls._instances.clear()
-
-
-# Utility functions for common service operations
-
-def batch_operation(
-    items: List[Any], 
-    operation_func: callable, 
-    batch_size: int = 100,
-    logger: Optional[logging.Logger] = None
-) -> List[Any]:
-    """
-    Execute operation on items in batches for better performance.
+    def validate_create_data(self, data: Any) -> bool:
+        """Validate data for creation - override in subclasses"""
+        return True
     
-    Args:
-        items: List of items to process
-        operation_func: Function to apply to each batch
-        batch_size: Size of each batch
-        logger: Optional logger for progress tracking
-        
-    Returns:
-        List of results from all batches
-    """
-    results = []
-    total_batches = (len(items) + batch_size - 1) // batch_size
+    def validate_update_data(self, data: Any) -> bool:
+        """Validate data for updates - override in subclasses"""
+        return True
     
-    for i in range(0, len(items), batch_size):
-        batch = items[i:i + batch_size]
-        batch_num = (i // batch_size) + 1
-        
-        if logger:
-            logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} items)")
-        
-        batch_results = operation_func(batch)
-        results.extend(batch_results)
+    # Business logic hooks
     
-    return results
+    def before_create(self, data: Any, db: Session) -> Any:
+        """Hook called before entity creation - override in subclasses"""
+        return data
+    
+    def after_create(self, entity: ModelType, db: Session) -> None:
+        """Hook called after entity creation - override in subclasses"""
+        pass
+    
+    def before_update(self, entity: ModelType, data: Any, db: Session) -> Any:
+        """Hook called before entity update - override in subclasses"""
+        return data
+    
+    def after_update(self, entity: ModelType, db: Session) -> None:
+        """Hook called after entity update - override in subclasses"""
+        pass
+    
+    def before_delete(self, entity: ModelType, db: Session) -> None:
+        """Hook called before entity deletion - override in subclasses"""
+        pass
+    
+    def after_delete(self, entity_id: str, db: Session) -> None:
+        """Hook called after entity deletion - override in subclasses"""
+        pass
 
-
-def validate_uuid_format(uuid_string: str) -> bool:
-    """Validate that string is a valid UUID format."""
-    import re
-    uuid_pattern = re.compile(
-        r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-        re.IGNORECASE
-    )
-    return bool(uuid_pattern.match(uuid_string))
-
-
-def create_audit_log(
-    operation: str,
-    entity_type: str,
-    entity_id: str,
-    user_id: Optional[str] = None,
-    changes: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
-    """Create audit log entry for tracking operations."""
-    return {
-        'timestamp': datetime.utcnow().isoformat(),
-        'operation': operation,
-        'entity_type': entity_type,
-        'entity_id': entity_id,
-        'user_id': user_id,
-        'changes': changes or {}
-    }
+# Export main classes
+__all__ = [
+    'BaseService',
+    'ServiceRegistry',
+    'ModelType'
+]

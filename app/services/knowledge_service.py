@@ -29,13 +29,13 @@ from app.core.exceptions import (
 # Data schemas for type safety
 @dataclass
 class KnowledgeCreateData:
-    """Data structure for creating knowledge items."""
+    """Data structure for creating new knowledge items."""
     project_id: str
-    knowledge_type: str
     title: str
-    content: Optional[str] = None
-    source_file_name: Optional[str] = None
+    item_type: str  # ADD THIS LINE
+    content: Dict[str, Any]
     metadata: Optional[Dict[str, Any]] = None
+
 
 @dataclass
 class KnowledgeUpdateData:
@@ -762,8 +762,8 @@ class KnowledgeService(BaseService[KnowledgeItem]):
 
 # Service instance factory
 def get_knowledge_service() -> KnowledgeService:
-    """Get KnowledgeService instance from registry."""
-    return ServiceRegistry.get_service(KnowledgeService)
+    """Get knowledge service instance"""
+    return KnowledgeService()
 
 
 # Utility functions for knowledge management

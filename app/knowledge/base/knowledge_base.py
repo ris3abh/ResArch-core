@@ -1,476 +1,460 @@
 # app/knowledge/base/knowledge_base.py
 """
-Complete Knowledge Base implementation for SpinScribe
-Integrates document processing, vector storage, and semantic retrieval.
+Core Knowledge Base for SpinScribe
+Manages project-specific knowledge storage, retrieval, and processing.
 """
 
-from typing import Dict, List, Optional, Any, Union
+from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
-import uuid
-import json
+from dataclasses import dataclass
 import logging
-from pathlib import Path
+import json
+import uuid
 
-from sqlalchemy.orm import Session
-from app.database.connection import SessionLocal
 from app.database.models.knowledge_item import KnowledgeItem
-from app.core.config import settings
-
-# Import our new components
-from app.knowledge.processors.document_processor import (
-    DocumentProcessor, ProcessedDocument, DocumentChunk
-)
-from app.knowledge.storage.vector_storage import VectorStorage
+from app.database.models.project import Project
+from app.database.connection import SessionLocal
 from app.knowledge.retrievers.semantic_retriever import (
-    SemanticRetriever, RetrievalContext, EnrichedSearchResult
+    SemanticRetriever,
+    SearchResult,
+    SearchQuery
 )
+from app.core.exceptions import KnowledgeError, ValidationError, NotFoundError
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class KnowledgeStats:
+    """Statistics about project knowledge"""
+    total_items: int
+    content_samples: int
+    style_guides: int
+    marketing_materials: int
+    recent_additions: int
+    last_updated: Optional[datetime] = None
+
+@dataclass
+class BrandVoiceProfile:
+    """Brand voice analysis profile"""
+    primary_tone: str
+    secondary_tones: List[str]
+    vocabulary_patterns: List[str]
+    writing_style: str
+    target_audience: str
+    key_characteristics: List[str]
+    confidence_score: float
+
 class KnowledgeBase:
     """
-    Complete knowledge base for managing project-specific knowledge items.
-    
-    Integrates:
-    - Document processing and content extraction
-    - Vector embeddings and semantic search
-    - Traditional database storage and retrieval
-    - Intelligent knowledge retrieval
+    Central knowledge management system for a SpinScribe project.
+    Handles storage, retrieval, and analysis of project-specific knowledge.
     """
     
     def __init__(self, project_id: str):
         self.project_id = project_id
-        self.logger = logging.getLogger(f"{__name__}.{project_id}")
+        self.retriever = SemanticRetriever(project_id)
+        self._cache: Dict[str, Any] = {}
+        self._brand_voice_cache: Optional[BrandVoiceProfile] = None
         
-        # Initialize components
-        self.document_processor = DocumentProcessor(project_id)
-        self.vector_storage = VectorStorage(project_id)
-        self.semantic_retriever = SemanticRetriever(project_id)
-        
-        # Ensure storage directories exist
-        self._ensure_storage_directories()
-        
-        self.logger.info(f"Knowledge base initialized for project: {project_id}")
+        logger.info(f"KnowledgeBase initialized for project {project_id}")
     
-    def _ensure_storage_directories(self):
-        """Ensure storage directories exist for this project"""
-        base_path = Path(settings.storage_root_dir) / "knowledge" / self.project_id
-        
-        directories = [
-            base_path / "documents",
-            base_path / "analysis", 
-            base_path / "embeddings",
-            base_path / "templates"
-        ]
-        
-        for directory in directories:
-            directory.mkdir(parents=True, exist_ok=True)
+    # Core Knowledge Management
     
-    async def store_document(self, document_data: Dict[str, Any]) -> str:
-        """
-        Store a processed document in the knowledge base with full pipeline processing.
-        
-        Args:
-            document_data: Document information including content, metadata, etc.
-            
-        Returns:
-            Knowledge item ID
-        """
+    async def add_knowledge_item(
+        self, 
+        title: str, 
+        content: Dict[str, Any],
+        item_type: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> KnowledgeItem:
+        """Add a new knowledge item to the project"""
         try:
-            # Generate knowledge item ID
-            knowledge_id = str(uuid.uuid4())
+            # Validate inputs
+            if not title or not content:
+                raise ValidationError("Title and content are required")
+            
+            # Create knowledge item
+            knowledge_item = KnowledgeItem(
+                item_id=f"kb_{uuid.uuid4().hex[:12]}",
+                project_id=self.project_id,
+                title=title,
+                item_type=item_type,
+                content=content,
+                metadata=metadata or {},
+                created_at=datetime.utcnow()
+            )
             
             # Store in database
-            db = SessionLocal()
-            try:
-                knowledge_item = KnowledgeItem(
-                    knowledge_id=knowledge_id,
-                    project_id=self.project_id,
-                    knowledge_type=document_data.get("type", "document"),
-                    title=document_data.get("title", "Untitled"),
-                    content=document_data.get("content", ""),
-                    metadata=document_data.get("metadata", {}),
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow()
-                )
-                
+            with SessionLocal() as db:
                 db.add(knowledge_item)
                 db.commit()
                 db.refresh(knowledge_item)
-                
-                self.logger.info(f"Stored knowledge item: {knowledge_id}")
-                return knowledge_id
-                
-            finally:
-                db.close()
-                
-        except Exception as e:
-            self.logger.error(f"Failed to store document: {e}")
-            raise
-    
-    async def add_document_file(self, 
-                              file_path: Union[str, Path],
-                              knowledge_type: str = "document",
-                              metadata: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Add a document file with complete processing pipeline
-        
-        Args:
-            file_path: Path to document file
-            knowledge_type: Type of knowledge item
-            metadata: Additional metadata
             
-        Returns:
-            Knowledge item ID
-        """
-        try:
-            self.logger.info(f"Processing document file: {file_path}")
+            # Add to semantic retriever
+            await self.retriever.add_knowledge_item(knowledge_item)
             
-            # Step 1: Process document and extract content
-            processed_doc = await self.document_processor.process_file(
-                file_path=file_path,
-                knowledge_type=knowledge_type,
-                metadata=metadata
-            )
+            # Clear caches
+            self._clear_caches()
             
-            # Step 2: Chunk document for vector storage
-            chunks = self.document_processor.chunk_document(processed_doc)
-            
-            # Step 3: Generate embeddings and store vectors
-            vector_result = await self.vector_storage.process_and_store_document(
-                processed_doc=processed_doc,
-                chunks=chunks
-            )
-            
-            # Step 4: Store in database
-            document_data = {
-                "type": knowledge_type,
-                "title": processed_doc.title,
-                "content": processed_doc.content,
-                "metadata": {
-                    **processed_doc.metadata,
-                    "vector_storage": vector_result,
-                    "chunks_count": len(chunks)
-                }
-            }
-            
-            knowledge_id = await self.store_document(document_data)
-            
-            self.logger.info(f"Successfully added document: {knowledge_id}")
-            return knowledge_id
+            logger.info(f"Added knowledge item: {title}")
+            return knowledge_item
             
         except Exception as e:
-            self.logger.error(f"Failed to add document file: {e}")
-            raise
+            logger.error(f"Failed to add knowledge item: {e}")
+            raise KnowledgeError(f"Failed to add knowledge item: {e}")
     
-    async def add_url_content(self,
-                            url: str,
-                            knowledge_type: str = "web_content",
-                            metadata: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Add content from a URL with complete processing
-        
-        Args:
-            url: URL to process
-            knowledge_type: Type of knowledge item
-            metadata: Additional metadata
-            
-        Returns:
-            Knowledge item ID
-        """
+    async def search_knowledge(
+        self, 
+        query: str, 
+        limit: int = 10,
+        content_types: Optional[List[str]] = None,
+        min_score: float = 0.3
+    ) -> List[SearchResult]:
+        """Search knowledge using semantic retrieval"""
         try:
-            self.logger.info(f"Processing URL: {url}")
-            
-            # Process URL content
-            processed_doc = await self.document_processor.process_url(
-                url=url,
-                knowledge_type=knowledge_type,
-                metadata=metadata
-            )
-            
-            # Chunk and store
-            chunks = self.document_processor.chunk_document(processed_doc)
-            vector_result = await self.vector_storage.process_and_store_document(
-                processed_doc=processed_doc,
-                chunks=chunks
-            )
-            
-            # Store in database
-            document_data = {
-                "type": knowledge_type,
-                "title": processed_doc.title,
-                "content": processed_doc.content,
-                "metadata": {
-                    **processed_doc.metadata,
-                    "vector_storage": vector_result,
-                    "chunks_count": len(chunks)
-                }
-            }
-            
-            knowledge_id = await self.store_document(document_data)
-            
-            self.logger.info(f"Successfully added URL content: {knowledge_id}")
-            return knowledge_id
-            
-        except Exception as e:
-            self.logger.error(f"Failed to add URL content: {e}")
-            raise
-    
-    async def add_text_content(self,
-                             title: str,
-                             content: str,
-                             knowledge_type: str = "text",
-                             metadata: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Add text content directly with processing
-        
-        Args:
-            title: Content title
-            content: Text content
-            knowledge_type: Type of knowledge item
-            metadata: Additional metadata
-            
-        Returns:
-            Knowledge item ID
-        """
-        try:
-            # Create processed document structure
-            processed_doc = ProcessedDocument(
-                content=content,
-                title=title,
-                metadata=metadata or {},
-                file_hash=str(uuid.uuid4()),  # Generate unique hash
-                processing_time=0.0,
-                word_count=len(content.split()),
-                character_count=len(content)
-            )
-            
-            # Chunk and store in vector database
-            chunks = self.document_processor.chunk_document(processed_doc)
-            vector_result = await self.vector_storage.process_and_store_document(
-                processed_doc=processed_doc,
-                chunks=chunks
-            )
-            
-            # Store in database
-            document_data = {
-                "type": knowledge_type,
-                "title": title,
-                "content": content,
-                "metadata": {
-                    **(metadata or {}),
-                    "vector_storage": vector_result,
-                    "chunks_count": len(chunks),
-                    "direct_input": True
-                }
-            }
-            
-            knowledge_id = await self.store_document(document_data)
-            
-            self.logger.info(f"Successfully added text content: {knowledge_id}")
-            return knowledge_id
-            
-        except Exception as e:
-            self.logger.error(f"Failed to add text content: {e}")
-            raise
-    
-    async def query_knowledge(self,
-                            query: str,
-                            knowledge_types: Optional[List[str]] = None,
-                            limit: int = 10,
-                            include_context: bool = True) -> List[Dict[str, Any]]:
-        """
-        Query knowledge using semantic search
-        
-        Args:
-            query: Search query
-            knowledge_types: Filter by knowledge types
-            limit: Maximum results
-            include_context: Include chunk context
-            
-        Returns:
-            List of enriched search results
-        """
-        try:
-            # Create retrieval context
-            context = RetrievalContext(
+            search_query = SearchQuery(
                 query=query,
-                knowledge_types=knowledge_types
-            )
-            
-            # Perform semantic retrieval
-            result = await self.semantic_retriever.retrieve_knowledge(
-                context=context,
+                project_id=self.project_id,
                 limit=limit,
-                include_context=include_context
+                content_types=content_types,
+                min_score=min_score
             )
             
-            # Convert to dictionary format
-            return [r.to_dict() for r in result.results]
+            results = await self.retriever.search(search_query)
+            
+            logger.info(f"Knowledge search '{query}' returned {len(results)} results")
+            return results
             
         except Exception as e:
-            self.logger.error(f"Knowledge query failed: {e}")
-            return []
+            logger.error(f"Knowledge search failed: {e}")
+            raise KnowledgeError(f"Search failed: {e}")
     
-    async def find_similar_content(self,
-                                 reference_content: str,
-                                 limit: int = 5) -> List[Dict[str, Any]]:
-        """Find content similar to reference content"""
+    async def get_related_knowledge(
+        self, 
+        knowledge_item_id: str, 
+        limit: int = 5
+    ) -> List[SearchResult]:
+        """Get knowledge items related to a specific item"""
         try:
-            results = await self.semantic_retriever.find_similar_content(
-                reference_content=reference_content,
-                limit=limit
-            )
-            return [r.to_dict() for r in results]
+            results = await self.retriever.get_related_content(knowledge_item_id, limit)
+            
+            logger.info(f"Found {len(results)} related items for {knowledge_item_id}")
+            return results
             
         except Exception as e:
-            self.logger.error(f"Similar content search failed: {e}")
-            return []
+            logger.error(f"Failed to get related knowledge: {e}")
+            raise KnowledgeError(f"Failed to get related knowledge: {e}")
     
-    async def get_knowledge_by_type(self,
-                                  knowledge_type: str,
-                                  limit: int = 10) -> List[Dict[str, Any]]:
-        """Get knowledge items by type"""
+    async def update_knowledge_item(
+        self, 
+        item_id: str, 
+        updates: Dict[str, Any]
+    ) -> KnowledgeItem:
+        """Update an existing knowledge item"""
         try:
-            results = await self.semantic_retriever.retrieve_by_type(
-                knowledge_type=knowledge_type,
-                limit=limit
-            )
-            return [r.to_dict() for r in results]
-            
-        except Exception as e:
-            self.logger.error(f"Type-based retrieval failed: {e}")
-            return []
-    
-    async def delete_knowledge_item(self, knowledge_id: str) -> bool:
-        """Delete a knowledge item and its vectors"""
-        try:
-            db = SessionLocal()
-            try:
-                # Get item to find document_id for vector deletion
-                item = db.query(KnowledgeItem).filter(
-                    KnowledgeItem.knowledge_id == knowledge_id,
+            with SessionLocal() as db:
+                # Get existing item
+                knowledge_item = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.item_id == item_id,
                     KnowledgeItem.project_id == self.project_id
                 ).first()
                 
-                if not item:
-                    return False
+                if not knowledge_item:
+                    raise NotFoundError(f"Knowledge item {item_id} not found")
                 
-                # Delete vectors
-                document_id = item.metadata.get("file_hash") if item.metadata else knowledge_id
-                await self.vector_storage.delete_document(document_id)
+                # Apply updates
+                for key, value in updates.items():
+                    if hasattr(knowledge_item, key):
+                        setattr(knowledge_item, key, value)
                 
-                # Delete from database
-                db.delete(item)
+                knowledge_item.updated_at = datetime.utcnow()
+                
                 db.commit()
-                
-                self.logger.info(f"Deleted knowledge item: {knowledge_id}")
-                return True
-                
-            finally:
-                db.close()
-                
+                db.refresh(knowledge_item)
+            
+            # Update in semantic retriever
+            await self.retriever.update_knowledge_item(knowledge_item)
+            
+            # Clear caches
+            self._clear_caches()
+            
+            logger.info(f"Updated knowledge item: {item_id}")
+            return knowledge_item
+            
         except Exception as e:
-            self.logger.error(f"Failed to delete knowledge item: {e}")
-            return False
+            logger.error(f"Failed to update knowledge item: {e}")
+            raise KnowledgeError(f"Failed to update knowledge item: {e}")
     
-    async def get_knowledge_stats(self) -> Dict[str, Any]:
-        """Get comprehensive knowledge base statistics"""
+    async def remove_knowledge_item(self, item_id: str) -> bool:
+        """Remove a knowledge item"""
         try:
-            # Database stats
-            db = SessionLocal()
-            try:
+            with SessionLocal() as db:
+                # Remove from database
+                result = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.item_id == item_id,
+                    KnowledgeItem.project_id == self.project_id
+                ).delete()
+                
+                if result == 0:
+                    raise NotFoundError(f"Knowledge item {item_id} not found")
+                
+                db.commit()
+            
+            # Remove from semantic retriever
+            await self.retriever.remove_knowledge_item(item_id)
+            
+            # Clear caches
+            self._clear_caches()
+            
+            logger.info(f"Removed knowledge item: {item_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to remove knowledge item: {e}")
+            raise KnowledgeError(f"Failed to remove knowledge item: {e}")
+    
+    # Knowledge Analysis
+    
+    async def analyze_brand_voice(self, force_refresh: bool = False) -> BrandVoiceProfile:
+        """Analyze brand voice from content samples"""
+        if self._brand_voice_cache and not force_refresh:
+            return self._brand_voice_cache
+        
+        try:
+            # Get content samples
+            content_samples = await self.get_knowledge_by_type("content_sample")
+            
+            if not content_samples:
+                # Return default profile
+                profile = BrandVoiceProfile(
+                    primary_tone="professional",
+                    secondary_tones=["informative"],
+                    vocabulary_patterns=["clear", "concise"],
+                    writing_style="formal",
+                    target_audience="general",
+                    key_characteristics=["professional", "clear"],
+                    confidence_score=0.5
+                )
+            else:
+                # Analyze samples (simplified analysis)
+                profile = await self._analyze_content_samples(content_samples)
+            
+            # Cache the result
+            self._brand_voice_cache = profile
+            
+            logger.info(f"Brand voice analysis completed with {profile.confidence_score:.2f} confidence")
+            return profile
+            
+        except Exception as e:
+            logger.error(f"Brand voice analysis failed: {e}")
+            raise KnowledgeError(f"Brand voice analysis failed: {e}")
+    
+    async def get_style_guidelines(self) -> Dict[str, Any]:
+        """Get compiled style guidelines for the project"""
+        try:
+            # Get style guide items
+            style_guides = await self.get_knowledge_by_type("style_guide")
+            
+            # Get brand voice analysis
+            brand_voice = await self.analyze_brand_voice()
+            
+            # Compile guidelines
+            guidelines = {
+                "brand_voice": {
+                    "primary_tone": brand_voice.primary_tone,
+                    "secondary_tones": brand_voice.secondary_tones,
+                    "writing_style": brand_voice.writing_style,
+                    "target_audience": brand_voice.target_audience,
+                    "key_characteristics": brand_voice.key_characteristics
+                },
+                "style_rules": [],
+                "vocabulary_preferences": brand_voice.vocabulary_patterns,
+                "content_structure": "standard",
+                "quality_standards": "high"
+            }
+            
+            # Add explicit style rules from style guides
+            for guide in style_guides:
+                if isinstance(guide.content, dict):
+                    if "rules" in guide.content:
+                        guidelines["style_rules"].extend(guide.content["rules"])
+                    if "vocabulary" in guide.content:
+                        guidelines["vocabulary_preferences"].extend(guide.content["vocabulary"])
+            
+            logger.info("Compiled style guidelines")
+            return guidelines
+            
+        except Exception as e:
+            logger.error(f"Failed to compile style guidelines: {e}")
+            raise KnowledgeError(f"Failed to compile style guidelines: {e}")
+    
+    # Knowledge Retrieval
+    
+    async def get_knowledge_by_type(self, item_type: str) -> List[KnowledgeItem]:
+        """Get all knowledge items of a specific type"""
+        try:
+            with SessionLocal() as db:
+                items = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.project_id == self.project_id,
+                    KnowledgeItem.item_type == item_type
+                ).order_by(KnowledgeItem.created_at.desc()).all()
+            
+            logger.info(f"Retrieved {len(items)} items of type {item_type}")
+            return items
+            
+        except Exception as e:
+            logger.error(f"Failed to get knowledge by type: {e}")
+            raise KnowledgeError(f"Failed to get knowledge by type: {e}")
+    
+    async def get_all_knowledge(self, limit: Optional[int] = None) -> List[KnowledgeItem]:
+        """Get all knowledge items for the project"""
+        try:
+            with SessionLocal() as db:
+                query = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.project_id == self.project_id
+                ).order_by(KnowledgeItem.created_at.desc())
+                
+                if limit:
+                    query = query.limit(limit)
+                
+                items = query.all()
+            
+            logger.info(f"Retrieved {len(items)} total knowledge items")
+            return items
+            
+        except Exception as e:
+            logger.error(f"Failed to get all knowledge: {e}")
+            raise KnowledgeError(f"Failed to get all knowledge: {e}")
+    
+    async def get_knowledge_stats(self) -> KnowledgeStats:
+        """Get statistics about project knowledge"""
+        try:
+            with SessionLocal() as db:
+                # Get counts by type
                 total_items = db.query(KnowledgeItem).filter(
                     KnowledgeItem.project_id == self.project_id
                 ).count()
                 
-                # Group by type
-                items = db.query(KnowledgeItem).filter(
+                content_samples = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.project_id == self.project_id,
+                    KnowledgeItem.item_type == "content_sample"
+                ).count()
+                
+                style_guides = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.project_id == self.project_id,
+                    KnowledgeItem.item_type == "style_guide"
+                ).count()
+                
+                marketing_materials = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.project_id == self.project_id,
+                    KnowledgeItem.item_type == "marketing_material"
+                ).count()
+                
+                # Get recent additions (last 7 days)
+                week_ago = datetime.utcnow().replace(day=datetime.utcnow().day - 7)
+                recent_additions = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.project_id == self.project_id,
+                    KnowledgeItem.created_at >= week_ago
+                ).count()
+                
+                # Get last updated
+                latest_item = db.query(KnowledgeItem).filter(
                     KnowledgeItem.project_id == self.project_id
-                ).all()
+                ).order_by(KnowledgeItem.updated_at.desc()).first()
                 
-                by_type = {}
-                total_content_size = 0
-                
-                for item in items:
-                    k_type = item.knowledge_type
-                    by_type[k_type] = by_type.get(k_type, 0) + 1
-                    
-                    if item.content:
-                        total_content_size += len(item.content)
+                last_updated = latest_item.updated_at if latest_item else None
             
-            finally:
-                db.close()
+            stats = KnowledgeStats(
+                total_items=total_items,
+                content_samples=content_samples,
+                style_guides=style_guides,
+                marketing_materials=marketing_materials,
+                recent_additions=recent_additions,
+                last_updated=last_updated
+            )
             
-            # Vector storage stats
-            vector_stats = await self.vector_storage.get_storage_stats()
-            
-            # Retrieval stats
-            retrieval_stats = await self.semantic_retriever.get_retrieval_stats()
-            
-            return {
-                "database_stats": {
-                    "total_items": total_items,
-                    "by_type": by_type,
-                    "total_content_size": total_content_size
-                },
-                "vector_stats": vector_stats,
-                "retrieval_stats": retrieval_stats,
-                "last_updated": datetime.utcnow().isoformat()
-            }
+            logger.info(f"Generated knowledge stats: {total_items} total items")
+            return stats
             
         except Exception as e:
-            self.logger.error(f"Failed to get stats: {e}")
-            return {}
+            logger.error(f"Failed to get knowledge stats: {e}")
+            raise KnowledgeError(f"Failed to get knowledge stats: {e}")
     
-    async def health_check(self) -> Dict[str, Any]:
-        """Perform health check on all components"""
-        try:
-            # Check vector storage health
-            vector_health = await self.vector_storage.health_check()
-            
-            # Check database connectivity
-            db_health = True
-            try:
-                db = SessionLocal()
-                db.execute("SELECT 1")
-                db.close()
-            except Exception:
-                db_health = False
-            
-            # Overall health
-            overall_health = vector_health.get("overall_health", False) and db_health
-            
-            return {
-                "overall_health": overall_health,
-                "database_health": db_health,
-                "vector_storage_health": vector_health,
-                "project_id": self.project_id,
-                "check_time": datetime.utcnow().isoformat()
-            }
-            
-        except Exception as e:
-            return {
-                "overall_health": False,
-                "error": str(e),
-                "check_time": datetime.utcnow().isoformat()
-            }
-
-# Factory function
-def create_knowledge_base(project_id: str) -> KnowledgeBase:
-    """
-    Factory function to create a KnowledgeBase instance
+    # Utility Methods
     
-    Args:
-        project_id: Project ID for knowledge base
+    async def _analyze_content_samples(self, samples: List[KnowledgeItem]) -> BrandVoiceProfile:
+        """Analyze content samples to extract brand voice (simplified implementation)"""
+        # This is a simplified analysis - in production this would use NLP
         
-    Returns:
-        Initialized KnowledgeBase
-    """
-    return KnowledgeBase(project_id)
+        # Aggregate content
+        all_content = []
+        for sample in samples:
+            if isinstance(sample.content, dict) and "text" in sample.content:
+                all_content.append(sample.content["text"])
+            elif isinstance(sample.content, str):
+                all_content.append(sample.content)
+        
+        combined_text = " ".join(all_content).lower()
+        
+        # Simple keyword-based analysis
+        tone_indicators = {
+            "professional": ["professional", "business", "corporate", "formal"],
+            "casual": ["casual", "friendly", "relaxed", "informal"],
+            "technical": ["technical", "detailed", "precise", "specific"],
+            "creative": ["creative", "innovative", "unique", "original"]
+        }
+        
+        tone_scores = {}
+        for tone, keywords in tone_indicators.items():
+            score = sum(1 for keyword in keywords if keyword in combined_text)
+            tone_scores[tone] = score
+        
+        # Determine primary tone
+        primary_tone = max(tone_scores, key=tone_scores.get) if tone_scores else "professional"
+        
+        # Get secondary tones
+        sorted_tones = sorted(tone_scores.items(), key=lambda x: x[1], reverse=True)
+        secondary_tones = [tone for tone, score in sorted_tones[1:3] if score > 0]
+        
+        return BrandVoiceProfile(
+            primary_tone=primary_tone,
+            secondary_tones=secondary_tones,
+            vocabulary_patterns=["clear", "engaging", "professional"],
+            writing_style="balanced",
+            target_audience="business professionals",
+            key_characteristics=[primary_tone, "well-structured"],
+            confidence_score=0.8 if len(samples) >= 3 else 0.6
+        )
+    
+    def _clear_caches(self):
+        """Clear internal caches"""
+        self._cache.clear()
+        self._brand_voice_cache = None
+    
+    async def get_collection_info(self) -> Dict[str, Any]:
+        """Get information about the knowledge collection"""
+        try:
+            stats = await self.get_knowledge_stats()
+            retriever_stats = await self.retriever.get_collection_stats()
+            
+            return {
+                "project_id": self.project_id,
+                "knowledge_stats": stats,
+                "retriever_stats": retriever_stats,
+                "status": "active"
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get collection info: {e}")
+            return {
+                "project_id": self.project_id,
+                "status": "error",
+                "error": str(e)
+            }
 
 # Export main classes
 __all__ = [
     'KnowledgeBase',
-    'create_knowledge_base'
+    'KnowledgeStats',
+    'BrandVoiceProfile'
 ]

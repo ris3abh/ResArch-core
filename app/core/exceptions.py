@@ -500,3 +500,7 @@ class ErrorCodes:
     
     # Configuration errors
     CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+
+class CoordinationError(SpinScribeError):
+    """Error in agent coordination operations."""
+    pass

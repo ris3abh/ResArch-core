@@ -4,6 +4,7 @@ Database connection and configuration with proper SQLAlchemy 2.0 setup.
 Updated to include type annotation mapping and modern best practices.
 """
 from sqlalchemy import create_engine, JSON
+from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from sqlalchemy.pool import StaticPool
 from app.core.config import settings
@@ -169,3 +170,17 @@ def reset_database():
     except Exception as e:
         logger.error(f"Failed to reset database: {e}")
         raise
+
+from contextlib import contextmanager
+
+@contextmanager
+def get_db_session(db: Session = None):
+    """Get database session with context manager for automatic cleanup"""
+    if db is not None:
+        yield db
+    else:
+        session = SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
