@@ -1,12 +1,7 @@
-# app/knowledge/base/knowledge_base.py - FIXED to remove duplicate model
+# app/knowledge/base/knowledge_base.py
 """
-Core Knowledge Base implementation for SpinScribe
-
-Manages storage and retrieval of project-specific knowledge items including:
-- Client content samples
-- Brand guidelines and style guides  
-- Analysis results and insights
-- Content templates and examples
+Complete Knowledge Base implementation for SpinScribe
+Integrates document processing, vector storage, and semantic retrieval.
 """
 
 from typing import Dict, List, Optional, Any, Union
@@ -18,25 +13,44 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 from app.database.connection import SessionLocal
-from app.database.models.knowledge_item import KnowledgeItem  # Import the correct model
+from app.database.models.knowledge_item import KnowledgeItem
 from app.core.config import settings
+
+# Import our new components
+from app.knowledge.processors.document_processor import (
+    DocumentProcessor, ProcessedDocument, DocumentChunk
+)
+from app.knowledge.storage.vector_storage import VectorStorage
+from app.knowledge.retrievers.semantic_retriever import (
+    SemanticRetriever, RetrievalContext, EnrichedSearchResult
+)
 
 logger = logging.getLogger(__name__)
 
 class KnowledgeBase:
     """
-    Core knowledge base for managing project-specific knowledge items.
+    Complete knowledge base for managing project-specific knowledge items.
     
-    Handles storage, retrieval, and management of all knowledge related to a project,
-    including content samples, style guides, analysis results, and templates.
+    Integrates:
+    - Document processing and content extraction
+    - Vector embeddings and semantic search
+    - Traditional database storage and retrieval
+    - Intelligent knowledge retrieval
     """
     
     def __init__(self, project_id: str):
         self.project_id = project_id
         self.logger = logging.getLogger(f"{__name__}.{project_id}")
         
+        # Initialize components
+        self.document_processor = DocumentProcessor(project_id)
+        self.vector_storage = VectorStorage(project_id)
+        self.semantic_retriever = SemanticRetriever(project_id)
+        
         # Ensure storage directories exist
         self._ensure_storage_directories()
+        
+        self.logger.info(f"Knowledge base initialized for project: {project_id}")
     
     def _ensure_storage_directories(self):
         """Ensure storage directories exist for this project"""
@@ -54,335 +68,409 @@ class KnowledgeBase:
     
     async def store_document(self, document_data: Dict[str, Any]) -> str:
         """
-        Store a processed document in the knowledge base.
+        Store a processed document in the knowledge base with full pipeline processing.
         
         Args:
-            document_data: Processed document information
+            document_data: Document information including content, metadata, etc.
             
         Returns:
-            knowledge_id: Unique identifier for the stored item
+            Knowledge item ID
         """
         try:
-            db = SessionLocal()
+            # Generate knowledge item ID
+            knowledge_id = str(uuid.uuid4())
             
-            # Use the correct factory method from the model
-            knowledge_item = KnowledgeItem.create_content_sample(
-                project_id=self.project_id,
-                title=document_data.get("title", "Untitled Document"),
-                content=document_data.get("content"),
-                category=document_data.get("category"),
-                metadata=document_data.get("metadata", {})  # This gets mapped to meta_data in the factory method
+            # Store in database
+            db = SessionLocal()
+            try:
+                knowledge_item = KnowledgeItem(
+                    knowledge_id=knowledge_id,
+                    project_id=self.project_id,
+                    knowledge_type=document_data.get("type", "document"),
+                    title=document_data.get("title", "Untitled"),
+                    content=document_data.get("content", ""),
+                    metadata=document_data.get("metadata", {}),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+                
+                db.add(knowledge_item)
+                db.commit()
+                db.refresh(knowledge_item)
+                
+                self.logger.info(f"Stored knowledge item: {knowledge_id}")
+                return knowledge_id
+                
+            finally:
+                db.close()
+                
+        except Exception as e:
+            self.logger.error(f"Failed to store document: {e}")
+            raise
+    
+    async def add_document_file(self, 
+                              file_path: Union[str, Path],
+                              knowledge_type: str = "document",
+                              metadata: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Add a document file with complete processing pipeline
+        
+        Args:
+            file_path: Path to document file
+            knowledge_type: Type of knowledge item
+            metadata: Additional metadata
+            
+        Returns:
+            Knowledge item ID
+        """
+        try:
+            self.logger.info(f"Processing document file: {file_path}")
+            
+            # Step 1: Process document and extract content
+            processed_doc = await self.document_processor.process_file(
+                file_path=file_path,
+                knowledge_type=knowledge_type,
+                metadata=metadata
             )
             
-            # Override file path if provided
-            if document_data.get("file_path"):
-                knowledge_item.file_path = document_data.get("file_path")
+            # Step 2: Chunk document for vector storage
+            chunks = self.document_processor.chunk_document(processed_doc)
             
-            db.add(knowledge_item)
-            db.commit()
-            db.refresh(knowledge_item)
+            # Step 3: Generate embeddings and store vectors
+            vector_result = await self.vector_storage.process_and_store_document(
+                processed_doc=processed_doc,
+                chunks=chunks
+            )
             
-            knowledge_id = knowledge_item.knowledge_id
-            self.logger.info(f"Stored document: {knowledge_id}")
+            # Step 4: Store in database
+            document_data = {
+                "type": knowledge_type,
+                "title": processed_doc.title,
+                "content": processed_doc.content,
+                "metadata": {
+                    **processed_doc.metadata,
+                    "vector_storage": vector_result,
+                    "chunks_count": len(chunks)
+                }
+            }
             
-            db.close()
+            knowledge_id = await self.store_document(document_data)
+            
+            self.logger.info(f"Successfully added document: {knowledge_id}")
             return knowledge_id
             
         except Exception as e:
-            self.logger.error(f"Error storing document: {e}")
-            if 'db' in locals():
-                db.rollback()
-                db.close()
+            self.logger.error(f"Failed to add document file: {e}")
             raise
     
-    async def get_knowledge_item(self, knowledge_id: str) -> Optional[Dict[str, Any]]:
+    async def add_url_content(self,
+                            url: str,
+                            knowledge_type: str = "web_content",
+                            metadata: Optional[Dict[str, Any]] = None) -> str:
         """
-        Retrieve a specific knowledge item.
+        Add content from a URL with complete processing
         
         Args:
-            knowledge_id: Unique identifier for the knowledge item
+            url: URL to process
+            knowledge_type: Type of knowledge item
+            metadata: Additional metadata
             
         Returns:
-            Knowledge item data or None if not found
+            Knowledge item ID
         """
         try:
-            db = SessionLocal()
+            self.logger.info(f"Processing URL: {url}")
             
-            item = db.query(KnowledgeItem).filter(
-                KnowledgeItem.knowledge_id == knowledge_id,
-                KnowledgeItem.project_id == self.project_id
-            ).first()
-            
-            result = item.to_dict() if item else None
-            db.close()
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Error retrieving knowledge item {knowledge_id}: {e}")
-            if 'db' in locals():
-                db.close()
-            return None
-    
-    async def list_knowledge_items(self, 
-                                  item_type: str = None,
-                                  limit: int = 50,
-                                  offset: int = 0) -> List[Dict[str, Any]]:
-        """
-        List knowledge items for the project.
-        
-        Args:
-            item_type: Filter by item type (content_sample, brand_guide, etc.)
-            limit: Maximum number of items to return
-            offset: Number of items to skip
-            
-        Returns:
-            List of knowledge items
-        """
-        try:
-            db = SessionLocal()
-            
-            query = db.query(KnowledgeItem).filter(
-                KnowledgeItem.project_id == self.project_id
+            # Process URL content
+            processed_doc = await self.document_processor.process_url(
+                url=url,
+                knowledge_type=knowledge_type,
+                metadata=metadata
             )
             
-            if item_type:
-                query = query.filter(KnowledgeItem.item_type == item_type)
-            
-            items = query.order_by(KnowledgeItem.created_at.desc()).offset(offset).limit(limit).all()
-            
-            result = [item.to_dict() for item in items]
-            db.close()
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Error listing knowledge items: {e}")
-            if 'db' in locals():
-                db.close()
-            return []
-    
-    async def store_style_analysis(self, document_id: str, analysis: Dict[str, Any]) -> str:
-        """
-        Store style analysis results for a document.
-        
-        Args:
-            document_id: ID of the document that was analyzed
-            analysis: Style analysis results
-            
-        Returns:
-            knowledge_id: ID of the stored analysis
-        """
-        try:
-            db = SessionLocal()
-            
-            # Create style analysis knowledge item
-            analysis_item = KnowledgeItem.create_style_analysis(
-                project_id=self.project_id,
-                title=f"Style Analysis - {analysis.get('title', 'Document')}",
-                analysis_results=analysis,
-                source_content_id=document_id
+            # Chunk and store
+            chunks = self.document_processor.chunk_document(processed_doc)
+            vector_result = await self.vector_storage.process_and_store_document(
+                processed_doc=processed_doc,
+                chunks=chunks
             )
             
-            db.add(analysis_item)
-            db.commit()
-            db.refresh(analysis_item)
+            # Store in database
+            document_data = {
+                "type": knowledge_type,
+                "title": processed_doc.title,
+                "content": processed_doc.content,
+                "metadata": {
+                    **processed_doc.metadata,
+                    "vector_storage": vector_result,
+                    "chunks_count": len(chunks)
+                }
+            }
             
-            knowledge_id = analysis_item.knowledge_id
-            self.logger.info(f"Stored style analysis: {knowledge_id}")
+            knowledge_id = await self.store_document(document_data)
             
-            db.close()
+            self.logger.info(f"Successfully added URL content: {knowledge_id}")
             return knowledge_id
             
         except Exception as e:
-            self.logger.error(f"Error storing style analysis: {e}")
-            if 'db' in locals():
-                db.rollback()
-                db.close()
+            self.logger.error(f"Failed to add URL content: {e}")
             raise
     
-    async def update_knowledge_item(self, knowledge_id: str, updates: Dict[str, Any]) -> bool:
+    async def add_text_content(self,
+                             title: str,
+                             content: str,
+                             knowledge_type: str = "text",
+                             metadata: Optional[Dict[str, Any]] = None) -> str:
         """
-        Update a knowledge item.
+        Add text content directly with processing
         
         Args:
-            knowledge_id: ID of the item to update
-            updates: Dictionary of fields to update
+            title: Content title
+            content: Text content
+            knowledge_type: Type of knowledge item
+            metadata: Additional metadata
             
         Returns:
-            True if successful, False otherwise
+            Knowledge item ID
         """
         try:
-            db = SessionLocal()
+            # Create processed document structure
+            processed_doc = ProcessedDocument(
+                content=content,
+                title=title,
+                metadata=metadata or {},
+                file_hash=str(uuid.uuid4()),  # Generate unique hash
+                processing_time=0.0,
+                word_count=len(content.split()),
+                character_count=len(content)
+            )
             
-            item = db.query(KnowledgeItem).filter(
-                KnowledgeItem.knowledge_id == knowledge_id,
-                KnowledgeItem.project_id == self.project_id
-            ).first()
+            # Chunk and store in vector database
+            chunks = self.document_processor.chunk_document(processed_doc)
+            vector_result = await self.vector_storage.process_and_store_document(
+                processed_doc=processed_doc,
+                chunks=chunks
+            )
             
-            if not item:
-                db.close()
-                return False
-            
-            # Update allowed fields
-            allowed_fields = ['title', 'content', 'processing_status', 'is_active']
-            for field, value in updates.items():
-                # Handle 'metadata' key by mapping to 'meta_data' column
-                if field == 'metadata':
-                    setattr(item, 'meta_data', value)
-                elif field in allowed_fields and hasattr(item, field):
-                    setattr(item, field, value)
-            
-            db.commit()
-            db.close()
-            
-            self.logger.info(f"Updated knowledge item: {knowledge_id}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error updating knowledge item {knowledge_id}: {e}")
-            if 'db' in locals():
-                db.rollback()
-                db.close()
-            return False
-    
-    async def delete_knowledge_item(self, knowledge_id: str) -> bool:
-        """
-        Delete a knowledge item.
-        
-        Args:
-            knowledge_id: ID of the item to delete
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            db = SessionLocal()
-            
-            item = db.query(KnowledgeItem).filter(
-                KnowledgeItem.knowledge_id == knowledge_id,
-                KnowledgeItem.project_id == self.project_id
-            ).first()
-            
-            if not item:
-                db.close()
-                return False
-            
-            db.delete(item)
-            db.commit()
-            db.close()
-            
-            self.logger.info(f"Deleted knowledge item: {knowledge_id}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error deleting knowledge item {knowledge_id}: {e}")
-            if 'db' in locals():
-                db.rollback()
-                db.close()
-            return False
-    
-    async def get_project_statistics(self) -> Dict[str, Any]:
-        """
-        Get statistics about the project's knowledge base.
-        
-        Returns:
-            Dictionary with knowledge base statistics
-        """
-        try:
-            db = SessionLocal()
-            
-            # Count by item type
-            type_counts = {}
-            types = db.query(KnowledgeItem.item_type).filter(
-                KnowledgeItem.project_id == self.project_id
-            ).distinct().all()
-            
-            for (item_type,) in types:
-                count = db.query(KnowledgeItem).filter(
-                    KnowledgeItem.project_id == self.project_id,
-                    KnowledgeItem.item_type == item_type
-                ).count()
-                type_counts[item_type] = count
-            
-            # Total count
-            total_items = db.query(KnowledgeItem).filter(
-                KnowledgeItem.project_id == self.project_id
-            ).count()
-            
-            # Most recent addition
-            most_recent = db.query(KnowledgeItem).filter(
-                KnowledgeItem.project_id == self.project_id
-            ).order_by(KnowledgeItem.created_at.desc()).first()
-            
-            db.close()
-            
-            return {
-                "project_id": self.project_id,
-                "total_items": total_items,
-                "items_by_type": type_counts,
-                "most_recent_addition": most_recent.created_at.isoformat() if most_recent else None
+            # Store in database
+            document_data = {
+                "type": knowledge_type,
+                "title": title,
+                "content": content,
+                "metadata": {
+                    **(metadata or {}),
+                    "vector_storage": vector_result,
+                    "chunks_count": len(chunks),
+                    "direct_input": True
+                }
             }
             
+            knowledge_id = await self.store_document(document_data)
+            
+            self.logger.info(f"Successfully added text content: {knowledge_id}")
+            return knowledge_id
+            
         except Exception as e:
-            self.logger.error(f"Error getting project statistics: {e}")
-            if 'db' in locals():
-                db.close()
-            return {
-                "project_id": self.project_id,
-                "total_items": 0,
-                "items_by_type": {},
-                "error": str(e)
-            }
+            self.logger.error(f"Failed to add text content: {e}")
+            raise
     
-    async def search_knowledge(self, 
-                             query: str, 
-                             item_types: List[str] = None,
-                             limit: int = 10) -> List[Dict[str, Any]]:
+    async def query_knowledge(self,
+                            query: str,
+                            knowledge_types: Optional[List[str]] = None,
+                            limit: int = 10,
+                            include_context: bool = True) -> List[Dict[str, Any]]:
         """
-        Search knowledge items by content.
+        Query knowledge using semantic search
         
         Args:
             query: Search query
-            item_types: Filter by item types
-            limit: Maximum results to return
+            knowledge_types: Filter by knowledge types
+            limit: Maximum results
+            include_context: Include chunk context
             
         Returns:
-            List of matching knowledge items
+            List of enriched search results
         """
         try:
-            db = SessionLocal()
-            
-            # Basic text search (this can be enhanced with vector search later)
-            query_filter = db.query(KnowledgeItem).filter(
-                KnowledgeItem.project_id == self.project_id,
-                KnowledgeItem.is_active == True
+            # Create retrieval context
+            context = RetrievalContext(
+                query=query,
+                knowledge_types=knowledge_types
             )
             
-            # Add text search
-            if query:
-                query_filter = query_filter.filter(
-                    KnowledgeItem.content.contains(query) |
-                    KnowledgeItem.title.contains(query)
-                )
+            # Perform semantic retrieval
+            result = await self.semantic_retriever.retrieve_knowledge(
+                context=context,
+                limit=limit,
+                include_context=include_context
+            )
             
-            # Filter by item types
-            if item_types:
-                query_filter = query_filter.filter(
-                    KnowledgeItem.item_type.in_(item_types)
-                )
-            
-            items = query_filter.order_by(
-                KnowledgeItem.created_at.desc()
-            ).limit(limit).all()
-            
-            result = [item.to_dict() for item in items]
-            db.close()
-            
-            return result
+            # Convert to dictionary format
+            return [r.to_dict() for r in result.results]
             
         except Exception as e:
-            self.logger.error(f"Error searching knowledge: {e}")
-            if 'db' in locals():
-                db.close()
+            self.logger.error(f"Knowledge query failed: {e}")
             return []
+    
+    async def find_similar_content(self,
+                                 reference_content: str,
+                                 limit: int = 5) -> List[Dict[str, Any]]:
+        """Find content similar to reference content"""
+        try:
+            results = await self.semantic_retriever.find_similar_content(
+                reference_content=reference_content,
+                limit=limit
+            )
+            return [r.to_dict() for r in results]
+            
+        except Exception as e:
+            self.logger.error(f"Similar content search failed: {e}")
+            return []
+    
+    async def get_knowledge_by_type(self,
+                                  knowledge_type: str,
+                                  limit: int = 10) -> List[Dict[str, Any]]:
+        """Get knowledge items by type"""
+        try:
+            results = await self.semantic_retriever.retrieve_by_type(
+                knowledge_type=knowledge_type,
+                limit=limit
+            )
+            return [r.to_dict() for r in results]
+            
+        except Exception as e:
+            self.logger.error(f"Type-based retrieval failed: {e}")
+            return []
+    
+    async def delete_knowledge_item(self, knowledge_id: str) -> bool:
+        """Delete a knowledge item and its vectors"""
+        try:
+            db = SessionLocal()
+            try:
+                # Get item to find document_id for vector deletion
+                item = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.knowledge_id == knowledge_id,
+                    KnowledgeItem.project_id == self.project_id
+                ).first()
+                
+                if not item:
+                    return False
+                
+                # Delete vectors
+                document_id = item.metadata.get("file_hash") if item.metadata else knowledge_id
+                await self.vector_storage.delete_document(document_id)
+                
+                # Delete from database
+                db.delete(item)
+                db.commit()
+                
+                self.logger.info(f"Deleted knowledge item: {knowledge_id}")
+                return True
+                
+            finally:
+                db.close()
+                
+        except Exception as e:
+            self.logger.error(f"Failed to delete knowledge item: {e}")
+            return False
+    
+    async def get_knowledge_stats(self) -> Dict[str, Any]:
+        """Get comprehensive knowledge base statistics"""
+        try:
+            # Database stats
+            db = SessionLocal()
+            try:
+                total_items = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.project_id == self.project_id
+                ).count()
+                
+                # Group by type
+                items = db.query(KnowledgeItem).filter(
+                    KnowledgeItem.project_id == self.project_id
+                ).all()
+                
+                by_type = {}
+                total_content_size = 0
+                
+                for item in items:
+                    k_type = item.knowledge_type
+                    by_type[k_type] = by_type.get(k_type, 0) + 1
+                    
+                    if item.content:
+                        total_content_size += len(item.content)
+            
+            finally:
+                db.close()
+            
+            # Vector storage stats
+            vector_stats = await self.vector_storage.get_storage_stats()
+            
+            # Retrieval stats
+            retrieval_stats = await self.semantic_retriever.get_retrieval_stats()
+            
+            return {
+                "database_stats": {
+                    "total_items": total_items,
+                    "by_type": by_type,
+                    "total_content_size": total_content_size
+                },
+                "vector_stats": vector_stats,
+                "retrieval_stats": retrieval_stats,
+                "last_updated": datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get stats: {e}")
+            return {}
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """Perform health check on all components"""
+        try:
+            # Check vector storage health
+            vector_health = await self.vector_storage.health_check()
+            
+            # Check database connectivity
+            db_health = True
+            try:
+                db = SessionLocal()
+                db.execute("SELECT 1")
+                db.close()
+            except Exception:
+                db_health = False
+            
+            # Overall health
+            overall_health = vector_health.get("overall_health", False) and db_health
+            
+            return {
+                "overall_health": overall_health,
+                "database_health": db_health,
+                "vector_storage_health": vector_health,
+                "project_id": self.project_id,
+                "check_time": datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            return {
+                "overall_health": False,
+                "error": str(e),
+                "check_time": datetime.utcnow().isoformat()
+            }
+
+# Factory function
+def create_knowledge_base(project_id: str) -> KnowledgeBase:
+    """
+    Factory function to create a KnowledgeBase instance
+    
+    Args:
+        project_id: Project ID for knowledge base
+        
+    Returns:
+        Initialized KnowledgeBase
+    """
+    return KnowledgeBase(project_id)
+
+# Export main classes
+__all__ = [
+    'KnowledgeBase',
+    'create_knowledge_base'
+]

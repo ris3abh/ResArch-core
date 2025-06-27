@@ -8,638 +8,606 @@ managing task assignment, progress tracking, and human checkpoints.
 """
 
 import asyncio
-import logging
-from typing import Dict, List, Any, Optional, Union
-from datetime import datetime, timedelta
-from enum import Enum
 import json
+import logging
+from datetime import datetime
+from typing import Dict, List, Any, Optional, Tuple
+from enum import Enum
+from dataclasses import dataclass, asdict
 
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
-from camel.tasks import Task, TaskManager
-from camel.societies.workforce import Workforce
-from camel.types import TaskState
+from camel.models import ModelFactory
+from camel.types import ModelPlatformType, ModelType, RoleType
+from camel.configs import ChatGPTConfig
 
-from app.agents.base.agent_factory import agent_factory, AgentType
+from app.agents.base.agent_factory import AgentType
 from app.database.connection import SessionLocal
 from app.database.models.project import Project
 from app.database.models.chat_instance import ChatInstance
 from app.database.models.human_checkpoint import HumanCheckpoint
-from app.knowledge.base.knowledge_base import KnowledgeBase
+from app.core.config import settings
 
+# Set up logging
 logger = logging.getLogger(__name__)
 
-class WorkflowState(Enum):
-    """Workflow states for content creation process"""
-    INITIALIZING = "initializing"
+class WorkflowStatus(Enum):
+    """Workflow status enumeration"""
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    WAITING_HUMAN = "waiting_human"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+class TaskType(Enum):
+    """Task type enumeration"""
     STYLE_ANALYSIS = "style_analysis"
     CONTENT_PLANNING = "content_planning"
     CONTENT_GENERATION = "content_generation"
-    EDITING_QA = "editing_qa"
+    CONTENT_EDITING = "content_editing"
     HUMAN_REVIEW = "human_review"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    PAUSED = "paused"
 
-class TaskPriority(Enum):
-    """Task priority levels"""
-    LOW = 1
-    MEDIUM = 2
-    HIGH = 3
-    CRITICAL = 4
+@dataclass
+class WorkflowTask:
+    """Data structure for workflow tasks"""
+    task_id: str
+    task_type: TaskType
+    agent_type: AgentType
+    input_data: Dict[str, Any]
+    dependencies: List[str]
+    status: WorkflowStatus = WorkflowStatus.PENDING
+    result: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+    assigned_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    human_checkpoint: bool = False
 
-class ProductionCoordinatorAgent(ChatAgent):
+@dataclass
+class ContentWorkflow:
+    """Complete content creation workflow"""
+    workflow_id: str
+    project_id: str
+    content_type: str
+    requirements: Dict[str, Any]
+    tasks: List[WorkflowTask]
+    status: WorkflowStatus = WorkflowStatus.PENDING
+    created_at: datetime = None
+    updated_at: datetime = None
+    
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = datetime.utcnow()
+        if self.updated_at is None:
+            self.updated_at = datetime.utcnow()
+
+class ProductionCoordinatorAgent:
     """
-    Production-grade Coordinator Agent that orchestrates multi-agent workflows
-    for content creation using CAMEL's Workforce system.
+    Production-ready Coordinator Agent for SpinScribe
+    
+    This agent orchestrates the entire content creation workflow by:
+    - Managing task assignment and scheduling
+    - Coordinating between specialized agents
+    - Handling human checkpoints and approvals
+    - Tracking workflow progress and status
+    - Managing error recovery and fallback strategies
     """
     
-    def __init__(self, project_id: str, **kwargs):
+    def __init__(self, project_id: str = None):
         self.project_id = project_id
-        self.logger = logging.getLogger(f"{__name__}.{project_id}")
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         
-        # Initialize system message for coordinator role
-        system_message = self._create_coordinator_system_message()
-        super().__init__(system_message=system_message, **kwargs)
+        # Initialize CAMEL agent
+        self.agent = self._initialize_camel_agent()
         
-        # Initialize components
-        self.workforce = None
-        self.task_manager = None
-        self.knowledge_base = KnowledgeBase(project_id) if project_id else None
-        self.active_workflows: Dict[str, Dict[str, Any]] = {}
-        self.agent_pool: Dict[AgentType, ChatAgent] = {}
+        # Active workflows tracking
+        self.active_workflows: Dict[str, ContentWorkflow] = {}
         
-        # Workflow configuration
-        self.workflow_config = self._load_workflow_config()
+        # Agent registry for task assignment
+        self.agent_registry: Dict[AgentType, Any] = {}
         
-        # Human checkpoint configuration
-        self.human_checkpoint_config = {
-            "style_analysis_approval": True,
-            "content_outline_approval": True,
-            "draft_review": True,
-            "final_approval": True
-        }
-        
-        # Performance tracking
+        # Performance metrics
         self.metrics = {
             "workflows_completed": 0,
-            "average_completion_time": 0,
-            "error_count": 0,
-            "human_interventions": 0
+            "tasks_assigned": 0,
+            "human_checkpoints_handled": 0,
+            "average_completion_time": 0.0
         }
-    
-    def _create_coordinator_system_message(self) -> BaseMessage:
-        """Create comprehensive system message for coordinator role"""
-        content = f"""
-            You are the Production Coordinator Agent for SpinScribe, a multi-agent content creation system.
-
-            CORE RESPONSIBILITIES:
-            • Orchestrate complex content creation workflows across specialized agents
-            • Manage task assignment, progress tracking, and quality assurance
-            • Handle human checkpoints and approval processes
-            • Ensure brand voice consistency throughout the content creation process
-            • Coordinate with database systems for project context and status updates
-            • Monitor workflow performance and identify optimization opportunities
-
-            SPECIALIZED AGENTS UNDER YOUR COORDINATION:
-            • Style Analyzer: Extracts brand voice patterns and creates language codes
-            • Content Planner: Creates structured outlines and content strategies
-            • Content Generator: Produces draft content following brand guidelines
-            • Editor/QA: Reviews and refines content for quality and consistency
-
-            WORKFLOW MANAGEMENT PRINCIPLES:
-            • Always maintain project context from database (Project ID: {self.project_id})
-            • Ensure each workflow step is completed before proceeding to the next
-            • Implement human checkpoints at critical decision points
-            • Track and report progress transparently
-            • Handle errors gracefully with fallback strategies
-            • Optimize for both quality and efficiency
-
-            COMMUNICATION STYLE:
-            • Clear, professional, and action-oriented
-            • Provide detailed status updates and progress reports
-            • Present information in structured, easily digestible formats
-            • Escalate issues promptly when human intervention is required
-
-            You have access to the project knowledge base and can coordinate with all specialized agents to deliver high-quality content that matches the client's brand voice and requirements.
-            """
         
-        return BaseMessage.make_assistant_message(
-            role_name="production_coordinator",
-            content=content
-        )
+        self.logger.info(f"Coordinator Agent initialized for project: {project_id}")
     
-    def _load_workflow_config(self) -> Dict[str, Any]:
-        """Load workflow configuration for content creation"""
-        return {
-            "max_parallel_tasks": 3,
-            "task_timeout_minutes": 30,
-            "retry_attempts": 2,
-            "quality_threshold": 0.8,
-            "human_checkpoint_timeout_hours": 24,
-            "workflow_steps": [
-                {
-                    "name": "style_analysis",
-                    "agent_type": AgentType.STYLE_ANALYZER,
-                    "required": True,
-                    "human_checkpoint": True,
-                    "timeout_minutes": 15
-                },
-                {
-                    "name": "content_planning",
-                    "agent_type": AgentType.CONTENT_PLANNER,
-                    "required": True,
-                    "human_checkpoint": True,
-                    "timeout_minutes": 20,
-                    "depends_on": ["style_analysis"]
-                },
-                {
-                    "name": "content_generation",
-                    "agent_type": AgentType.CONTENT_GENERATOR,
-                    "required": True,
-                    "human_checkpoint": False,
-                    "timeout_minutes": 25,
-                    "depends_on": ["content_planning"]
-                },
-                {
-                    "name": "editing_qa",
-                    "agent_type": AgentType.EDITOR_QA,
-                    "required": True,
-                    "human_checkpoint": True,
-                    "timeout_minutes": 20,
-                    "depends_on": ["content_generation"]
-                }
-            ]
-        }
-    
-    async def initialize_workforce(self):
-        """Initialize CAMEL Workforce with specialized agents"""
+    def _initialize_camel_agent(self) -> ChatAgent:
+        """Initialize the underlying CAMEL ChatAgent"""
         try:
-            self.logger.info("Initializing workforce for content creation")
+            # Create model for the coordinator
+            model = ModelFactory.create(
+                model_platform=ModelPlatformType.OPENAI,
+                model_type=ModelType.GPT_4O_MINI,
+                model_config_dict=ChatGPTConfig(
+                    temperature=0.3,  # Lower temperature for consistent coordination
+                    max_tokens=2000
+                ).as_dict()
+            )
             
-            # Create workforce instance
-            self.workforce = Workforce("SpinScribe Content Creation Workforce")
+            # Create system message for coordinator role
+            system_message = BaseMessage.make_assistant_message(
+                role_name="Content Creation Coordinator",
+                content=f"""
+                You are the Coordinator Agent for SpinScribe, a multi-agent content creation system.
+                
+                CORE RESPONSIBILITIES:
+                • Orchestrate complex content creation workflows across specialized agents
+                • Manage task assignment, progress tracking, and quality assurance
+                • Handle human checkpoints and approval processes
+                • Ensure brand voice consistency throughout the content creation process
+                • Coordinate with database systems for project context (Project ID: {self.project_id})
+                • Monitor workflow performance and identify optimization opportunities
+
+                SPECIALIZED AGENTS UNDER YOUR COORDINATION:
+                • Style Analyzer: Extracts brand voice patterns and creates language codes
+                • Content Planner: Creates structured outlines and content strategies
+                • Content Generator: Produces draft content following brand guidelines
+                • Editor/QA: Reviews and refines content for quality and consistency
+
+                WORKFLOW MANAGEMENT PRINCIPLES:
+                • Always maintain project context from database
+                • Ensure each workflow step is completed before proceeding to the next
+                • Implement human checkpoints at critical decision points
+                • Track and report progress transparently
+                • Handle errors gracefully with fallback strategies
+                • Optimize for both quality and efficiency
+
+                COMMUNICATION STYLE:
+                • Clear, professional, and action-oriented
+                • Provide detailed status updates and progress reports
+                • Present information in structured, easily digestible formats
+                • Escalate issues promptly when human intervention is required
+
+                You have access to the project knowledge base and can coordinate with all specialized agents to deliver high-quality content that matches the client's brand voice and requirements.
+                """
+            )
             
-            # Initialize specialized agents
-            await self._initialize_agent_pool()
+            # Initialize the CAMEL agent
+            agent = ChatAgent(
+                system_message=system_message,
+                model=model,
+                message_window_size=50  # Increased for workflow context
+            )
             
-            # Add agents to workforce
-            self._add_agents_to_workforce()
-            
-            self.logger.info("Workforce initialized successfully")
+            return agent
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize workforce: {e}")
+            self.logger.error(f"Failed to initialize CAMEL agent: {e}")
             raise
     
-    async def _initialize_agent_pool(self):
-        """Initialize pool of specialized agents"""
-        for agent_type in [AgentType.STYLE_ANALYZER, AgentType.CONTENT_PLANNER, 
-                          AgentType.CONTENT_GENERATOR, AgentType.EDITOR_QA]:
-            try:
-                agent = agent_factory.create_agent(
-                    agent_type=agent_type,
-                    project_id=self.project_id,
-                    custom_instructions=f"Specialized agent for {agent_type.value} in project {self.project_id}"
-                )
-                self.agent_pool[agent_type] = agent
-                self.logger.info(f"Initialized {agent_type.value} agent")
-                
-            except Exception as e:
-                self.logger.error(f"Failed to initialize {agent_type.value} agent: {e}")
-                raise
-    
-    def _add_agents_to_workforce(self):
-        """Add specialized agents to workforce with descriptions"""
-        agent_descriptions = {
-            AgentType.STYLE_ANALYZER: "Specialized agent for analyzing brand voice patterns, extracting linguistic features, and generating style guides and language codes",
-            AgentType.CONTENT_PLANNER: "Expert agent for creating structured content outlines, SEO optimization, and content strategy development",
-            AgentType.CONTENT_GENERATOR: "Creative agent for generating high-quality content that follows brand guidelines and style requirements",
-            AgentType.EDITOR_QA: "Quality assurance agent for reviewing, editing, and ensuring content meets brand standards and requirements"
-        }
-        
-        for agent_type, agent in self.agent_pool.items():
-            description = agent_descriptions[agent_type]
-            self.workforce.add_single_agent_worker(description, worker=agent)
-    
     async def start_content_workflow(self, 
-                                   workflow_request: Dict[str, Any]) -> str:
+                                   content_type: str, 
+                                   requirements: Dict[str, Any],
+                                   workflow_id: str = None) -> str:
         """
         Start a new content creation workflow
         
         Args:
-            workflow_request: Dictionary containing workflow parameters
+            content_type: Type of content to create (blog_post, social_media, etc.)
+            requirements: Content requirements and specifications
+            workflow_id: Optional workflow ID (auto-generated if not provided)
             
         Returns:
-            workflow_id: Unique identifier for the started workflow
+            str: Workflow ID for tracking
         """
-        workflow_id = f"workflow_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.project_id}"
-        
         try:
-            self.logger.info(f"Starting content workflow: {workflow_id}")
+            if workflow_id is None:
+                workflow_id = f"workflow_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{content_type}"
             
-            # Initialize workforce if not already done
-            if self.workforce is None:
-                await self.initialize_workforce()
+            # Create workflow tasks based on content type
+            tasks = self._create_workflow_tasks(content_type, requirements)
             
-            # Create workflow context
-            workflow_context = {
-                "workflow_id": workflow_id,
-                "project_id": self.project_id,
-                "request": workflow_request,
-                "state": WorkflowState.INITIALIZING,
-                "created_at": datetime.now(),
-                "steps_completed": [],
-                "current_step": None,
-                "results": {},
-                "human_checkpoints": [],
-                "errors": []
-            }
+            # Create workflow instance
+            workflow = ContentWorkflow(
+                workflow_id=workflow_id,
+                project_id=self.project_id,
+                content_type=content_type,
+                requirements=requirements,
+                tasks=tasks
+            )
             
             # Store workflow
-            self.active_workflows[workflow_id] = workflow_context
+            self.active_workflows[workflow_id] = workflow
             
-            # Start workflow execution
+            self.logger.info(f"Started workflow {workflow_id} for {content_type}")
+            
+            # Begin workflow execution
             await self._execute_workflow(workflow_id)
             
             return workflow_id
             
         except Exception as e:
-            self.logger.error(f"Failed to start workflow {workflow_id}: {e}")
-            if workflow_id in self.active_workflows:
-                self.active_workflows[workflow_id]["state"] = WorkflowState.FAILED
-                self.active_workflows[workflow_id]["errors"].append(str(e))
+            self.logger.error(f"Failed to start workflow: {e}")
             raise
+    
+    def _create_workflow_tasks(self, content_type: str, requirements: Dict[str, Any]) -> List[WorkflowTask]:
+        """Create workflow tasks based on content type and requirements"""
+        tasks = []
+        
+        # Task 1: Style Analysis (if needed)
+        if requirements.get("analyze_style", True):
+            tasks.append(WorkflowTask(
+                task_id=f"task_style_analysis_{datetime.utcnow().strftime('%H%M%S')}",
+                task_type=TaskType.STYLE_ANALYSIS,
+                agent_type=AgentType.STYLE_ANALYZER,
+                input_data={
+                    "project_id": self.project_id,
+                    "content_samples": requirements.get("content_samples", []),
+                    "analysis_depth": requirements.get("analysis_depth", "comprehensive")
+                },
+                dependencies=[],
+                human_checkpoint=requirements.get("approve_style_analysis", False)
+            ))
+        
+        # Task 2: Content Planning
+        planning_dependencies = []
+        if tasks:  # If we have style analysis
+            planning_dependencies.append(tasks[0].task_id)
+        
+        tasks.append(WorkflowTask(
+            task_id=f"task_content_planning_{datetime.utcnow().strftime('%H%M%S')}",
+            task_type=TaskType.CONTENT_PLANNING,
+            agent_type=AgentType.CONTENT_PLANNER,
+            input_data={
+                "project_id": self.project_id,
+                "content_type": content_type,
+                "target_audience": requirements.get("target_audience", "general"),
+                "key_topics": requirements.get("key_topics", []),
+                "seo_keywords": requirements.get("seo_keywords", []),
+                "word_count": requirements.get("word_count", 1000),
+                "tone": requirements.get("tone", "professional")
+            },
+            dependencies=planning_dependencies,
+            human_checkpoint=requirements.get("approve_outline", True)
+        ))
+        
+        # Task 3: Content Generation
+        generation_dependencies = [tasks[-1].task_id]  # Depends on planning
+        
+        tasks.append(WorkflowTask(
+            task_id=f"task_content_generation_{datetime.utcnow().strftime('%H%M%S')}",
+            task_type=TaskType.CONTENT_GENERATION,
+            agent_type=AgentType.CONTENT_GENERATOR,
+            input_data={
+                "project_id": self.project_id,
+                "content_type": content_type,
+                "requirements": requirements
+            },
+            dependencies=generation_dependencies,
+            human_checkpoint=False
+        ))
+        
+        # Task 4: Content Editing/QA
+        editing_dependencies = [tasks[-1].task_id]  # Depends on generation
+        
+        tasks.append(WorkflowTask(
+            task_id=f"task_content_editing_{datetime.utcnow().strftime('%H%M%S')}",
+            task_type=TaskType.CONTENT_EDITING,
+            agent_type=AgentType.EDITOR_QA,
+            input_data={
+                "project_id": self.project_id,
+                "content_type": content_type,
+                "quality_standards": requirements.get("quality_standards", "high")
+            },
+            dependencies=editing_dependencies,
+            human_checkpoint=True  # Always require human approval for final content
+        ))
+        
+        return tasks
     
     async def _execute_workflow(self, workflow_id: str):
-        """Execute the content creation workflow"""
-        context = self.active_workflows[workflow_id]
-        
+        """Execute workflow by managing task dependencies and assignments"""
         try:
-            # Execute workflow steps in sequence
-            for step_config in self.workflow_config["workflow_steps"]:
-                await self._execute_workflow_step(workflow_id, step_config)
+            workflow = self.active_workflows[workflow_id]
+            workflow.status = WorkflowStatus.IN_PROGRESS
             
-            # Mark workflow as completed
-            context["state"] = WorkflowState.COMPLETED
-            context["completed_at"] = datetime.now()
+            # Execute tasks based on dependencies
+            completed_tasks = set()
             
-            self.logger.info(f"Workflow {workflow_id} completed successfully")
+            while len(completed_tasks) < len(workflow.tasks):
+                # Find tasks that can be executed (dependencies met)
+                ready_tasks = [
+                    task for task in workflow.tasks 
+                    if task.status == WorkflowStatus.PENDING and 
+                    all(dep_id in completed_tasks for dep_id in task.dependencies)
+                ]
+                
+                if not ready_tasks:
+                    # Check if we're waiting for human input
+                    waiting_tasks = [
+                        task for task in workflow.tasks 
+                        if task.status == WorkflowStatus.WAITING_HUMAN
+                    ]
+                    
+                    if waiting_tasks:
+                        self.logger.info(f"Workflow {workflow_id} waiting for human checkpoints")
+                        workflow.status = WorkflowStatus.WAITING_HUMAN
+                        break
+                    else:
+                        self.logger.error(f"Workflow {workflow_id} has no ready tasks - possible deadlock")
+                        workflow.status = WorkflowStatus.FAILED
+                        break
+                
+                # Execute ready tasks
+                for task in ready_tasks:
+                    await self._execute_task(workflow_id, task)
+                    
+                    if task.status == WorkflowStatus.COMPLETED:
+                        completed_tasks.add(task.task_id)
+                    elif task.status == WorkflowStatus.WAITING_HUMAN:
+                        # Task needs human checkpoint
+                        await self._create_human_checkpoint(workflow_id, task)
+            
+            # Update workflow status
+            if len(completed_tasks) == len(workflow.tasks):
+                workflow.status = WorkflowStatus.COMPLETED
+                self.metrics["workflows_completed"] += 1
+                self.logger.info(f"Workflow {workflow_id} completed successfully")
+            
+            workflow.updated_at = datetime.utcnow()
             
         except Exception as e:
-            self.logger.error(f"Workflow {workflow_id} failed: {e}")
-            context["state"] = WorkflowState.FAILED
-            context["errors"].append(str(e))
+            self.logger.error(f"Workflow execution failed: {e}")
+            workflow.status = WorkflowStatus.FAILED
             raise
     
-    async def _execute_workflow_step(self, 
-                                   workflow_id: str, 
-                                   step_config: Dict[str, Any]):
-        """Execute a single workflow step"""
-        context = self.active_workflows[workflow_id]
-        step_name = step_config["name"]
-        
-        self.logger.info(f"Executing step '{step_name}' for workflow {workflow_id}")
-        
+    async def _execute_task(self, workflow_id: str, task: WorkflowTask):
+        """Execute a specific task using the appropriate agent"""
         try:
-            # Check dependencies
-            if "depends_on" in step_config:
-                for dependency in step_config["depends_on"]:
-                    if dependency not in context["steps_completed"]:
-                        raise ValueError(f"Dependency '{dependency}' not completed for step '{step_name}'")
+            task.status = WorkflowStatus.IN_PROGRESS
+            task.assigned_at = datetime.utcnow()
             
-            # Update workflow state
-            context["current_step"] = step_name
-            context["state"] = WorkflowState(step_name)
+            # Get the appropriate agent for this task
+            agent = await self._get_agent_for_task(task.agent_type)
             
-            # Create task for the step
-            task = await self._create_step_task(workflow_id, step_config)
+            # Prepare task input with context
+            task_input = self._prepare_task_input(workflow_id, task)
             
-            # Execute task using workforce
-            completed_task = self.workforce.process_task(task)
+            # Execute task
+            if task.task_type == TaskType.STYLE_ANALYSIS:
+                result = await self._execute_style_analysis(agent, task_input)
+            elif task.task_type == TaskType.CONTENT_PLANNING:
+                result = await self._execute_content_planning(agent, task_input)
+            elif task.task_type == TaskType.CONTENT_GENERATION:
+                result = await self._execute_content_generation(agent, task_input)
+            elif task.task_type == TaskType.CONTENT_EDITING:
+                result = await self._execute_content_editing(agent, task_input)
+            else:
+                raise ValueError(f"Unknown task type: {task.task_type}")
             
-            # Store results
-            context["results"][step_name] = {
-                "task_id": task.id,
-                "result": completed_task.result,
-                "completed_at": datetime.now(),
-                "agent_type": step_config["agent_type"].value
+            # Store task result
+            task.result = result
+            task.completed_at = datetime.utcnow()
+            
+            # Check if human checkpoint is needed
+            if task.human_checkpoint:
+                task.status = WorkflowStatus.WAITING_HUMAN
+            else:
+                task.status = WorkflowStatus.COMPLETED
+            
+            self.metrics["tasks_assigned"] += 1
+            self.logger.info(f"Task {task.task_id} executed successfully")
+            
+        except Exception as e:
+            task.status = WorkflowStatus.FAILED
+            task.error_message = str(e)
+            self.logger.error(f"Task {task.task_id} failed: {e}")
+            raise
+    
+    async def _get_agent_for_task(self, agent_type: AgentType):
+        """Get or create agent instance for task execution"""
+        if agent_type not in self.agent_registry:
+            # Import and create agent dynamically
+            if agent_type == AgentType.STYLE_ANALYZER:
+                from app.agents.specialized.style_analyzer import ProductionStyleAnalyzerAgent
+                self.agent_registry[agent_type] = ProductionStyleAnalyzerAgent(self.project_id)
+            elif agent_type == AgentType.CONTENT_PLANNER:
+                from app.agents.specialized.content_planner import ProductionContentPlannerAgent
+                self.agent_registry[agent_type] = ProductionContentPlannerAgent(self.project_id)
+            elif agent_type == AgentType.CONTENT_GENERATOR:
+                from app.agents.specialized.content_generator import ProductionContentGeneratorAgent
+                self.agent_registry[agent_type] = ProductionContentGeneratorAgent(self.project_id)
+            elif agent_type == AgentType.EDITOR_QA:
+                from app.agents.specialized.editor_qa import ProductionEditorQAAgent
+                self.agent_registry[agent_type] = ProductionEditorQAAgent(self.project_id)
+            else:
+                raise ValueError(f"Unknown agent type: {agent_type}")
+        
+        return self.agent_registry[agent_type]
+    
+    def _prepare_task_input(self, workflow_id: str, task: WorkflowTask) -> Dict[str, Any]:
+        """Prepare input data for task execution with workflow context"""
+        workflow = self.active_workflows[workflow_id]
+        
+        # Get dependency results
+        dependency_results = {}
+        for dep_id in task.dependencies:
+            dep_task = next((t for t in workflow.tasks if t.task_id == dep_id), None)
+            if dep_task and dep_task.result:
+                dependency_results[dep_id] = dep_task.result
+        
+        # Combine task input with context
+        return {
+            **task.input_data,
+            "workflow_id": workflow_id,
+            "workflow_context": {
+                "content_type": workflow.content_type,
+                "requirements": workflow.requirements,
+                "dependency_results": dependency_results
             }
-            
-            # Handle human checkpoint if required
-            if step_config.get("human_checkpoint", False):
-                await self._create_human_checkpoint(workflow_id, step_name, completed_task.result)
-            
-            # Mark step as completed
-            context["steps_completed"].append(step_name)
-            
-            self.logger.info(f"Step '{step_name}' completed for workflow {workflow_id}")
-            
-        except Exception as e:
-            self.logger.error(f"Step '{step_name}' failed for workflow {workflow_id}: {e}")
-            context["errors"].append(f"Step {step_name}: {str(e)}")
-            raise
+        }
     
-    async def _create_step_task(self, 
-                              workflow_id: str, 
-                              step_config: Dict[str, Any]) -> Task:
-        """Create a task for a workflow step"""
-        context = self.active_workflows[workflow_id]
-        step_name = step_config["name"]
-        
-        # Get project context from database
-        project_context = await self._get_project_context()
-        
-        # Create task content based on step type
-        task_content = await self._generate_task_content(step_name, context, project_context)
-        
-        # Create task
-        task = Task(
-            content=task_content,
-            id=f"{workflow_id}_{step_name}_{datetime.now().strftime('%H%M%S')}"
+    async def _execute_style_analysis(self, agent, task_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute style analysis task using your production analyzer"""
+        return await agent.analyze_style(
+            content_samples=task_input.get("content_samples", []),
+            analysis_depth=task_input.get("analysis_depth", "comprehensive")
         )
-        
-        return task
     
-    async def _generate_task_content(self, 
-                                   step_name: str, 
-                                   workflow_context: Dict[str, Any],
-                                   project_context: Dict[str, Any]) -> str:
-        """Generate task content for specific workflow step"""
-        
-        base_context = f"""
-            Project Context:
-            - Project ID: {self.project_id}
-            - Client: {project_context.get('client_name', 'Unknown')}
-            - Brand Voice: {project_context.get('configuration', {}).get('brand_voice', 'Not specified')}
-            - Target Audience: {project_context.get('configuration', {}).get('target_audience', 'General')}
-
-            Workflow Request: {json.dumps(workflow_context['request'], indent=2)}
-            """
-        
-        if step_name == "style_analysis":
-            return f"""
-                {base_context}
-
-                TASK: Perform comprehensive style analysis for this project.
-
-                REQUIREMENTS:
-                1. Analyze all available content samples in the project knowledge base
-                2. Extract linguistic patterns, vocabulary preferences, and sentence structures
-                3. Identify brand voice characteristics and tone patterns
-                4. Generate a detailed language code following the team's format
-                5. Create implementation guidelines for content creation
-
-                DELIVERABLES:
-                - Comprehensive style analysis report
-                - Brand voice profile with specific characteristics
-                - Language code in the format: CF=X, LF=Y, VL=Z, etc.
-                - Style guide for content creators
-                - Confidence score for the analysis
-
-                Ensure the analysis is thorough and actionable for the content creation team.
-                """
-                        
-        elif step_name == "content_planning":
-            style_results = workflow_context["results"].get("style_analysis", {})
-            return f"""
-                {base_context}
-
-                Previous Step Results:
-                {json.dumps(style_results, indent=2)}
-
-                TASK: Create a detailed content plan and outline.
-
-                REQUIREMENTS:
-                1. Use the style analysis results to inform content structure
-                2. Consider SEO requirements and keyword integration
-                3. Plan content flow and logical progression
-                4. Ensure alignment with brand voice and target audience
-                5. Include clear section descriptions and objectives
-
-                DELIVERABLES:
-                - Detailed content outline with sections and subsections
-                - SEO strategy and keyword recommendations
-                - Content flow and structure recommendations
-                - Brand voice integration guidelines
-                - Estimated word count and content specifications
-
-                Create a comprehensive plan that guides the content generation process.
-                """
-        
-        elif step_name == "content_generation":
-            style_results = workflow_context["results"].get("style_analysis", {})
-            planning_results = workflow_context["results"].get("content_planning", {})
-            return f"""
-                {base_context}
-
-                Previous Step Results:
-                Style Analysis: {json.dumps(style_results, indent=2)}
-                Content Planning: {json.dumps(planning_results, indent=2)}
-
-                TASK: Generate high-quality content following the approved outline and style guide.
-
-                REQUIREMENTS:
-                1. Follow the content outline precisely
-                2. Maintain consistent brand voice throughout
-                3. Integrate keywords naturally and effectively
-                4. Ensure content engages the target audience
-                5. Meet all specified quality requirements
-
-                DELIVERABLES:
-                - Complete draft content following the outline
-                - Brand voice consistency verification
-                - Keyword integration confirmation
-                - Content quality assessment
-                - Recommendations for enhancement
-
-                Create engaging, high-quality content that matches the client's brand voice perfectly.
-                """
-        
-        elif step_name == "editing_qa":
-            previous_results = {k: v for k, v in workflow_context["results"].items() 
-                              if k != "editing_qa"}
-            return f"""
-                {base_context}
-
-                Previous Step Results:
-                {json.dumps(previous_results, indent=2)}
-
-                TASK: Review and refine the generated content for quality and brand consistency.
-
-                REQUIREMENTS:
-                1. Check adherence to brand guidelines and style
-                2. Verify content accuracy and clarity
-                3. Ensure consistency with previous content
-                4. Identify areas for improvement
-                5. Validate compliance with all requirements
-
-                DELIVERABLES:
-                - Comprehensive content review report
-                - Quality assessment with specific scores
-                - List of identified improvements
-                - Final edited content version
-                - Compliance verification checklist
-
-                Ensure the content meets the highest quality standards before human review.
-                """
-        
-        else:
-            return f"Execute {step_name} task for project {self.project_id}"
+    async def _execute_content_planning(self, agent, task_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute content planning task"""
+        return await agent.create_content_plan(
+            content_type=task_input["content_type"],
+            requirements=task_input["workflow_context"]["requirements"],
+            style_context=task_input["workflow_context"]["dependency_results"]
+        )
     
-    async def _create_human_checkpoint(self, 
-                                     workflow_id: str, 
-                                     step_name: str, 
-                                     step_result: str):
-        """Create a human checkpoint for workflow step approval"""
+    async def _execute_content_generation(self, agent, task_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute content generation task"""
+        return await agent.generate_content(
+            content_plan=task_input["workflow_context"]["dependency_results"],
+            requirements=task_input["workflow_context"]["requirements"]
+        )
+    
+    async def _execute_content_editing(self, agent, task_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute content editing task"""
+        return await agent.edit_content(
+            content=task_input["workflow_context"]["dependency_results"],
+            quality_standards=task_input.get("quality_standards", "high")
+        )
+    
+    async def _create_human_checkpoint(self, workflow_id: str, task: WorkflowTask):
+        """Create human checkpoint for task approval"""
         try:
             db = SessionLocal()
             
+            # Create human checkpoint record
             checkpoint = HumanCheckpoint(
+                checkpoint_id=f"checkpoint_{task.task_id}",
                 project_id=self.project_id,
                 workflow_id=workflow_id,
-                checkpoint_type=step_name,
-                content=step_result,
+                task_id=task.task_id,
+                checkpoint_type=task.task_type.value,
+                content_reference=json.dumps(task.result) if task.result else None,
                 status="pending",
-                created_at=datetime.now(),
-                metadata={
-                    "step_name": step_name,
-                    "workflow_context": self.active_workflows[workflow_id]["request"]
-                }
+                created_at=datetime.utcnow()
             )
             
             db.add(checkpoint)
             db.commit()
             
-            # Store checkpoint reference in workflow context
-            self.active_workflows[workflow_id]["human_checkpoints"].append({
-                "checkpoint_id": checkpoint.checkpoint_id,
-                "step_name": step_name,
-                "status": "pending",
-                "created_at": datetime.now()
-            })
-            
-            self.logger.info(f"Created human checkpoint for {step_name} in workflow {workflow_id}")
-            
-            db.close()
+            self.metrics["human_checkpoints_handled"] += 1
+            self.logger.info(f"Created human checkpoint for task {task.task_id}")
             
         except Exception as e:
             self.logger.error(f"Failed to create human checkpoint: {e}")
-            if 'db' in locals():
-                db.rollback()
-                db.close()
             raise
+        finally:
+            db.close()
     
-    async def _get_project_context(self) -> Dict[str, Any]:
-        """Get project context from database"""
+    async def handle_human_feedback(self, checkpoint_id: str, approved: bool, feedback: str = None):
+        """Handle human feedback on checkpoints"""
         try:
             db = SessionLocal()
-            project = db.query(Project).filter(Project.project_id == self.project_id).first()
             
-            if not project:
-                return {"error": "Project not found"}
+            # Get checkpoint
+            checkpoint = db.query(HumanCheckpoint).filter(
+                HumanCheckpoint.checkpoint_id == checkpoint_id
+            ).first()
             
-            context = {
-                "project_id": project.project_id,
-                "client_name": project.client_name,
-                "description": project.description,
-                "configuration": project.configuration,
-                "status": project.status,
-                "created_at": project.created_at
-            }
+            if not checkpoint:
+                raise ValueError(f"Checkpoint {checkpoint_id} not found")
             
-            db.close()
-            return context
+            # Update checkpoint
+            checkpoint.status = "approved" if approved else "rejected"
+            checkpoint.feedback = feedback
+            checkpoint.resolved_at = datetime.utcnow()
+            
+            db.commit()
+            
+            # Update task status
+            workflow = self.active_workflows.get(checkpoint.workflow_id)
+            if workflow:
+                task = next((t for t in workflow.tasks if t.task_id == checkpoint.task_id), None)
+                if task:
+                    if approved:
+                        task.status = WorkflowStatus.COMPLETED
+                        # Continue workflow execution
+                        await self._execute_workflow(checkpoint.workflow_id)
+                    else:
+                        task.status = WorkflowStatus.FAILED
+                        task.error_message = f"Human rejection: {feedback}"
+                        workflow.status = WorkflowStatus.FAILED
+            
+            self.logger.info(f"Processed human feedback for checkpoint {checkpoint_id}")
             
         except Exception as e:
-            self.logger.error(f"Failed to get project context: {e}")
-            if 'db' in locals():
-                db.close()
-            return {"error": str(e)}
+            self.logger.error(f"Failed to handle human feedback: {e}")
+            raise
+        finally:
+            db.close()
     
-    async def get_workflow_status(self, workflow_id: str) -> Dict[str, Any]:
+    def get_workflow_status(self, workflow_id: str) -> Dict[str, Any]:
         """Get current status of a workflow"""
-        if workflow_id not in self.active_workflows:
+        workflow = self.active_workflows.get(workflow_id)
+        if not workflow:
             return {"error": "Workflow not found"}
-        
-        context = self.active_workflows[workflow_id]
-        
-        # Calculate progress
-        total_steps = len(self.workflow_config["workflow_steps"])
-        completed_steps = len(context["steps_completed"])
-        progress_percentage = (completed_steps / total_steps) * 100
-        
-        # Calculate duration
-        duration = None
-        if "completed_at" in context:
-            duration = (context["completed_at"] - context["created_at"]).total_seconds()
-        else:
-            duration = (datetime.now() - context["created_at"]).total_seconds()
         
         return {
             "workflow_id": workflow_id,
-            "state": context["state"].value,
-            "progress_percentage": progress_percentage,
-            "steps_completed": context["steps_completed"],
-            "current_step": context["current_step"],
-            "duration_seconds": duration,
-            "human_checkpoints": context["human_checkpoints"],
-            "error_count": len(context["errors"]),
-            "last_updated": datetime.now()
+            "status": workflow.status.value,
+            "content_type": workflow.content_type,
+            "progress": {
+                "total_tasks": len(workflow.tasks),
+                "completed_tasks": len([t for t in workflow.tasks if t.status == WorkflowStatus.COMPLETED]),
+                "failed_tasks": len([t for t in workflow.tasks if t.status == WorkflowStatus.FAILED]),
+                "waiting_human": len([t for t in workflow.tasks if t.status == WorkflowStatus.WAITING_HUMAN])
+            },
+            "tasks": [
+                {
+                    "task_id": task.task_id,
+                    "task_type": task.task_type.value,
+                    "status": task.status.value,
+                    "human_checkpoint": task.human_checkpoint,
+                    "assigned_at": task.assigned_at.isoformat() if task.assigned_at else None,
+                    "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                    "error_message": task.error_message
+                }
+                for task in workflow.tasks
+            ],
+            "created_at": workflow.created_at.isoformat(),
+            "updated_at": workflow.updated_at.isoformat()
         }
-    
-    async def pause_workflow(self, workflow_id: str):
-        """Pause an active workflow"""
-        if workflow_id in self.active_workflows:
-            self.active_workflows[workflow_id]["state"] = WorkflowState.PAUSED
-            self.logger.info(f"Workflow {workflow_id} paused")
-    
-    async def resume_workflow(self, workflow_id: str):
-        """Resume a paused workflow"""
-        if workflow_id in self.active_workflows:
-            context = self.active_workflows[workflow_id]
-            if context["state"] == WorkflowState.PAUSED:
-                # Resume from current step
-                await self._execute_workflow(workflow_id)
-                self.logger.info(f"Workflow {workflow_id} resumed")
     
     def get_performance_metrics(self) -> Dict[str, Any]:
         """Get coordinator performance metrics"""
         return {
-            "workflows_completed": self.metrics["workflows_completed"],
-            "average_completion_time": self.metrics["average_completion_time"],
-            "error_count": self.metrics["error_count"],
-            "human_interventions": self.metrics["human_interventions"],
+            **self.metrics,
             "active_workflows": len(self.active_workflows),
-            "agent_pool_size": len(self.agent_pool)
+            "agent_registry_size": len(self.agent_registry)
         }
-    
-    def process_task(self, task):
-        """Legacy method for backwards compatibility"""
-        response = self.step(task)
-        return response
 
+# Backwards compatibility wrapper
+class coordinatorAgent(ProductionCoordinatorAgent):
+    """Backwards compatibility wrapper for existing code"""
+    pass
 
 # Factory function for easy instantiation
-async def create_coordinator_agent(project_id: str) -> ProductionCoordinatorAgent:
+async def create_coordinator_agent(project_id: str = None) -> ProductionCoordinatorAgent:
     """
     Factory function to create and initialize a ProductionCoordinatorAgent
     
     Args:
-        project_id: Project ID for database integration
+        project_id: Optional project ID for database integration
         
     Returns:
         Initialized ProductionCoordinatorAgent instance
     """
     coordinator = ProductionCoordinatorAgent(project_id)
-    await coordinator.initialize_workforce()
     return coordinator
-
 
 # Export main classes
 __all__ = [
     'ProductionCoordinatorAgent',
-    'WorkflowState',
-    'TaskPriority',
+    'coordinatorAgent',  # For backwards compatibility
+    'WorkflowStatus',
+    'TaskType',
+    'WorkflowTask',
+    'ContentWorkflow',
     'create_coordinator_agent'
 ]

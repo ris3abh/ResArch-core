@@ -4,15 +4,15 @@ Production Content Generator Agent for SpinScribe
 Built on CAMEL AI Framework
 
 The Content Generator Agent creates high-quality content following
-brand guidelines, style guides, and structured content plans.
+brand guidelines, style analysis, and structured content plans.
 """
 
 import asyncio
 import logging
-import re
 import json
-from typing import Dict, List, Any, Optional, Tuple
+import re
 from datetime import datetime
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 
 from camel.agents import ChatAgent
@@ -29,12 +29,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ContentSection:
     """Generated content section with metadata"""
+    section_id: str
     title: str
     content: str
     word_count: int
     keywords_used: List[str]
     tone_adherence_score: float
-    subsections: List['ContentSection'] = None
+    subsections: Optional[List['ContentSection']] = None
     
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -45,6 +46,7 @@ class ContentSection:
 @dataclass
 class GeneratedContent:
     """Complete generated content with analysis"""
+    content_id: str
     title: str
     content_type: str
     sections: List[ContentSection]
@@ -54,887 +56,921 @@ class GeneratedContent:
     brand_voice_analysis: Dict[str, Any]
     quality_scores: Dict[str, float]
     generation_metadata: Dict[str, Any]
+    created_at: datetime = None
+    
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = datetime.utcnow()
     
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
         result['sections'] = [section.to_dict() for section in self.sections]
+        result['created_at'] = self.created_at.isoformat() if self.created_at else None
         return result
 
 class ProductionContentGeneratorAgent(ChatAgent):
     """
     Production-grade Content Generator Agent that creates high-quality content
-    following brand guidelines and structured content plans.
+    following brand guidelines, style analysis, and structured content plans.
+    
+    This agent integrates with:
+    - Style analysis results for brand voice consistency
+    - Content plans for structure and objectives
+    - SEO strategies for optimization
+    - Project knowledge base for context and accuracy
     """
     
     def __init__(self, project_id: str = None, **kwargs):
         self.project_id = project_id
-        self.logger = logging.getLogger(f"{__name__}.{project_id or 'standalone'}")
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         
-        # Initialize system message
-        system_message = self._create_generator_system_message()
-        super().__init__(system_message=system_message, **kwargs)
-        
-        # Initialize knowledge base connection
+        # Initialize knowledge base
         if project_id:
             self.knowledge_base = KnowledgeBase(project_id)
         else:
             self.knowledge_base = None
         
-        # Content generation configuration
-        self.generation_config = {
-            "max_section_length": 500,
-            "keyword_density_tolerance": 0.005,  # ±0.5%
-            "tone_consistency_threshold": 0.8,
-            "quality_threshold": 0.85,
-            "max_retries": 3
+        # Initialize CAMEL agent
+        super().__init__(
+            system_message=self._create_system_message(),
+            **self._get_model_config(),
+            **kwargs
+        )
+        
+        # Generation cache and templates
+        self.content_cache: Dict[str, GeneratedContent] = {}
+        self.generation_templates = self._load_generation_templates()
+        
+        # Performance metrics
+        self.metrics = {
+            "content_generated": 0,
+            "average_generation_time": 0.0,
+            "quality_scores": [],
+            "brand_voice_consistency": []
         }
         
-        # Writing style templates
-        self.style_templates = {
-            "professional": {
-                "sentence_starters": ["Furthermore", "Additionally", "Moreover", "In conclusion", "Therefore"],
-                "connectors": ["however", "nevertheless", "consequently", "subsequently", "accordingly"],
-                "vocabulary_level": "advanced"
-            },
-            "conversational": {
-                "sentence_starters": ["Now", "Here's the thing", "You know what", "Let's be honest", "Simply put"],
-                "connectors": ["but", "so", "and", "plus", "actually"],
-                "vocabulary_level": "simple"
-            },
-            "authoritative": {
-                "sentence_starters": ["Research shows", "Data indicates", "Studies reveal", "Evidence suggests", "Analysis confirms"],
-                "connectors": ["therefore", "thus", "consequently", "as a result", "accordingly"],
-                "vocabulary_level": "technical"
-            },
-            "friendly": {
-                "sentence_starters": ["You'll love this", "Here's something cool", "This is exciting", "Get ready", "You're going to find"],
-                "connectors": ["and", "plus", "also", "not to mention", "what's more"],
-                "vocabulary_level": "accessible"
-            }
-        }
-        
-    def _create_generator_system_message(self) -> BaseMessage:
-        """Create comprehensive system message for content generator role"""
-        content = f"""
-You are the Production Content Generator Agent for SpinScribe, specializing in creating high-quality, brand-aligned content.
-
-CORE RESPONSIBILITIES:
-• Generate compelling, original content following detailed outlines and brand guidelines
-• Maintain consistent brand voice and tone throughout all content pieces
-• Integrate SEO keywords naturally while preserving readability and engagement
-• Create content that resonates with target audiences and achieves specified objectives
-• Ensure all content meets quality standards and client requirements
-• Adapt writing style to match brand personality and communication preferences
-
-CONTENT GENERATION EXPERTISE:
-• Blog posts, landing pages, product descriptions, email sequences
-• Case studies, whitepapers, social media content, and web copy
-• SEO-optimized content with natural keyword integration
-• Persuasive copy that drives engagement and conversions
-• Technical content adapted for various audience levels
-• Storytelling and narrative content that builds brand connection
-
-GENERATION METHODOLOGY:
-• Carefully analyze provided content plans and style guidelines
-• Extract and apply brand voice characteristics consistently
-• Follow content outlines precisely while adding creative value
-• Integrate keywords naturally without compromising readability
-• Create engaging hooks and compelling calls-to-action
-• Ensure logical flow and smooth transitions between sections
-
-QUALITY STANDARDS:
-• Original, plagiarism-free content creation
-• Error-free grammar, spelling, and punctuation
-• Brand voice consistency throughout all sections
-• Natural keyword integration meeting density targets
-• Engaging, valuable content that serves the target audience
-• Professional formatting and structure
-
-BRAND VOICE ADAPTATION:
-• Analyze provided style guides and language codes
-• Adapt sentence structure, vocabulary, and tone accordingly
-• Maintain personality traits and communication values
-• Follow formality levels and vocabulary preferences
-• Ensure content reflects brand's unique voice characteristics
-
-You have access to project knowledge base containing brand guidelines, style analysis results, and content samples. Use this information to create content that perfectly matches the client's established voice and style.
-
-Project ID: {self.project_id or 'Not specified'}
-"""
-        
+        self.logger.info(f"Content Generator Agent initialized for project: {project_id}")
+    
+    def _create_system_message(self) -> BaseMessage:
+        """Create system message for content generator role"""
         return BaseMessage.make_assistant_message(
-            role_name="content_generator",
-            content=content
+            role_name="Content Generation Specialist",
+            content=f"""
+            You are a specialized Content Generator Agent for SpinScribe, an expert in creating high-quality, brand-aligned content that engages audiences and achieves business objectives.
+            
+            CORE CAPABILITIES:
+            • Generate compelling content following detailed content plans and outlines
+            • Maintain perfect brand voice consistency using style analysis and language codes
+            • Integrate SEO keywords naturally and effectively throughout content
+            • Adapt writing style to match established brand voice patterns
+            • Create engaging, readable content that serves specific audience needs
+            • Ensure content meets all specified requirements and objectives
+
+            CONTENT GENERATION EXPERTISE:
+            • Multi-format content creation (blogs, articles, social media, emails, landing pages)
+            • Brand voice interpretation and application
+            • SEO optimization and keyword integration
+            • Audience-specific tone and style adaptation
+            • Storytelling and engagement techniques
+            • Call-to-action optimization and conversion focus
+
+            PROJECT CONTEXT: {self.project_id or "General Content Creation"}
+            
+            GENERATION METHODOLOGY:
+            • Follow provided content plans and section objectives precisely
+            • Apply style analysis results to maintain brand voice consistency
+            • Integrate keywords naturally without compromising readability
+            • Create engaging openings and compelling conclusions
+            • Use clear, logical flow and smooth transitions between sections
+            • Include relevant examples, data, and supporting evidence
+
+            QUALITY STANDARDS:
+            • Content must align with brand voice analysis and language codes
+            • All section objectives must be met with appropriate depth
+            • SEO keywords integrated naturally and effectively
+            • Writing must be engaging, clear, and error-free
+            • Content should drive toward specified goals and actions
+            • Maintain consistent tone and style throughout
+
+            OUTPUT REQUIREMENTS:
+            • Well-structured content with clear section breaks
+            • Natural keyword integration that enhances readability
+            • Engaging headlines and subheadings
+            • Compelling calls-to-action where appropriate
+            • Content that meets specified word count targets
+            • Professional, polished writing that represents the brand excellently
+
+            You excel at transforming strategic content plans into compelling, brand-aligned content that engages audiences and drives results.
+            """
         )
     
-    async def generate_content(self, 
+    def _get_model_config(self) -> Dict[str, Any]:
+        """Get model configuration for content generation"""
+        return {
+            "model_config": ChatGPTConfig(
+                temperature=0.7,  # Higher creativity for content generation
+                max_tokens=4000
+            )
+        }
+    
+    def _load_generation_templates(self) -> Dict[str, Any]:
+        """Load content generation templates and patterns"""
+        return {
+            "blog_post": {
+                "opening_hooks": [
+                    "question", "statistic", "story", "quote", "controversial_statement"
+                ],
+                "transition_phrases": [
+                    "Moreover", "Furthermore", "In addition", "However", "On the other hand",
+                    "As a result", "Consequently", "For instance", "To illustrate"
+                ],
+                "conclusion_styles": [
+                    "summary", "call_to_action", "future_outlook", "question_to_reader"
+                ]
+            },
+            "article": {
+                "structure_patterns": [
+                    "inverted_pyramid", "chronological", "problem_solution", "cause_effect"
+                ],
+                "evidence_types": [
+                    "statistics", "expert_quotes", "case_studies", "research_findings"
+                ]
+            },
+            "social_media": {
+                "engagement_tactics": [
+                    "ask_question", "share_tip", "behind_scenes", "user_generated_content"
+                ],
+                "hashtag_strategies": [
+                    "branded", "trending", "niche", "location_based"
+                ]
+            },
+            "email": {
+                "subject_line_types": [
+                    "urgency", "curiosity", "benefit_driven", "personalized"
+                ],
+                "email_structures": [
+                    "problem_agitation_solution", "story_based", "list_format", "news_update"
+                ]
+            }
+        }
+    
+    async def generate_content(self,
                              content_plan: Dict[str, Any],
-                             style_guide: Optional[Dict[str, Any]] = None) -> GeneratedContent:
+                             style_context: Optional[Dict[str, Any]] = None,
+                             requirements: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Generate complete content following the provided plan and style guide
+        Generate complete content based on content plan and style context
         
         Args:
-            content_plan: Detailed content plan from Content Planner
-            style_guide: Optional style guide from Style Analyzer
+            content_plan: Structured content plan with sections and objectives
+            style_context: Style analysis results and brand voice guidelines
+            requirements: Additional generation requirements
             
         Returns:
-            Complete GeneratedContent object
+            Complete generated content with analysis
         """
-        self.logger.info(f"Generating content: {content_plan.get('title', 'Untitled')}")
-        
         try:
-            # Extract generation parameters
-            title = content_plan.get('title', 'Untitled Content')
-            content_type = content_plan.get('content_type', 'blog_post')
-            outline = content_plan.get('content_outline', [])
-            seo_strategy = content_plan.get('seo_strategy', {})
-            brand_voice = content_plan.get('brand_voice_integration', {})
+            start_time = datetime.utcnow()
             
-            # Merge style guide information
-            if style_guide:
-                brand_voice = self._merge_brand_voice_data(brand_voice, style_guide)
+            # Generate content ID
+            content_id = f"content_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
             
-            # Generate each content section
-            generated_sections = []
-            for section_plan in outline:
-                section = await self._generate_section(section_plan, brand_voice, seo_strategy)
-                generated_sections.append(section)
+            # Extract plan details
+            plan_structure = content_plan.get("content_structure", {})
+            sections_data = plan_structure.get("sections", [])
+            seo_guidelines = content_plan.get("seo_guidelines", {})
+            
+            # Get project context for content generation
+            project_context = await self._get_project_context()
+            
+            # Generate content sections
+            generated_sections = await self._generate_content_sections(
+                sections_data, style_context, seo_guidelines, project_context
+            )
             
             # Combine sections into full content
-            full_content = await self._combine_sections(generated_sections, content_type)
+            full_content = await self._combine_sections_into_content(
+                generated_sections, content_plan, style_context
+            )
             
             # Analyze generated content
-            seo_analysis = await self._analyze_seo_performance(full_content, seo_strategy)
-            brand_voice_analysis = await self._analyze_brand_voice_consistency(full_content, brand_voice)
+            seo_analysis = await self._analyze_seo_performance(full_content, seo_guidelines)
+            brand_voice_analysis = await self._analyze_brand_voice_consistency(full_content, style_context)
             quality_scores = await self._calculate_quality_scores(full_content, content_plan)
             
-            # Calculate total word count
-            total_words = sum(section.word_count for section in generated_sections)
-            
-            # Create generation metadata
-            generation_metadata = {
-                "generated_at": datetime.now().isoformat(),
-                "generation_time": "Generated in real-time",
-                "model_used": "CAMEL ChatAgent",
-                "project_id": self.project_id,
-                "style_guide_applied": style_guide is not None
-            }
-            
-            # Create comprehensive result
+            # Create generated content object
             generated_content = GeneratedContent(
-                title=title,
-                content_type=content_type,
+                content_id=content_id,
+                title=content_plan.get("title", "Generated Content"),
+                content_type=content_plan.get("content_type", "blog_post"),
                 sections=generated_sections,
                 full_content=full_content,
-                total_word_count=total_words,
+                total_word_count=len(full_content.split()),
                 seo_analysis=seo_analysis,
                 brand_voice_analysis=brand_voice_analysis,
                 quality_scores=quality_scores,
-                generation_metadata=generation_metadata
+                generation_metadata={
+                    "plan_id": content_plan.get("plan_id"),
+                    "style_context_used": bool(style_context),
+                    "project_context_used": bool(project_context),
+                    "sections_generated": len(generated_sections)
+                }
             )
             
-            # Store in knowledge base if available
-            if self.knowledge_base:
-                await self._store_generated_content(generated_content)
+            # Cache and store
+            self.content_cache[content_id] = generated_content
+            await self._store_generated_content(generated_content)
             
-            self.logger.info(f"Content generation completed: {total_words} words, quality score: {quality_scores.get('overall', 0):.2f}")
+            # Update metrics
+            generation_time = (datetime.utcnow() - start_time).total_seconds()
+            self._update_metrics(generation_time, quality_scores, brand_voice_analysis)
             
-            return generated_content
+            self.logger.info(f"Content generated: {content_id}")
+            
+            return await self._format_generation_output(generated_content)
             
         except Exception as e:
             self.logger.error(f"Content generation failed: {e}")
             raise
     
-    def _merge_brand_voice_data(self, 
-                               plan_voice_data: Dict[str, Any],
-                               style_guide: Dict[str, Any]) -> Dict[str, Any]:
-        """Merge brand voice data from content plan and style guide"""
-        
-        merged = plan_voice_data.copy()
-        
-        # Extract from style guide
-        if 'brand_voice_elements' in style_guide:
-            elements = style_guide['brand_voice_elements']
-            merged.update({
-                'personality_traits': elements.get('personality_traits', []),
-                'communication_values': elements.get('communication_values', []),
-                'persuasion_techniques': elements.get('persuasion_techniques', [])
-            })
-        
-        if 'implementation_guidelines' in style_guide:
-            guidelines = style_guide['implementation_guidelines']
-            
-            # Extract language code parameters
-            if 'language_formality' in guidelines:
-                formality = guidelines['language_formality'].replace('LF=', '')
-                merged['formality_level'] = int(formality) if formality.isdigit() else 3
-            
-            if 'vocabulary_level' in guidelines:
-                vocab = guidelines['vocabulary_level'].replace('VL=', '')
-                merged['vocabulary_level'] = int(vocab) if vocab.isdigit() else 5
-        
-        return merged
-    
-    async def _generate_section(self, 
-                              section_plan: Dict[str, Any],
-                              brand_voice: Dict[str, Any],
-                              seo_strategy: Dict[str, Any]) -> ContentSection:
-        """Generate content for a single section"""
-        
-        section_title = section_plan.get('title', 'Untitled Section')
-        description = section_plan.get('description', '')
-        objectives = section_plan.get('objectives', [])
-        keywords = section_plan.get('keywords', [])
-        target_word_count = section_plan.get('estimated_word_count', 200)
-        tone_guidance = section_plan.get('tone_guidance', '')
-        
-        self.logger.debug(f"Generating section: {section_title}")
+    async def _get_project_context(self) -> Dict[str, Any]:
+        """Get project context from knowledge base"""
+        if not self.knowledge_base:
+            return {}
         
         try:
-            # Create generation prompt
-            generation_prompt = self._create_section_prompt(
-                section_title, description, objectives, keywords, 
-                target_word_count, tone_guidance, brand_voice
-            )
+            # Query for relevant project information
+            context_queries = [
+                "brand voice style guidelines",
+                "product information company details",
+                "target audience customer personas",
+                "industry context market information"
+            ]
             
-            # Generate content using LLM
-            response = self.step(generation_prompt)
-            section_content = response.msg.content if hasattr(response.msg, 'content') else str(response)
+            context = {
+                "brand_info": [],
+                "product_info": [],
+                "audience_info": [],
+                "industry_info": []
+            }
             
-            # Clean and format content
-            section_content = self._clean_generated_content(section_content)
+            for query in context_queries:
+                results = await self.knowledge_base.query_knowledge(query, limit=3)
+                
+                for result in results:
+                    content_type = result.get("type", "general")
+                    content_text = result.get("content", "")
+                    
+                    if "brand" in content_type or "style" in content_type:
+                        context["brand_info"].append(content_text)
+                    elif "product" in content_type or "company" in content_type:
+                        context["product_info"].append(content_text)
+                    elif "audience" in content_type or "persona" in content_type:
+                        context["audience_info"].append(content_text)
+                    else:
+                        context["industry_info"].append(content_text)
             
-            # Analyze section
-            actual_word_count = len(section_content.split())
-            keywords_used = self._extract_keywords_used(section_content, keywords)
-            tone_score = await self._evaluate_tone_adherence(section_content, tone_guidance, brand_voice)
-            
-            # Handle subsections if they exist
-            subsections = []
-            if 'subsections' in section_plan:
-                for subsection_plan in section_plan['subsections']:
-                    subsection = await self._generate_section(subsection_plan, brand_voice, seo_strategy)
-                    subsections.append(subsection)
-                    # Add subsection content to main section content
-                    section_content += f"\n\n### {subsection.title}\n\n{subsection.content}"
-                    actual_word_count += subsection.word_count
-                    keywords_used.extend(subsection.keywords_used)
-            
-            return ContentSection(
-                title=section_title,
-                content=section_content,
-                word_count=actual_word_count,
-                keywords_used=list(set(keywords_used)),  # Remove duplicates
-                tone_adherence_score=tone_score,
-                subsections=subsections if subsections else None
-            )
+            return context
             
         except Exception as e:
-            self.logger.error(f"Section generation failed for {section_title}: {e}")
-            # Return fallback section
-            return ContentSection(
-                title=section_title,
-                content=f"Content generation failed for {section_title}. Please regenerate this section.",
-                word_count=0,
-                keywords_used=[],
-                tone_adherence_score=0.0
-            )
+            self.logger.warning(f"Failed to get project context: {e}")
+            return {}
     
-    def _create_section_prompt(self, 
-                              title: str,
-                              description: str,
-                              objectives: List[str],
-                              keywords: List[str],
-                              target_word_count: int,
-                              tone_guidance: str,
-                              brand_voice: Dict[str, Any]) -> str:
-        """Create detailed prompt for section generation"""
+    async def _generate_content_sections(self,
+                                       sections_data: List[Dict[str, Any]],
+                                       style_context: Optional[Dict[str, Any]],
+                                       seo_guidelines: Dict[str, Any],
+                                       project_context: Dict[str, Any]) -> List[ContentSection]:
+        """Generate content for each section"""
+        generated_sections = []
         
-        # Extract brand voice characteristics
-        personality_traits = brand_voice.get('personality_traits', [])
-        formality_level = brand_voice.get('formality_level', 3)
-        vocabulary_level = brand_voice.get('vocabulary_level', 5)
-        tone = brand_voice.get('tone', 'professional')
+        for i, section_data in enumerate(sections_data):
+            try:
+                section = await self._generate_single_section(
+                    section_data, style_context, seo_guidelines, project_context, i
+                )
+                generated_sections.append(section)
+                
+            except Exception as e:
+                self.logger.error(f"Failed to generate section {i+1}: {e}")
+                # Create fallback section
+                fallback_section = ContentSection(
+                    section_id=section_data.get("section_id", f"section_{i+1}"),
+                    title=section_data.get("title", f"Section {i+1}"),
+                    content="Content generation failed for this section. Please regenerate.",
+                    word_count=0,
+                    keywords_used=[],
+                    tone_adherence_score=0.0
+                )
+                generated_sections.append(fallback_section)
         
-        # Get style template based on tone
-        style_template = self.style_templates.get(tone, self.style_templates['professional'])
-        
-        prompt = f"""
-Generate a {target_word_count}-word section titled "{title}" for content creation.
-
-SECTION REQUIREMENTS:
-Description: {description}
-
-Objectives:
-{chr(10).join(f"• {obj}" for obj in objectives)}
-
-TARGET KEYWORDS TO INTEGRATE NATURALLY:
-{', '.join(keywords) if keywords else 'No specific keywords'}
-
-BRAND VOICE GUIDELINES:
-• Tone: {tone.title()}
-• Formality Level: {formality_level}/10 (1=very casual, 10=very formal)
-• Vocabulary Level: {vocabulary_level}/10 (1=simple, 10=advanced)
-• Personality Traits: {', '.join(personality_traits[:3]) if personality_traits else 'Professional, helpful'}
-
-TONE GUIDANCE:
-{tone_guidance}
-
-STYLE PREFERENCES:
-• Use sentence starters like: {', '.join(style_template['sentence_starters'][:3])}
-• Connect ideas with: {', '.join(style_template['connectors'][:3])}
-• Vocabulary level: {style_template['vocabulary_level']}
-
-CONTENT GENERATION INSTRUCTIONS:
-1. Create engaging, original content that perfectly matches the brand voice
-2. Integrate keywords naturally - they should feel like a natural part of the writing
-3. Follow the tone guidance precisely
-4. Meet the word count target (±20 words is acceptable)
-5. Ensure content serves the stated objectives
-6. Write in a way that flows naturally and engages the target audience
-7. Use proper formatting with paragraphs and subheadings as appropriate
-8. Include specific examples or details where relevant
-9. End sections with smooth transitions or strong conclusions as appropriate
-
-Generate the content now, focusing on quality, brand voice consistency, and natural keyword integration:
-"""
-        
-        return prompt
+        return generated_sections
     
-    def _clean_generated_content(self, content: str) -> str:
-        """Clean and format generated content"""
+    async def _generate_single_section(self,
+                                     section_data: Dict[str, Any],
+                                     style_context: Optional[Dict[str, Any]],
+                                     seo_guidelines: Dict[str, Any],
+                                     project_context: Dict[str, Any],
+                                     section_index: int) -> ContentSection:
+        """Generate content for a single section"""
         
-        # Remove common AI-generated prefixes/suffixes
+        # Extract section details
+        section_title = section_data.get("title", f"Section {section_index + 1}")
+        section_objective = section_data.get("objective", "Provide valuable information")
+        key_points = section_data.get("key_points", [])
+        target_word_count = section_data.get("word_count_target", 250)
+        seo_keywords = section_data.get("seo_keywords", [])
+        
+        # Build generation prompt
+        generation_prompt = await self._build_section_generation_prompt(
+            section_title, section_objective, key_points, target_word_count,
+            seo_keywords, style_context, project_context, section_index
+        )
+        
+        # Generate content
+        response = self.step(generation_prompt)
+        raw_content = response.msg.content
+        
+        # Clean and process content
+        processed_content = self._clean_generated_content(raw_content)
+        
+        # Analyze section
+        keywords_used = self._extract_keywords_used(processed_content, seo_keywords)
+        tone_score = await self._calculate_tone_adherence(processed_content, style_context)
+        
+        return ContentSection(
+            title=section_title,
+            content=processed_content,
+            word_count=len(processed_content.split()),
+            keywords_used=keywords_used,
+            tone_adherence_score=tone_score
+        )
+    
+    async def _build_section_generation_prompt(self,
+                                             title: str,
+                                             objective: str,
+                                             key_points: List[str],
+                                             target_word_count: int,
+                                             seo_keywords: List[str],
+                                             style_context: Optional[Dict[str, Any]],
+                                             project_context: Dict[str, Any],
+                                             section_index: int) -> str:
+        """Build comprehensive prompt for section generation"""
+        
+        # Style guidance
+        style_guidance = ""
+        if style_context and style_context.get("key_insights"):
+            insights = style_context["key_insights"]
+            style_guidance = f"""
+            BRAND VOICE REQUIREMENTS:
+            • Tone: {insights.get('primary_tone', 'professional')}
+            • Formality Level: {insights.get('formality_level', 3)}/5
+            • Audience: {insights.get('audience', 'professionals')}
+            • Language Code: {insights.get('language_code', 'N/A')}
+            
+            STYLE GUIDELINES:
+            • Follow the established brand voice patterns
+            • Maintain consistency with previous brand content
+            • Use vocabulary and sentence structure that matches the brand
+            """
+        
+        # Project context
+        context_info = ""
+        if project_context:
+            if project_context.get("brand_info"):
+                context_info += f"BRAND CONTEXT: {project_context['brand_info'][0][:200]}...\n"
+            if project_context.get("product_info"):
+                context_info += f"PRODUCT CONTEXT: {project_context['product_info'][0][:200]}...\n"
+        
+        # SEO guidance
+        seo_guidance = ""
+        if seo_keywords:
+            seo_guidance = f"""
+            SEO REQUIREMENTS:
+            • Primary keywords to include: {', '.join(seo_keywords[:3])}
+            • Integrate keywords naturally into the content
+            • Use keywords in subheadings where appropriate
+            • Maintain natural readability while optimizing for search
+            """
+        
+        # Opening style for first section
+        opening_style = ""
+        if section_index == 0:
+            opening_style = """
+            OPENING SECTION REQUIREMENTS:
+            • Start with an engaging hook (question, statistic, or compelling statement)
+            • Clearly introduce the main topic
+            • Set expectations for what readers will learn
+            • Create immediate value and interest
+            """
+        
+        return f"""
+        Generate high-quality content for this section following all guidelines:
+
+        SECTION DETAILS:
+        • Title: {title}
+        • Objective: {objective}
+        • Target Word Count: {target_word_count} words
+        • Key Points to Cover: {', '.join(key_points) if key_points else 'Develop content based on title and objective'}
+
+        {style_guidance}
+        {context_info}
+        {seo_guidance}
+        {opening_style}
+
+        CONTENT REQUIREMENTS:
+        1. Write engaging, well-structured content that fulfills the section objective
+        2. Cover all key points thoroughly and naturally
+        3. Maintain brand voice consistency throughout
+        4. Include specific examples, details, or evidence where relevant
+        5. Use clear, readable language appropriate for the target audience
+        6. Create smooth flow and logical progression of ideas
+        7. End with a natural transition or conclusion for the section
+
+        QUALITY STANDARDS:
+        • Professional, error-free writing
+        • Engaging and informative content
+        • Natural keyword integration
+        • Clear value delivery to readers
+        • Consistent brand voice and tone
+        • Appropriate depth for the target word count
+
+        Generate the content now:
+        """
+    
+    def _clean_generated_content(self, raw_content: str) -> str:
+        """Clean and process generated content"""
+        # Remove any system instructions or formatting artifacts
+        content = raw_content.strip()
+        
+        # Remove common AI-generated prefixes
         prefixes_to_remove = [
-            "Here's the content:",
-            "Here is the content:",
-            "Content:",
-            "Generated content:",
-            "Section content:"
+            "Here's the content for this section:",
+            "Here is the generated content:",
+            "Content for this section:",
+            "Section content:",
+            "Generated content:"
         ]
         
         for prefix in prefixes_to_remove:
-            if content.strip().startswith(prefix):
-                content = content.replace(prefix, "").strip()
+            if content.lower().startswith(prefix.lower()):
+                content = content[len(prefix):].strip()
         
-        # Remove excessive whitespace
+        # Clean up excessive whitespace
         content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
         content = re.sub(r' +', ' ', content)
         
-        # Fix common formatting issues
-        content = content.strip()
+        # Ensure proper paragraph breaks
+        sentences = content.split('. ')
+        if len(sentences) > 3:
+            # Add paragraph breaks every 3-4 sentences for readability
+            paragraphs = []
+            current_paragraph = []
+            
+            for i, sentence in enumerate(sentences):
+                current_paragraph.append(sentence)
+                if (i + 1) % 3 == 0 and i < len(sentences) - 1:
+                    paragraphs.append('. '.join(current_paragraph) + '.')
+                    current_paragraph = []
+            
+            if current_paragraph:
+                paragraphs.append('. '.join(current_paragraph))
+            
+            content = '\n\n'.join(paragraphs)
         
         return content
     
     def _extract_keywords_used(self, content: str, target_keywords: List[str]) -> List[str]:
         """Extract which target keywords were actually used in the content"""
-        
         used_keywords = []
         content_lower = content.lower()
         
         for keyword in target_keywords:
             if keyword.lower() in content_lower:
                 used_keywords.append(keyword)
-                
+        
         return used_keywords
     
-    async def _evaluate_tone_adherence(self, 
-                                     content: str,
-                                     tone_guidance: str,
-                                     brand_voice: Dict[str, Any]) -> float:
-        """Evaluate how well content adheres to tone guidelines"""
+    async def _calculate_tone_adherence(self, content: str, style_context: Optional[Dict[str, Any]]) -> float:
+        """Calculate how well content adheres to brand tone"""
+        if not style_context or not style_context.get("key_insights"):
+            return 0.7  # Default score when no style context
         
         try:
-            # Simple tone evaluation based on word choice and sentence structure
-            score = 0.0
+            insights = style_context["key_insights"]
+            target_tone = insights.get("primary_tone", "professional")
+            formality_level = insights.get("formality_level", 3)
             
-            # Check formality level
-            formality_level = brand_voice.get('formality_level', 3)
-            formal_indicators = ['furthermore', 'moreover', 'consequently', 'therefore', 'subsequently']
-            casual_indicators = ['you\'ll', 'here\'s', 'let\'s', 'don\'t', 'can\'t']
+            # Simple tone analysis based on content characteristics
+            word_count = len(content.split())
+            avg_sentence_length = len(content.split()) / max(1, content.count('.'))
             
-            content_lower = content.lower()
-            formal_count = sum(1 for indicator in formal_indicators if indicator in content_lower)
-            casual_count = sum(1 for indicator in casual_indicators if indicator in content_lower)
+            # Calculate formality indicators
+            formal_words = ["utilize", "implement", "furthermore", "subsequently", "therefore"]
+            casual_words = ["use", "do", "also", "then", "so", "get", "make"]
             
-            # Score based on formality match
-            if formality_level >= 7:  # Very formal
-                score += 0.3 if formal_count > casual_count else 0.1
-            elif formality_level <= 3:  # Very casual  
-                score += 0.3 if casual_count > formal_count else 0.1
-            else:  # Balanced
-                score += 0.3
+            formal_count = sum(1 for word in formal_words if word in content.lower())
+            casual_count = sum(1 for word in casual_words if word in content.lower())
             
-            # Check for personality traits
-            personality_traits = brand_voice.get('personality_traits', [])
-            if personality_traits:
-                # Simple check for trait-related words
-                trait_matches = 0
-                for trait in personality_traits[:3]:
-                    if trait.lower() in content_lower:
-                        trait_matches += 1
-                score += (trait_matches / len(personality_traits[:3])) * 0.3
+            # Score based on target tone
+            if target_tone == "professional":
+                if formality_level >= 4:  # Highly formal
+                    score = 0.8 + (formal_count / max(1, formal_count + casual_count)) * 0.2
+                else:  # Moderately formal
+                    score = 0.7 + (min(formal_count, casual_count) / max(1, formal_count + casual_count)) * 0.3
+            elif target_tone == "casual":
+                score = 0.7 + (casual_count / max(1, formal_count + casual_count)) * 0.3
             else:
-                score += 0.3
+                score = 0.8  # Default for other tones
             
-            # Check vocabulary level
-            vocabulary_level = brand_voice.get('vocabulary_level', 5)
-            words = content.split()
-            complex_words = [word for word in words if len(word) > 7]
-            complex_ratio = len(complex_words) / len(words) if words else 0
-            
-            if vocabulary_level >= 7:  # Advanced vocabulary expected
-                score += 0.4 if complex_ratio > 0.15 else 0.2
-            elif vocabulary_level <= 3:  # Simple vocabulary expected
-                score += 0.4 if complex_ratio < 0.08 else 0.2
-            else:  # Moderate vocabulary
-                score += 0.4 if 0.08 <= complex_ratio <= 0.15 else 0.2
-            
-            return min(score, 1.0)  # Cap at 1.0
+            return min(1.0, max(0.0, score))
             
         except Exception as e:
-            self.logger.warning(f"Tone evaluation failed: {e}")
-            return 0.7  # Return neutral score on failure
+            self.logger.warning(f"Tone adherence calculation failed: {e}")
+            return 0.7
     
-    async def _combine_sections(self, 
-                              sections: List[ContentSection],
-                              content_type: str) -> str:
-        """Combine sections into cohesive full content"""
+    async def _combine_sections_into_content(self,
+                                           sections: List[ContentSection],
+                                           content_plan: Dict[str, Any],
+                                           style_context: Optional[Dict[str, Any]]) -> str:
+        """Combine generated sections into cohesive full content"""
         
-        combined_content = ""
+        if not sections:
+            return "No content sections generated."
         
+        # Extract content plan details
+        title = content_plan.get("title", "Generated Content")
+        content_type = content_plan.get("content_type", "blog_post")
+        
+        # Build full content
+        content_parts = []
+        
+        # Add title (for certain content types)
+        if content_type in ["blog_post", "article"]:
+            content_parts.append(f"# {title}\n")
+        
+        # Add sections with appropriate headers
         for i, section in enumerate(sections):
-            # Add section title as header
-            if content_type in ['blog_post', 'whitepaper', 'case_study']:
-                # Use H2 headers for main sections
-                combined_content += f"## {section.title}\n\n"
-            elif content_type in ['landing_page', 'web_copy']:
-                # Use different formatting for landing pages
-                if i == 0:  # First section (hero)
-                    combined_content += f"# {section.title}\n\n"
-                else:
-                    combined_content += f"## {section.title}\n\n"
-            else:
-                # Default formatting
-                combined_content += f"**{section.title}**\n\n"
+            if content_type in ["blog_post", "article"]:
+                content_parts.append(f"## {section.title}\n")
             
-            # Add section content
-            combined_content += section.content + "\n\n"
+            content_parts.append(section.content)
             
-            # Add subsections if they exist
-            if section.subsections:
-                for subsection in section.subsections:
-                    combined_content += f"### {subsection.title}\n\n"
-                    combined_content += subsection.content + "\n\n"
+            # Add spacing between sections
+            if i < len(sections) - 1:
+                content_parts.append("\n")
         
-        # Clean up excessive whitespace
-        combined_content = re.sub(r'\n\s*\n\s*\n', '\n\n', combined_content)
+        # Join all parts
+        full_content = "\n".join(content_parts)
         
-        return combined_content.strip()
+        # Add conclusion CTA if needed
+        if content_type in ["blog_post", "article"]:
+            full_content = await self._add_conclusion_cta(full_content, content_plan, style_context)
+        
+        return full_content
     
-    async def _analyze_seo_performance(self, 
-                                     content: str,
-                                     seo_strategy: Dict[str, Any]) -> Dict[str, Any]:
+    async def _add_conclusion_cta(self,
+                                content: str,
+                                content_plan: Dict[str, Any],
+                                style_context: Optional[Dict[str, Any]]) -> str:
+        """Add conclusion and call-to-action if needed"""
+        
+        # Check if content already has a strong conclusion
+        if any(keyword in content.lower()[-200:] for keyword in ["conclusion", "in summary", "to conclude", "call to action"]):
+            return content
+        
+        try:
+            # Generate a brief CTA based on content goal
+            planning_summary = content_plan.get("planning_summary", {})
+            objective = planning_summary.get("objective", "inform")
+            
+            cta_prompt = f"""
+            Write a brief, engaging conclusion and call-to-action for this content.
+            
+            Content Objective: {objective}
+            Content Type: {content_plan.get("content_type", "blog_post")}
+            
+            The conclusion should:
+            • Briefly summarize the key value provided
+            • Include an appropriate call-to-action
+            • Be 2-3 sentences maximum
+            • Match the established tone and style
+            
+            Write only the conclusion paragraph:
+            """
+            
+            response = self.step(cta_prompt)
+            conclusion = self._clean_generated_content(response.msg.content)
+            
+            return content + "\n\n" + conclusion
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to add conclusion CTA: {e}")
+            return content
+    
+    async def _analyze_seo_performance(self, content: str, seo_guidelines: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze SEO performance of generated content"""
         
         analysis = {
             "keyword_density": {},
-            "keyword_distribution": {},
-            "seo_score": 0.0,
-            "recommendations": []
+            "keyword_placement": {},
+            "readability_score": 0.0,
+            "meta_optimization": {},
+            "header_optimization": {},
+            "overall_seo_score": 0.0
         }
         
         try:
-            content_lower = content.lower()
-            word_count = len(content.split())
+            primary_keyword = seo_guidelines.get("primary_keyword", "")
+            secondary_keywords = seo_guidelines.get("secondary_keywords", [])
             
-            # Analyze primary keywords
-            primary_keywords = seo_strategy.get('primary_keywords', [])
-            for keyword in primary_keywords:
-                keyword_count = content_lower.count(keyword.lower())
-                density = (keyword_count / word_count) if word_count > 0 else 0
-                analysis["keyword_density"][keyword] = {
-                    "count": keyword_count,
-                    "density": density,
-                    "target_density": 0.015,  # 1.5% target
-                    "meets_target": 0.01 <= density <= 0.02
-                }
+            if primary_keyword:
+                # Calculate keyword density
+                content_words = content.lower().split()
+                primary_count = content.lower().count(primary_keyword.lower())
+                analysis["keyword_density"]["primary"] = primary_count / len(content_words) if content_words else 0
+                
+                # Check keyword placement
+                analysis["keyword_placement"]["in_title"] = primary_keyword.lower() in content[:100].lower()
+                analysis["keyword_placement"]["in_first_paragraph"] = primary_keyword.lower() in content[:300].lower()
+                analysis["keyword_placement"]["in_headers"] = "##" in content and primary_keyword.lower() in content.lower()
             
             # Analyze secondary keywords
-            secondary_keywords = seo_strategy.get('secondary_keywords', [])
-            for keyword in secondary_keywords:
-                keyword_count = content_lower.count(keyword.lower())
-                density = (keyword_count / word_count) if word_count > 0 else 0
-                analysis["keyword_density"][keyword] = {
-                    "count": keyword_count,
-                    "density": density,
-                    "target_density": 0.01,  # 1% target
-                    "meets_target": 0.005 <= density <= 0.015
-                }
+            for keyword in secondary_keywords[:3]:
+                keyword_count = content.lower().count(keyword.lower())
+                analysis["keyword_density"][keyword] = keyword_count / len(content.split()) if content.split() else 0
+            
+            # Simple readability score (based on sentence length and word length)
+            sentences = content.count('.') + content.count('!') + content.count('?')
+            words = len(content.split())
+            avg_sentence_length = words / max(1, sentences)
+            avg_word_length = sum(len(word) for word in content.split()) / max(1, len(content.split()))
+            
+            # Flesch reading ease approximation
+            analysis["readability_score"] = max(0, min(100, 206.835 - (1.015 * avg_sentence_length) - (84.6 * (avg_word_length / 4.7))))
             
             # Calculate overall SEO score
-            keyword_scores = []
-            for keyword_data in analysis["keyword_density"].values():
-                if keyword_data["meets_target"]:
-                    keyword_scores.append(1.0)
-                elif keyword_data["count"] > 0:
-                    keyword_scores.append(0.5)
-                else:
-                    keyword_scores.append(0.0)
+            seo_factors = []
             
-            analysis["seo_score"] = sum(keyword_scores) / len(keyword_scores) if keyword_scores else 0.0
+            if analysis["keyword_density"].get("primary", 0) > 0:
+                seo_factors.append(0.8 if 0.01 <= analysis["keyword_density"]["primary"] <= 0.03 else 0.5)
             
-            # Generate recommendations
-            recommendations = []
-            for keyword, data in analysis["keyword_density"].items():
-                if data["count"] == 0:
-                    recommendations.append(f"Add '{keyword}' to the content")
-                elif data["density"] < 0.005:
-                    recommendations.append(f"Increase usage of '{keyword}' (current: {data['density']:.1%})")
-                elif data["density"] > 0.025:
-                    recommendations.append(f"Reduce usage of '{keyword}' (current: {data['density']:.1%})")
+            if analysis["keyword_placement"].get("in_title"):
+                seo_factors.append(1.0)
+            else:
+                seo_factors.append(0.6)
             
-            if not recommendations:
-                recommendations.append("SEO keyword integration looks good!")
+            if 30 <= analysis["readability_score"] <= 80:
+                seo_factors.append(0.9)
+            else:
+                seo_factors.append(0.6)
             
-            analysis["recommendations"] = recommendations
+            analysis["overall_seo_score"] = sum(seo_factors) / len(seo_factors) if seo_factors else 0.5
             
         except Exception as e:
-            self.logger.error(f"SEO analysis failed: {e}")
-            analysis["error"] = str(e)
+            self.logger.warning(f"SEO analysis failed: {e}")
+            analysis["overall_seo_score"] = 0.5
         
         return analysis
     
-    async def _analyze_brand_voice_consistency(self, 
-                                             content: str,
-                                             brand_voice: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze brand voice consistency in generated content"""
+    async def _analyze_brand_voice_consistency(self, content: str, style_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze brand voice consistency of generated content"""
         
         analysis = {
-            "consistency_score": 0.0,
-            "tone_match": 0.0,
-            "formality_match": 0.0,
-            "vocabulary_match": 0.0,
-            "personality_match": 0.0,
-            "recommendations": []
+            "tone_consistency": 0.0,
+            "vocabulary_alignment": 0.0,
+            "sentence_structure_match": 0.0,
+            "overall_brand_score": 0.0,
+            "deviations": []
         }
         
         try:
+            if not style_context or not style_context.get("key_insights"):
+                analysis["overall_brand_score"] = 0.7  # Default when no style context
+                return analysis
+            
+            insights = style_context["key_insights"]
+            
             # Analyze tone consistency
-            tone = brand_voice.get('tone', 'professional')
-            tone_score = await self._evaluate_tone_adherence(content, f"Use {tone} tone", brand_voice)
-            analysis["tone_match"] = tone_score
+            target_tone = insights.get("primary_tone", "professional")
+            formality_level = insights.get("formality_level", 3)
             
-            # Analyze formality level
-            formality_level = brand_voice.get('formality_level', 3)
-            formality_score = self._evaluate_formality_match(content, formality_level)
-            analysis["formality_match"] = formality_score
+            # Simple tone analysis
+            formal_indicators = ["utilize", "implement", "demonstrate", "establish"]
+            casual_indicators = ["use", "do", "show", "set up", "get"]
             
-            # Analyze vocabulary complexity
-            vocabulary_level = brand_voice.get('vocabulary_level', 5)
-            vocabulary_score = self._evaluate_vocabulary_match(content, vocabulary_level)
-            analysis["vocabulary_match"] = vocabulary_score
+            formal_count = sum(1 for word in formal_indicators if word in content.lower())
+            casual_count = sum(1 for word in casual_indicators if word in content.lower())
             
-            # Analyze personality traits
-            personality_traits = brand_voice.get('personality_traits', [])
-            personality_score = self._evaluate_personality_match(content, personality_traits)
-            analysis["personality_match"] = personality_score
+            if target_tone == "professional" and formality_level >= 4:
+                analysis["tone_consistency"] = 0.8 + (formal_count / max(1, formal_count + casual_count)) * 0.2
+            elif target_tone == "casual":
+                analysis["tone_consistency"] = 0.8 + (casual_count / max(1, formal_count + casual_count)) * 0.2
+            else:
+                analysis["tone_consistency"] = 0.8
             
-            # Calculate overall consistency score
-            scores = [tone_score, formality_score, vocabulary_score, personality_score]
-            analysis["consistency_score"] = sum(scores) / len(scores)
+            # Analyze sentence structure
+            sentences = content.split('.')
+            avg_sentence_length = sum(len(s.split()) for s in sentences) / max(1, len(sentences))
             
-            # Generate recommendations
-            recommendations = []
-            if tone_score < 0.7:
-                recommendations.append(f"Improve {tone} tone consistency")
-            if formality_score < 0.7:
-                recommendations.append(f"Adjust formality to level {formality_level}/10")
-            if vocabulary_score < 0.7:
-                recommendations.append(f"Adjust vocabulary complexity to level {vocabulary_level}/10")
-            if personality_score < 0.7 and personality_traits:
-                recommendations.append(f"Better incorporate personality traits: {', '.join(personality_traits[:2])}")
+            # Compare to style context if available
+            if style_context.get("detailed_analysis", {}).get("linguistic_features"):
+                target_avg = style_context["detailed_analysis"]["linguistic_features"].get("avg_sentence_length", 15)
+                length_diff = abs(avg_sentence_length - target_avg) / target_avg
+                analysis["sentence_structure_match"] = max(0.0, 1.0 - length_diff)
+            else:
+                analysis["sentence_structure_match"] = 0.8
             
-            if not recommendations:
-                recommendations.append("Brand voice consistency is excellent!")
+            # Vocabulary alignment (simplified)
+            analysis["vocabulary_alignment"] = 0.8  # Default - would need more sophisticated analysis
             
-            analysis["recommendations"] = recommendations
+            # Overall brand score
+            analysis["overall_brand_score"] = (
+                analysis["tone_consistency"] * 0.4 +
+                analysis["vocabulary_alignment"] * 0.3 +
+                analysis["sentence_structure_match"] * 0.3
+            )
+            
+            # Identify deviations
+            if analysis["tone_consistency"] < 0.7:
+                analysis["deviations"].append("Tone does not match brand guidelines")
+            if analysis["sentence_structure_match"] < 0.7:
+                analysis["deviations"].append("Sentence structure differs from brand style")
             
         except Exception as e:
-            self.logger.error(f"Brand voice analysis failed: {e}")
-            analysis["error"] = str(e)
+            self.logger.warning(f"Brand voice analysis failed: {e}")
+            analysis["overall_brand_score"] = 0.7
         
         return analysis
     
-    def _evaluate_formality_match(self, content: str, target_formality: int) -> float:
-        """Evaluate formality level match"""
-        
-        content_lower = content.lower()
-        
-        # Formal indicators
-        formal_indicators = [
-            'furthermore', 'moreover', 'consequently', 'therefore', 'subsequently',
-            'nevertheless', 'accordingly', 'additionally', 'specifically', 'particularly'
-        ]
-        
-        # Casual indicators
-        casual_indicators = [
-            "you'll", "here's", "let's", "don't", "can't", "won't", "we're",
-            "that's", "it's", "what's", "how's", "there's"
-        ]
-        
-        formal_count = sum(1 for indicator in formal_indicators if indicator in content_lower)
-        casual_count = sum(1 for indicator in casual_indicators if indicator in content_lower)
-        
-        total_sentences = len([s for s in content.split('.') if s.strip()])
-        formal_ratio = formal_count / max(total_sentences, 1)
-        casual_ratio = casual_count / max(total_sentences, 1)
-        
-        if target_formality >= 7:  # Very formal expected
-            return min(1.0, formal_ratio * 2) * 0.7 + (0.3 if casual_ratio < 0.1 else 0.1)
-        elif target_formality <= 3:  # Very casual expected
-            return min(1.0, casual_ratio * 2) * 0.7 + (0.3 if formal_ratio < 0.05 else 0.1)
-        else:  # Balanced
-            balance_score = 1.0 - abs(formal_ratio - casual_ratio)
-            return max(0.5, balance_score)
-    
-    def _evaluate_vocabulary_match(self, content: str, target_vocabulary: int) -> float:
-        """Evaluate vocabulary complexity match"""
-        
-        words = [word.strip('.,!?;:"()[]') for word in content.split()]
-        total_words = len(words)
-        
-        if total_words == 0:
-            return 0.0
-        
-        # Calculate metrics
-        long_words = [word for word in words if len(word) > 6]
-        very_long_words = [word for word in words if len(word) > 10]
-        
-        long_word_ratio = len(long_words) / total_words
-        very_long_word_ratio = len(very_long_words) / total_words
-        avg_word_length = sum(len(word) for word in words) / total_words
-        
-        # Score based on target vocabulary level
-        if target_vocabulary >= 8:  # Very advanced
-            score = 0.0
-            if long_word_ratio > 0.2:
-                score += 0.4
-            if very_long_word_ratio > 0.05:
-                score += 0.3
-            if avg_word_length > 5.5:
-                score += 0.3
-        elif target_vocabulary <= 3:  # Very simple
-            score = 0.0
-            if long_word_ratio < 0.1:
-                score += 0.4
-            if very_long_word_ratio < 0.02:
-                score += 0.3
-            if avg_word_length < 4.5:
-                score += 0.3
-        else:  # Moderate
-            score = 0.0
-            if 0.1 <= long_word_ratio <= 0.2:
-                score += 0.4
-            if 0.02 <= very_long_word_ratio <= 0.05:
-                score += 0.3
-            if 4.5 <= avg_word_length <= 5.5:
-                score += 0.3
-        
-        return min(score, 1.0)
-    
-    def _evaluate_personality_match(self, content: str, personality_traits: List[str]) -> float:
-        """Evaluate personality traits expression"""
-        
-        if not personality_traits:
-            return 1.0  # No traits to match
-        
-        content_lower = content.lower()
-        trait_indicators = {
-            'helpful': ['help', 'assist', 'support', 'guide', 'tip', 'advice'],
-            'friendly': ['welcome', 'great', 'awesome', 'wonderful', 'excited'],
-            'professional': ['experience', 'expertise', 'solution', 'approach', 'strategy'],
-            'authoritative': ['research', 'data', 'study', 'proven', 'evidence'],
-            'innovative': ['new', 'cutting-edge', 'advanced', 'breakthrough', 'revolutionary'],
-            'trustworthy': ['reliable', 'proven', 'trusted', 'guarantee', 'secure'],
-            'approachable': ['easy', 'simple', 'straightforward', 'accessible', 'clear']
-        }
-        
-        matches = 0
-        for trait in personality_traits[:3]:  # Check top 3 traits
-            trait_lower = trait.lower()
-            if trait_lower in trait_indicators:
-                indicators = trait_indicators[trait_lower]
-                if any(indicator in content_lower for indicator in indicators):
-                    matches += 1
-            else:
-                # Direct trait word check
-                if trait_lower in content_lower:
-                    matches += 1
-        
-        return matches / min(len(personality_traits), 3)
-    
-    async def _calculate_quality_scores(self, 
-                                      content: str,
-                                      content_plan: Dict[str, Any]) -> Dict[str, float]:
-        """Calculate various quality scores for the content"""
+    async def _calculate_quality_scores(self, content: str, content_plan: Dict[str, Any]) -> Dict[str, float]:
+        """Calculate overall quality scores for the content"""
         
         scores = {
-            "overall": 0.0,
             "readability": 0.0,
-            "engagement": 0.0,
             "completeness": 0.0,
-            "originality": 0.0
+            "engagement": 0.0,
+            "accuracy": 0.0,
+            "overall": 0.0
         }
         
         try:
-            # Readability score (simple metrics)
-            sentences = [s.strip() for s in content.split('.') if s.strip()]
+            # Readability score (simplified Flesch reading ease)
             words = content.split()
+            sentences = content.count('.') + content.count('!') + content.count('?')
+            avg_sentence_length = len(words) / max(1, sentences)
             
-            if len(sentences) > 0 and len(words) > 0:
-                avg_sentence_length = len(words) / len(sentences)
-                # Good readability: 15-20 words per sentence
-                if 10 <= avg_sentence_length <= 25:
-                    scores["readability"] = 0.9
-                elif 8 <= avg_sentence_length <= 30:
-                    scores["readability"] = 0.7
-                else:
-                    scores["readability"] = 0.5
+            # Approximate readability
+            readability_raw = max(0, min(100, 100 - (avg_sentence_length * 2)))
+            scores["readability"] = readability_raw / 100
             
-            # Engagement score (based on content elements)
-            engagement_indicators = [
-                '?',  # Questions engage readers
-                '!',  # Exclamations show energy
-                'you', 'your',  # Direct address
-                'how', 'why', 'what',  # Question words
-                'tip', 'secret', 'discover'  # Engaging words
-            ]
+            # Completeness (based on word count vs target)
+            target_count = content_plan.get("planning_summary", {}).get("total_word_count", 1000)
+            actual_count = len(words)
+            completeness_ratio = min(1.0, actual_count / max(1, target_count))
+            scores["completeness"] = completeness_ratio if completeness_ratio >= 0.8 else completeness_ratio * 0.8
             
-            content_lower = content.lower()
-            engagement_count = sum(1 for indicator in engagement_indicators if indicator in content_lower)
-            scores["engagement"] = min(1.0, engagement_count / 10)
+            # Engagement (based on content features)
+            engagement_factors = []
             
-            # Completeness score (based on meeting word count targets)
-            target_words = content_plan.get('estimated_total_words', 1000)
-            actual_words = len(words)
-            word_ratio = actual_words / target_words if target_words > 0 else 0
+            # Check for engaging elements
+            has_questions = '?' in content
+            has_examples = any(word in content.lower() for word in ['example', 'for instance', 'such as'])
+            has_transitions = any(word in content.lower() for word in ['however', 'moreover', 'furthermore'])
             
-            if 0.8 <= word_ratio <= 1.2:  # Within 20% of target
-                scores["completeness"] = 1.0
-            elif 0.6 <= word_ratio <= 1.4:  # Within 40% of target
-                scores["completeness"] = 0.8
-            else:
-                scores["completeness"] = 0.6
+            engagement_factors.extend([has_questions, has_examples, has_transitions])
+            scores["engagement"] = sum(engagement_factors) / len(engagement_factors)
             
-            # Originality score (simple uniqueness check)
-            unique_words = len(set(word.lower() for word in words))
-            uniqueness_ratio = unique_words / len(words) if len(words) > 0 else 0
-            scores["originality"] = min(1.0, uniqueness_ratio * 2)
+            # Accuracy (default high score - would need fact checking)
+            scores["accuracy"] = 0.9
             
-            # Calculate overall score
-            scores["overall"] = sum(scores.values()) / (len(scores) - 1)  # Exclude overall from calculation
+            # Overall score
+            scores["overall"] = (
+                scores["readability"] * 0.25 +
+                scores["completeness"] * 0.25 +
+                scores["engagement"] * 0.25 +
+                scores["accuracy"] * 0.25
+            )
             
         except Exception as e:
-            self.logger.error(f"Quality score calculation failed: {e}")
-            # Return default scores
+            self.logger.warning(f"Quality score calculation failed: {e}")
             scores = {k: 0.7 for k in scores.keys()}
         
         return scores
     
     async def _store_generated_content(self, generated_content: GeneratedContent):
         """Store generated content in knowledge base"""
+        if not self.knowledge_base:
+            return
+        
         try:
-            content_data = {
-                "title": f"Generated Content: {generated_content.title}",
+            content_document = {
                 "type": "generated_content",
+                "title": f"Generated Content: {generated_content.title}",
                 "content": generated_content.full_content,
                 "metadata": {
+                    "content_id": generated_content.content_id,
                     "content_type": generated_content.content_type,
                     "word_count": generated_content.total_word_count,
-                    "quality_scores": generated_content.quality_scores,
-                    "seo_analysis": generated_content.seo_analysis,
-                    "brand_voice_analysis": generated_content.brand_voice_analysis,
-                    "generated_at": generated_content.generation_metadata["generated_at"]
+                    "quality_score": generated_content.quality_scores.get("overall", 0.0),
+                    "brand_voice_score": generated_content.brand_voice_analysis.get("overall_brand_score", 0.0),
+                    "seo_score": generated_content.seo_analysis.get("overall_seo_score", 0.0),
+                    "created_at": generated_content.created_at.isoformat()
                 }
             }
             
-            await self.knowledge_base.store_document(content_data)
-            self.logger.info(f"Generated content stored in knowledge base: {generated_content.title}")
+            await self.knowledge_base.store_document(content_document)
+            self.logger.info(f"Generated content stored: {generated_content.content_id}")
             
         except Exception as e:
             self.logger.error(f"Failed to store generated content: {e}")
     
-    async def refine_content_section(self, 
-                                   section_content: str,
-                                   refinement_instructions: str,
-                                   brand_voice: Dict[str, Any]) -> str:
-        """Refine a specific content section based on feedback"""
-        
-        refinement_prompt = f"""
-Refine the following content section based on the provided instructions while maintaining brand voice consistency.
-
-CURRENT CONTENT:
-{section_content}
-
-REFINEMENT INSTRUCTIONS:
-{refinement_instructions}
-
-BRAND VOICE GUIDELINES:
-• Tone: {brand_voice.get('tone', 'professional')}
-• Formality Level: {brand_voice.get('formality_level', 3)}/10
-• Vocabulary Level: {brand_voice.get('vocabulary_level', 5)}/10
-• Personality Traits: {', '.join(brand_voice.get('personality_traits', [])[:3])}
-
-REFINEMENT REQUIREMENTS:
-1. Address all points in the refinement instructions
-2. Maintain the established brand voice and tone
-3. Keep the core message and value intact
-4. Improve clarity, engagement, and readability
-5. Ensure smooth flow and natural transitions
-6. Preserve any important keywords or key phrases
-
-Provide the refined content:
-"""
-        
-        try:
-            response = self.step(refinement_prompt)
-            refined_content = response.msg.content if hasattr(response.msg, 'content') else str(response)
-            return self._clean_generated_content(refined_content)
+    async def _format_generation_output(self, generated_content: GeneratedContent) -> Dict[str, Any]:
+        """Format generated content for workflow system"""
+        return {
+            "content_id": generated_content.content_id,
+            "status": "completed",
+            "title": generated_content.title,
+            "content_type": generated_content.content_type,
             
-        except Exception as e:
-            self.logger.error(f"Content refinement failed: {e}")
-            return section_content  # Return original content if refinement fails
+            # Generated content
+            "content": {
+                "full_content": generated_content.full_content,
+                "sections": [section.to_dict() for section in generated_content.sections],
+                "word_count": generated_content.total_word_count
+            },
+            
+            # Analysis results
+            "analysis": {
+                "seo_performance": generated_content.seo_analysis,
+                "brand_voice_consistency": generated_content.brand_voice_analysis,
+                "quality_scores": generated_content.quality_scores
+            },
+            
+            # Performance metrics
+            "performance_summary": {
+                "overall_quality": generated_content.quality_scores.get("overall", 0.0),
+                "brand_consistency": generated_content.brand_voice_analysis.get("overall_brand_score", 0.0),
+                "seo_optimization": generated_content.seo_analysis.get("overall_seo_score", 0.0),
+                "readability": generated_content.quality_scores.get("readability", 0.0)
+            },
+            
+            # Metadata
+            "metadata": {
+                **generated_content.generation_metadata,
+                "created_at": generated_content.created_at.isoformat(),
+                "project_id": self.project_id
+            }
+        }
     
-    async def generate_content_variations(self, 
-                                        content: str,
-                                        num_variations: int = 3,
-                                        brand_voice: Dict[str, Any] = None) -> List[str]:
-        """Generate multiple variations of content for A/B testing"""
+    def _update_metrics(self, generation_time: float, quality_scores: Dict[str, float], brand_voice_analysis: Dict[str, Any]):
+        """Update performance metrics"""
+        self.metrics["content_generated"] += 1
         
+        # Update average generation time
+        prev_avg = self.metrics["average_generation_time"]
+        count = self.metrics["content_generated"]
+        self.metrics["average_generation_time"] = ((prev_avg * (count - 1)) + generation_time) / count
+        
+        # Track quality scores
+        self.metrics["quality_scores"].append(quality_scores.get("overall", 0.0))
+        self.metrics["brand_voice_consistency"].append(brand_voice_analysis.get("overall_brand_score", 0.0))
+        
+        # Keep only recent metrics (last 100)
+        if len(self.metrics["quality_scores"]) > 100:
+            self.metrics["quality_scores"] = self.metrics["quality_scores"][-100:]
+        if len(self.metrics["brand_voice_consistency"]) > 100:
+            self.metrics["brand_voice_consistency"] = self.metrics["brand_voice_consistency"][-100:]
+    
+    async def create_content_variations(self, content_id: str, num_variations: int = 3) -> List[str]:
+        """Create variations of existing content"""
+        if content_id not in self.content_cache:
+            raise ValueError(f"Content {content_id} not found in cache")
+        
+        original_content = self.content_cache[content_id]
         variations = []
         
         for i in range(num_variations):
             variation_prompt = f"""
-Create a variation of the following content that maintains the same core message but with different phrasing, structure, or approach.
+            Create a variation of this content that maintains the same key information and value proposition but uses different language, structure, and examples:
 
-ORIGINAL CONTENT:
-{content}
+            ORIGINAL CONTENT:
+            {original_content.full_content}
 
-VARIATION REQUIREMENTS:
-• Maintain the same key information and value proposition
-• Use different sentence structures and word choices
-• Keep the same brand voice and tone
-• Aim for similar length (±20% word count)
-• Make it unique from the original while serving the same purpose
+            VARIATION REQUIREMENTS:
+            • Maintain the same key information and value proposition
+            • Use different sentence structures and word choices
+            • Keep the same brand voice and tone
+            • Aim for similar length (±20% word count)
+            • Make it unique from the original while serving the same purpose
 
-Variation #{i+1}:
-"""
+            Variation #{i+1}:
+            """
             
             try:
                 response = self.step(variation_prompt)
-                variation = response.msg.content if hasattr(response.msg, 'content') else str(response)
-                variations.append(self._clean_generated_content(variation))
+                variation = self._clean_generated_content(response.msg.content)
+                variations.append(variation)
                 
             except Exception as e:
                 self.logger.error(f"Variation {i+1} generation failed: {e}")
@@ -942,11 +978,28 @@ Variation #{i+1}:
         
         return variations
     
+    def get_generation_metrics(self) -> Dict[str, Any]:
+        """Get content generator performance metrics"""
+        avg_quality = sum(self.metrics["quality_scores"]) / len(self.metrics["quality_scores"]) if self.metrics["quality_scores"] else 0.0
+        avg_brand_consistency = sum(self.metrics["brand_voice_consistency"]) / len(self.metrics["brand_voice_consistency"]) if self.metrics["brand_voice_consistency"] else 0.0
+        
+        return {
+            "content_generated": self.metrics["content_generated"],
+            "average_generation_time": self.metrics["average_generation_time"],
+            "average_quality_score": avg_quality,
+            "average_brand_consistency": avg_brand_consistency,
+            "cached_content_items": len(self.content_cache)
+        }
+    
     def process_task(self, task):
         """Process generation task - legacy method for backwards compatibility"""
         response = self.step(task)
         return response
 
+# Backwards compatibility class (matches existing naming convention)
+class contentgeneratorAgent(ProductionContentGeneratorAgent):
+    """Backwards compatibility wrapper for existing code"""
+    pass
 
 # Factory function for easy instantiation
 async def create_content_generator_agent(project_id: str = None) -> ProductionContentGeneratorAgent:
@@ -962,10 +1015,10 @@ async def create_content_generator_agent(project_id: str = None) -> ProductionCo
     generator = ProductionContentGeneratorAgent(project_id)
     return generator
 
-
 # Export main classes
 __all__ = [
     'ProductionContentGeneratorAgent',
+    'contentgeneratorAgent',  # For backwards compatibility
     'GeneratedContent',
     'ContentSection',
     'create_content_generator_agent'

@@ -9,10 +9,10 @@ and alignment with brand guidelines and project requirements.
 
 import asyncio
 import logging
-import re
 import json
-from typing import Dict, List, Any, Optional, Tuple
+import re
 from datetime import datetime
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
 
@@ -37,6 +37,8 @@ class IssueType(Enum):
     STRUCTURE = "structure"
     TONE = "tone"
     CONSISTENCY = "consistency"
+    FACTUAL = "factual"
+    READABILITY = "readability"
 
 class IssueSeverity(Enum):
     """Severity levels for identified issues"""
@@ -55,9 +57,13 @@ class ContentIssue:
     suggested_fix: str
     original_text: Optional[str] = None
     corrected_text: Optional[str] = None
+    line_number: Optional[int] = None
     
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        result['issue_type'] = self.issue_type.value
+        result['severity'] = self.severity.value
+        return result
 
 @dataclass
 class QualityMetrics:
@@ -69,6 +75,8 @@ class QualityMetrics:
     seo_score: float
     engagement_score: float
     readability_score: float
+    consistency_score: float
+    factual_accuracy_score: float
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -76,6 +84,7 @@ class QualityMetrics:
 @dataclass
 class EditingReport:
     """Comprehensive editing and QA report"""
+    report_id: str
     content_title: str
     review_date: datetime
     original_word_count: int
@@ -87,6 +96,11 @@ class EditingReport:
     edited_content: str
     editor_notes: str
     approval_status: str = "pending"
+    confidence_score: float = 0.0
+    
+    def __post_init__(self):
+        if self.review_date is None:
+            self.review_date = datetime.utcnow()
     
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -99,345 +113,535 @@ class ProductionEditorQAAgent(ChatAgent):
     """
     Production-grade Editor/QA Agent that provides comprehensive content review,
     editing, and quality assurance for content creation workflows.
+    
+    This agent performs:
+    - Grammar and spelling checks
+    - Brand voice consistency verification
+    - SEO optimization review
+    - Clarity and readability improvements
+    - Factual accuracy validation
+    - Structure and flow optimization
     """
     
     def __init__(self, project_id: str = None, **kwargs):
         self.project_id = project_id
-        self.logger = logging.getLogger(f"{__name__}.{project_id or 'standalone'}")
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         
-        # Initialize system message
-        system_message = self._create_editor_system_message()
-        super().__init__(system_message=system_message, **kwargs)
-        
-        # Initialize knowledge base connection
+        # Initialize knowledge base
         if project_id:
             self.knowledge_base = KnowledgeBase(project_id)
         else:
             self.knowledge_base = None
         
-        # Quality thresholds and standards
-        self.quality_standards = {
-            "minimum_overall_score": 0.85,
-            "minimum_grammar_score": 0.95,
-            "minimum_brand_voice_score": 0.80,
-            "minimum_clarity_score": 0.85,
-            "minimum_seo_score": 0.75,
-            "maximum_critical_issues": 0,
-            "maximum_high_issues": 2
+        # Initialize CAMEL agent
+        super().__init__(
+            system_message=self._create_system_message(),
+            **self._get_model_config(),
+            **kwargs
+        )
+        
+        # Quality standards and patterns
+        self.quality_standards = self._load_quality_standards()
+        self.editing_patterns = self._load_editing_patterns()
+        
+        # Review cache and history
+        self.review_cache: Dict[str, EditingReport] = {}
+        
+        # Performance metrics
+        self.metrics = {
+            "content_reviewed": 0,
+            "issues_identified": 0,
+            "improvements_made": 0,
+            "average_quality_improvement": 0.0,
+            "average_review_time": 0.0
         }
         
-        # Grammar and style rules
-        self.grammar_rules = {
-            "common_errors": [
-                (r'\bthe the\b', 'the'),
-                (r'\band and\b', 'and'),
-                (r'\bof of\b', 'of'),
-                (r'\bit\'s([^a-zA-Z])', r'its\1'),  # it's vs its
-                (r'\byour\b(?=\s+going)', 'you\'re'),  # your vs you're
-            ],
-            "punctuation_fixes": [
-                (r'\s+([,.!?;:])', r'\1'),  # Remove space before punctuation
-                (r'([,.!?;:])\s*([,.!?;:])', r'\1\2'),  # Remove duplicate punctuation
-                (r'\.{3,}', '...'),  # Fix multiple periods
-            ]
-        }
-        
-    def _create_editor_system_message(self) -> BaseMessage:
-        """Create comprehensive system message for editor/QA role"""
-        content = f"""
-            You are the Production Editor/QA Agent for SpinScribe, specializing in comprehensive content review and quality assurance.
-
-            CORE RESPONSIBILITIES:
-            • Conduct thorough content reviews for grammar, spelling, clarity, and consistency
-            • Ensure strict adherence to brand voice guidelines and style requirements
-            • Verify SEO optimization and keyword integration quality
-            • Identify and correct structural and flow issues
-            • Provide detailed feedback and improvement recommendations
-            • Ensure content meets all project requirements and quality standards
-
-            EDITORIAL EXPERTISE:
-            • Advanced grammar, punctuation, and spelling review
-            • Brand voice consistency analysis and correction
-            • Content structure optimization for readability and engagement
-            • SEO compliance verification and enhancement
-            • Tone and style alignment with brand guidelines
-            • Cross-reference checking against project requirements
-
-            QUALITY ASSURANCE METHODOLOGY:
-            • Multi-pass review process (grammar → style → brand voice → SEO → overall quality)
-            • Systematic issue identification with severity classification
-            • Detailed improvement tracking and recommendation generation
-            • Objective quality scoring across multiple dimensions
-            • Comprehensive reporting with actionable feedback
-
-            EDITORIAL STANDARDS:
-            • Zero tolerance for grammatical errors and spelling mistakes
-            • Brand voice consistency score must exceed 80%
-            • Content must achieve minimum 85% overall quality score
-            • All critical and high-severity issues must be resolved
-            • SEO requirements must be met without compromising readability
-
-            Project ID: {self.project_id or 'Not specified'}
-            """
-        
+        self.logger.info(f"Editor/QA Agent initialized for project: {project_id}")
+    
+    def _create_system_message(self) -> BaseMessage:
+        """Create system message for editor/QA role"""
         return BaseMessage.make_assistant_message(
-            role_name="editor_qa",
-            content=content
+            role_name="Content Editor & Quality Assurance",
+            content=f"""
+            You are a specialized Editor/QA Agent for SpinScribe, an expert in content quality assurance, editing, and brand consistency verification.
+            
+            CORE RESPONSIBILITIES:
+            • Perform comprehensive content review and quality assessment
+            • Identify and correct grammar, spelling, and structural issues
+            • Verify brand voice consistency and tone alignment
+            • Optimize content for SEO and readability
+            • Ensure factual accuracy and logical flow
+            • Provide detailed feedback and improvement recommendations
+
+            EDITING EXPERTISE:
+            • Advanced grammar and style correction
+            • Brand voice consistency verification
+            • SEO optimization and keyword integration review
+            • Readability and engagement enhancement
+            • Factual accuracy validation
+            • Content structure and flow optimization
+            • Clear, actionable feedback delivery
+
+            PROJECT CONTEXT: {self.project_id or "General Content Review"}
+            
+            QUALITY STANDARDS:
+            • Content must meet professional publishing standards
+            • Brand voice must be consistent with established guidelines
+            • All grammar and spelling errors must be identified and corrected
+            • SEO optimization should enhance, not compromise readability
+            • Content should engage and provide clear value to readers
+            • Factual claims should be accurate and well-supported
+
+            REVIEW METHODOLOGY:
+            • Conduct systematic analysis across multiple quality dimensions
+            • Identify issues with specific location and severity assessment
+            • Provide clear, actionable correction suggestions
+            • Maintain original author intent while improving execution
+            • Ensure all changes align with brand guidelines
+            • Deliver comprehensive feedback for continuous improvement
+
+            OUTPUT REQUIREMENTS:
+            • Detailed issue identification with specific locations
+            • Clear severity assessment for each issue found
+            • Actionable correction suggestions and improvements
+            • Comprehensive quality metrics and scoring
+            • Professional recommendations for content enhancement
+            • Final edited version ready for publication
+
+            You excel at transforming good content into exceptional content while maintaining brand consistency and maximizing reader engagement.
+            """
         )
     
-    async def review_content(self, 
-                           content: str,
-                           content_plan: Optional[Dict[str, Any]] = None,
-                           style_guide: Optional[Dict[str, Any]] = None,
-                           generation_metadata: Optional[Dict[str, Any]] = None) -> EditingReport:
+    def _get_model_config(self) -> Dict[str, Any]:
+        """Get model configuration for editing/QA"""
+        return {
+            "model_config": ChatGPTConfig(
+                temperature=0.3,  # Lower temperature for consistent, precise editing
+                max_tokens=4000
+            )
+        }
+    
+    def _load_quality_standards(self) -> Dict[str, Any]:
+        """Load quality standards and thresholds"""
+        return {
+            "grammar": {
+                "min_score": 0.95,
+                "critical_errors": ["subject_verb_disagreement", "incorrect_tense", "sentence_fragments"]
+            },
+            "readability": {
+                "target_flesch_score": (40, 80),  # Range for good readability
+                "max_sentence_length": 25,
+                "min_sentence_length": 8
+            },
+            "brand_voice": {
+                "consistency_threshold": 0.8,
+                "tone_deviation_tolerance": 0.2
+            },
+            "seo": {
+                "keyword_density_range": (0.01, 0.03),
+                "meta_title_length": (50, 60),
+                "meta_description_length": (150, 160)
+            },
+            "engagement": {
+                "min_questions_per_1000_words": 1,
+                "min_examples_per_section": 1,
+                "transition_word_frequency": 0.02
+            }
+        }
+    
+    def _load_editing_patterns(self) -> Dict[str, Any]:
+        """Load common editing patterns and corrections"""
+        return {
+            "common_errors": {
+                "redundancy": [
+                    "added bonus", "advance planning", "basic fundamentals",
+                    "close proximity", "end result", "exact same"
+                ],
+                "weak_words": [
+                    "very", "really", "quite", "rather", "pretty", "somewhat"
+                ],
+                "passive_indicators": [
+                    "was", "were", "is", "are", "been", "being"
+                ],
+                "filler_words": [
+                    "that", "just", "actually", "basically", "literally"
+                ]
+            },
+            "improvements": {
+                "power_words": [
+                    "proven", "effective", "essential", "critical", "breakthrough",
+                    "innovative", "exclusive", "guaranteed", "revolutionary"
+                ],
+                "transition_words": [
+                    "furthermore", "moreover", "consequently", "therefore",
+                    "however", "nevertheless", "specifically", "for instance"
+                ],
+                "action_verbs": [
+                    "achieve", "implement", "optimize", "enhance", "streamline",
+                    "maximize", "accelerate", "transform", "deliver"
+                ]
+            }
+        }
+    
+    async def edit_content(self,
+                         content: str,
+                         style_context: Optional[Dict[str, Any]] = None,
+                         quality_standards: Optional[Dict[str, Any]] = None,
+                         content_requirements: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Conduct comprehensive content review and generate editing report
+        Perform comprehensive content editing and QA
         
         Args:
             content: Content to review and edit
-            content_plan: Optional content plan for context
-            style_guide: Optional style guide for brand voice reference
-            generation_metadata: Optional metadata from content generation
+            style_context: Brand voice and style guidelines
+            quality_standards: Specific quality requirements
+            content_requirements: Additional content requirements
             
         Returns:
-            Complete EditingReport with analysis and edited content
+            Complete editing report with improved content
         """
-        self.logger.info("Starting comprehensive content review")
-        
         try:
-            content_title = content_plan.get('title', 'Untitled Content') if content_plan else 'Untitled Content'
-            original_word_count = len(content.split())
+            start_time = datetime.utcnow()
             
-            # Phase 1: Grammar and mechanics review
-            grammar_issues, grammar_corrected = await self._review_grammar_mechanics(content)
+            # Generate report ID
+            report_id = f"edit_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
             
-            # Phase 2: Style and clarity review  
-            style_issues, style_corrected = await self._review_style_clarity(grammar_corrected, style_guide)
+            # Get project context for editing
+            project_context = await self._get_project_context()
             
-            # Phase 3: Brand voice consistency review
-            brand_voice_issues, brand_voice_corrected = await self._review_brand_voice(style_corrected, style_guide)
-            
-            # Phase 4: SEO optimization review
-            seo_issues, seo_corrected = await self._review_seo_optimization(brand_voice_corrected, content_plan)
-            
-            # Phase 5: Final polish
-            structure_issues, final_content = await self._final_polish(seo_corrected, content_plan)
-            
-            # Compile all issues
-            all_issues = grammar_issues + style_issues + brand_voice_issues + seo_issues + structure_issues
-            
-            # Calculate quality metrics
-            quality_metrics = await self._calculate_quality_metrics(final_content, content_plan, style_guide, all_issues)
-            
-            # Generate improvements made summary
-            improvements_made = self._generate_improvements_summary(content, final_content, all_issues)
-            
-            # Generate recommendations
-            recommendations = await self._generate_recommendations(quality_metrics, all_issues, content_plan)
-            
-            # Determine approval status
-            approval_status = self._determine_approval_status(quality_metrics, all_issues)
-            
-            # Create comprehensive editing report
-            editing_report = EditingReport(
-                content_title=content_title,
-                review_date=datetime.now(),
-                original_word_count=original_word_count,
-                edited_word_count=len(final_content.split()),
-                quality_metrics=quality_metrics,
-                issues_identified=all_issues,
-                improvements_made=improvements_made,
-                recommendations=recommendations,
-                edited_content=final_content,
-                editor_notes=await self._generate_editor_notes(all_issues, quality_metrics),
-                approval_status=approval_status
+            # Perform comprehensive content analysis
+            issues_identified = await self._identify_content_issues(
+                content, style_context, project_context
             )
             
-            # Store report in knowledge base if available
-            if self.knowledge_base:
-                await self._store_editing_report(editing_report)
+            # Create edited version
+            edited_content = await self._create_edited_content(
+                content, issues_identified, style_context
+            )
             
-            self.logger.info(f"Content review completed. Quality score: {quality_metrics.overall_score:.2f}, Issues: {len(all_issues)}")
+            # Calculate quality metrics
+            quality_metrics = await self._calculate_quality_metrics(
+                content, edited_content, style_context, issues_identified
+            )
             
-            return editing_report
+            # Generate improvements made list
+            improvements_made = self._extract_improvements_made(issues_identified)
+            
+            # Generate recommendations
+            recommendations = await self._generate_recommendations(
+                quality_metrics, issues_identified, style_context
+            )
+            
+            # Create editing report
+            editing_report = EditingReport(
+                report_id=report_id,
+                content_title=content_requirements.get("title", "Content Review") if content_requirements else "Content Review",
+                review_date=datetime.utcnow(),
+                original_word_count=len(content.split()),
+                edited_word_count=len(edited_content.split()),
+                quality_metrics=quality_metrics,
+                issues_identified=issues_identified,
+                improvements_made=improvements_made,
+                recommendations=recommendations,
+                edited_content=edited_content,
+                editor_notes=await self._generate_editor_notes(issues_identified, quality_metrics),
+                confidence_score=self._calculate_confidence_score(quality_metrics, len(issues_identified))
+            )
+            
+            # Cache and store
+            self.review_cache[report_id] = editing_report
+            await self._store_editing_report(editing_report)
+            
+            # Update metrics
+            review_time = (datetime.utcnow() - start_time).total_seconds()
+            self._update_metrics(review_time, issues_identified, quality_metrics)
+            
+            self.logger.info(f"Content editing completed: {report_id}")
+            
+            return await self._format_editing_output(editing_report)
             
         except Exception as e:
-            self.logger.error(f"Content review failed: {e}")
+            self.logger.error(f"Content editing failed: {e}")
             raise
     
-    async def _review_grammar_mechanics(self, content: str) -> Tuple[List[ContentIssue], str]:
-        """Review and correct grammar and mechanical errors"""
-        
-        issues = []
-        corrected_content = content
-        
-        # Apply basic grammar fixes
-        for pattern, replacement in self.grammar_rules["common_errors"]:
-            matches = list(re.finditer(pattern, corrected_content, re.IGNORECASE))
-            for match in reversed(matches):  # Reverse to maintain positions
-                original_text = match.group(0)
-                corrected_text = re.sub(pattern, replacement, original_text, flags=re.IGNORECASE)
-                
-                if original_text != corrected_text:
-                    issue = ContentIssue(
-                        issue_type=IssueType.GRAMMAR,
-                        severity=IssueSeverity.MEDIUM,
-                        description=f"Grammar error: '{original_text}' should be '{corrected_text}'",
-                        location=f"Position {match.start()}-{match.end()}",
-                        suggested_fix=f"Replace '{original_text}' with '{corrected_text}'",
-                        original_text=original_text,
-                        corrected_text=corrected_text
-                    )
-                    issues.append(issue)
-                    
-                    # Apply correction
-                    corrected_content = corrected_content[:match.start()] + corrected_text + corrected_content[match.end():]
-        
-        # Apply punctuation fixes
-        for pattern, replacement in self.grammar_rules["punctuation_fixes"]:
-            old_content = corrected_content
-            corrected_content = re.sub(pattern, replacement, corrected_content)
-            
-            if old_content != corrected_content:
-                issue = ContentIssue(
-                    issue_type=IssueType.GRAMMAR,
-                    severity=IssueSeverity.LOW,
-                    description="Punctuation spacing corrected",
-                    location="Multiple locations",
-                    suggested_fix="Fixed punctuation spacing",
-                    original_text="Various punctuation issues",
-                    corrected_text="Corrected punctuation"
-                )
-                issues.append(issue)
-        
-        # Advanced grammar check using LLM if needed
-        if len(issues) > 5:  # Only if many issues found
-            advanced_issues, llm_corrected = await self._llm_grammar_check(corrected_content)
-            issues.extend(advanced_issues)
-            corrected_content = llm_corrected
-        
-        return issues, corrected_content
-    
-    async def _llm_grammar_check(self, content: str) -> Tuple[List[ContentIssue], str]:
-        """Use LLM for advanced grammar and spelling check"""
-        
-        grammar_prompt = f"""
-            Review the following content for grammar, spelling, and mechanical errors. Provide corrections while preserving the original meaning and style.
-
-            CONTENT TO REVIEW:
-            {content[:2000]}  # Limit content length
-
-            INSTRUCTIONS:
-            1. Identify and correct any grammar errors
-            2. Fix spelling mistakes
-            3. Correct punctuation errors
-            4. Maintain the original tone and style
-            5. Preserve the author's voice and intent
-
-            Provide the corrected content:
-            """
+    async def _get_project_context(self) -> Dict[str, Any]:
+        """Get project context for editing decisions"""
+        if not self.knowledge_base:
+            return {}
         
         try:
-            response = self.step(grammar_prompt)
-            llm_response = response.msg.content if hasattr(response.msg, 'content') else str(response)
+            # Query for style guides and quality standards
+            context_queries = [
+                "style guide brand voice guidelines",
+                "quality standards editing requirements",
+                "content examples approved content"
+            ]
             
-            # Clean up the response
-            corrected_content = self._clean_llm_response(llm_response)
+            context = {
+                "style_guidelines": [],
+                "quality_requirements": [],
+                "content_examples": []
+            }
             
-            # Create issue for LLM corrections
-            issues = []
-            if corrected_content != content and len(corrected_content) > 0:
-                issue = ContentIssue(
-                    issue_type=IssueType.GRAMMAR,
-                    severity=IssueSeverity.MEDIUM,
-                    description="Advanced grammar and spelling corrections applied",
-                    location="Throughout content",
-                    suggested_fix="Applied comprehensive grammar corrections",
-                    original_text="Original content with errors",
-                    corrected_text="Corrected content"
-                )
-                issues.append(issue)
+            for query in context_queries:
+                results = await self.knowledge_base.query_knowledge(query, limit=3)
+                
+                for result in results:
+                    content_type = result.get("type", "general")
+                    content_text = result.get("content", "")
+                    
+                    if "style" in content_type or "brand" in content_type:
+                        context["style_guidelines"].append(content_text)
+                    elif "quality" in content_type or "standard" in content_type:
+                        context["quality_requirements"].append(content_text)
+                    elif "content" in content_type or "example" in content_type:
+                        context["content_examples"].append(content_text)
             
-            return issues, corrected_content if corrected_content else content
+            return context
             
         except Exception as e:
-            self.logger.error(f"LLM grammar check failed: {e}")
-            return [], content
+            self.logger.warning(f"Failed to get project context: {e}")
+            return {}
     
-    async def _review_style_clarity(self, content: str, style_guide: Optional[Dict[str, Any]]) -> Tuple[List[ContentIssue], str]:
-        """Review and improve content style and clarity"""
+    async def _identify_content_issues(self,
+                                     content: str,
+                                     style_context: Optional[Dict[str, Any]],
+                                     project_context: Dict[str, Any]) -> List[ContentIssue]:
+        """Identify all content issues across multiple dimensions"""
         
         issues = []
         
-        # Check for passive voice
-        passive_issues = self._identify_passive_voice(content)
-        issues.extend(passive_issues)
+        # Grammar and spelling issues
+        grammar_issues = await self._check_grammar_and_spelling(content)
+        issues.extend(grammar_issues)
         
-        # Check readability
-        readability_issues = await self._check_readability(content)
-        issues.extend(readability_issues)
+        # Brand voice consistency issues
+        if style_context:
+            voice_issues = await self._check_brand_voice_consistency(content, style_context)
+            issues.extend(voice_issues)
         
-        # Apply basic style improvements
-        improved_content = self._apply_basic_style_improvements(content)
+        # Clarity and readability issues
+        clarity_issues = await self._check_clarity_and_readability(content)
+        issues.extend(clarity_issues)
         
-        if improved_content != content:
+        # SEO optimization issues
+        seo_issues = await self._check_seo_optimization(content)
+        issues.extend(seo_issues)
+        
+        # Structure and flow issues
+        structure_issues = await self._check_structure_and_flow(content)
+        issues.extend(structure_issues)
+        
+        # Engagement issues
+        engagement_issues = await self._check_engagement_factors(content)
+        issues.extend(engagement_issues)
+        
+        return issues
+    
+    async def _check_grammar_and_spelling(self, content: str) -> List[ContentIssue]:
+        """Check for grammar and spelling issues"""
+        issues = []
+        
+        try:
+            # Use AI to identify grammar issues
+            grammar_prompt = f"""
+            Review this content for grammar and spelling errors. Identify specific issues with their locations.
+            
+            CONTENT TO REVIEW:
+            {content[:2000]}...
+            
+            For each error found, provide:
+            1. The specific error type (grammar/spelling)
+            2. The incorrect text
+            3. The suggested correction
+            4. The approximate location (sentence or paragraph)
+            
+            Focus on:
+            • Subject-verb agreement
+            • Verb tense consistency
+            • Pronoun agreement
+            • Sentence fragments
+            • Run-on sentences
+            • Spelling errors
+            • Punctuation errors
+            
+            Format as: ERROR_TYPE: "incorrect text" → "corrected text" (location)
+            """
+            
+            response = self.step(grammar_prompt)
+            grammar_analysis = response.msg.content
+            
+            # Parse AI response to extract issues
+            issues.extend(self._parse_grammar_analysis(grammar_analysis, content))
+            
+        except Exception as e:
+            self.logger.warning(f"Grammar check failed: {e}")
+        
+        # Add pattern-based checks
+        issues.extend(self._check_common_grammar_patterns(content))
+        
+        return issues
+    
+    def _parse_grammar_analysis(self, analysis: str, content: str) -> List[ContentIssue]:
+        """Parse AI grammar analysis into structured issues"""
+        issues = []
+        
+        lines = analysis.split('\n')
+        for line in lines:
+            if '→' in line and any(error_type in line.upper() for error_type in ['GRAMMAR', 'SPELLING', 'PUNCTUATION']):
+                try:
+                    # Extract error details
+                    if 'GRAMMAR' in line.upper():
+                        issue_type = IssueType.GRAMMAR
+                    elif 'SPELLING' in line.upper():
+                        issue_type = IssueType.SPELLING
+                    else:
+                        issue_type = IssueType.GRAMMAR
+                    
+                    # Extract incorrect and corrected text
+                    parts = line.split('→')
+                    if len(parts) >= 2:
+                        incorrect = parts[0].split('"')[1] if '"' in parts[0] else ""
+                        corrected = parts[1].split('"')[1] if '"' in parts[1] else parts[1].strip()
+                        
+                        if incorrect and corrected:
+                            issue = ContentIssue(
+                                issue_type=issue_type,
+                                severity=IssueSeverity.MEDIUM,
+                                description=f"{issue_type.value.title()} error: '{incorrect}' should be '{corrected}'",
+                                location=self._find_text_location(content, incorrect),
+                                suggested_fix=f"Replace '{incorrect}' with '{corrected}'",
+                                original_text=incorrect,
+                                corrected_text=corrected
+                            )
+                            issues.append(issue)
+                
+                except Exception as e:
+                    self.logger.warning(f"Failed to parse grammar issue: {e}")
+                    continue
+        
+        return issues
+    
+    def _check_common_grammar_patterns(self, content: str) -> List[ContentIssue]:
+        """Check for common grammar patterns and issues"""
+        issues = []
+        
+        # Check for excessive passive voice
+        passive_count = 0
+        sentences = content.split('.')
+        for sentence in sentences:
+            if any(indicator in sentence.lower() for indicator in self.editing_patterns["common_errors"]["passive_indicators"]):
+                if any(ending in sentence.lower() for ending in ['ed ', 'en ', 'ne ']):
+                    passive_count += 1
+        
+        passive_ratio = passive_count / max(1, len(sentences))
+        if passive_ratio > 0.3:  # More than 30% passive voice
             issue = ContentIssue(
                 issue_type=IssueType.CLARITY,
-                severity=IssueSeverity.LOW,
-                description="Style and clarity improvements applied",
+                severity=IssueSeverity.MEDIUM,
+                description=f"Excessive passive voice usage ({passive_ratio:.1%})",
                 location="Throughout content",
-                suggested_fix="Enhanced clarity and readability",
-                original_text="Original content",
-                corrected_text="Improved content"
+                suggested_fix="Convert passive voice sentences to active voice where appropriate"
             )
             issues.append(issue)
         
-        return issues, improved_content
-    
-    def _identify_passive_voice(self, content: str) -> List[ContentIssue]:
-        """Identify passive voice constructions"""
-        
-        issues = []
-        
-        # Simple passive voice patterns
-        passive_patterns = [
-            r'\b(was|were|is|are|am|been|being)\s+\w+ed\b',
-            r'\b(was|were|is|are|am|been|being)\s+\w+en\b'
-        ]
-        
-        for pattern in passive_patterns:
-            matches = list(re.finditer(pattern, content, re.IGNORECASE))
-            # Limit to avoid overwhelming feedback
-            for match in matches[:3]:
+        # Check for redundant phrases
+        for redundant_phrase in self.editing_patterns["common_errors"]["redundancy"]:
+            if redundant_phrase in content.lower():
                 issue = ContentIssue(
                     issue_type=IssueType.CLARITY,
                     severity=IssueSeverity.LOW,
-                    description=f"Passive voice detected: '{match.group(0)}'",
-                    location=f"Position {match.start()}-{match.end()}",
-                    suggested_fix="Consider using active voice for stronger writing",
-                    original_text=match.group(0)
+                    description=f"Redundant phrase: '{redundant_phrase}'",
+                    location=self._find_text_location(content, redundant_phrase),
+                    suggested_fix=f"Remove redundant word from '{redundant_phrase}'"
                 )
                 issues.append(issue)
         
         return issues
     
-    async def _check_readability(self, content: str) -> List[ContentIssue]:
-        """Check content readability and suggest improvements"""
+    async def _check_brand_voice_consistency(self, content: str, style_context: Dict[str, Any]) -> List[ContentIssue]:
+        """Check brand voice consistency against style guidelines"""
+        issues = []
         
+        try:
+            if not style_context.get("key_insights"):
+                return issues
+            
+            insights = style_context["key_insights"]
+            target_tone = insights.get("primary_tone", "professional")
+            formality_level = insights.get("formality_level", 3)
+            
+            # Analyze tone consistency using AI
+            voice_prompt = f"""
+            Analyze this content for brand voice consistency:
+            
+            TARGET BRAND VOICE:
+            • Tone: {target_tone}
+            • Formality Level: {formality_level}/5
+            • Audience: {insights.get('audience', 'professionals')}
+            
+            CONTENT TO ANALYZE:
+            {content[:1500]}...
+            
+            Identify any sections that deviate from the target brand voice.
+            Look for:
+            • Tone inconsistencies
+            • Inappropriate formality level
+            • Language that doesn't match target audience
+            • Voice shifts within the content
+            
+            For each issue, specify the problematic text and suggest corrections.
+            """
+            
+            response = self.step(voice_prompt)
+            voice_analysis = response.msg.content
+            
+            # Parse voice analysis for issues
+            if "inconsistency" in voice_analysis.lower() or "deviation" in voice_analysis.lower():
+                issue = ContentIssue(
+                    issue_type=IssueType.BRAND_VOICE,
+                    severity=IssueSeverity.MEDIUM,
+                    description="Brand voice inconsistency detected",
+                    location="Multiple sections",
+                    suggested_fix="Adjust language to match target brand voice"
+                )
+                issues.append(issue)
+            
+        except Exception as e:
+            self.logger.warning(f"Brand voice check failed: {e}")
+        
+        return issues
+    
+    async def _check_clarity_and_readability(self, content: str) -> List[ContentIssue]:
+        """Check content clarity and readability"""
         issues = []
         
         # Check sentence length
         sentences = [s.strip() for s in content.split('.') if s.strip()]
-        long_sentences = [s for s in sentences if len(s.split()) > 30]
+        long_sentences = [s for s in sentences if len(s.split()) > 25]
         
         if long_sentences:
             issue = ContentIssue(
-                issue_type=IssueType.CLARITY,
+                issue_type=IssueType.READABILITY,
                 severity=IssueSeverity.MEDIUM,
-                description=f"Found {len(long_sentences)} overly long sentences (>30 words)",
+                description=f"Found {len(long_sentences)} sentences over 25 words",
                 location="Various locations",
-                suggested_fix="Break long sentences into shorter, clearer sentences",
-                original_text=f"Sentences with {[len(s.split()) for s in long_sentences[:3]]} words"
+                suggested_fix="Break down long sentences into shorter, clearer statements"
+            )
+            issues.append(issue)
+        
+        # Check for weak words
+        weak_word_count = 0
+        for weak_word in self.editing_patterns["common_errors"]["weak_words"]:
+            weak_word_count += content.lower().count(f" {weak_word} ")
+        
+        if weak_word_count > len(content.split()) * 0.02:  # More than 2% weak words
+            issue = ContentIssue(
+                issue_type=IssueType.CLARITY,
+                severity=IssueSeverity.LOW,
+                description=f"Excessive use of weak words ({weak_word_count} instances)",
+                location="Throughout content",
+                suggested_fix="Replace weak words with more specific, powerful alternatives"
             )
             issues.append(issue)
         
@@ -449,540 +653,652 @@ class ProductionEditorQAAgent(ChatAgent):
             issue = ContentIssue(
                 issue_type=IssueType.STRUCTURE,
                 severity=IssueSeverity.LOW,
-                description=f"Found {len(long_paragraphs)} overly long paragraphs (>150 words)",
-                location="Various locations",
-                suggested_fix="Break long paragraphs for better readability",
-                original_text="Long paragraph content"
+                description=f"Found {len(long_paragraphs)} paragraphs over 150 words",
+                location="Various paragraphs",
+                suggested_fix="Break long paragraphs into smaller, more digestible chunks"
             )
             issues.append(issue)
         
         return issues
     
-    def _apply_basic_style_improvements(self, content: str) -> str:
-        """Apply basic style improvements"""
-        
-        improved = content
-        
-        # Fix double spaces
-        improved = re.sub(r'\s+', ' ', improved)
-        
-        # Fix spacing around punctuation
-        improved = re.sub(r'\s+([,.!?;:])', r'\1', improved)
-        improved = re.sub(r'([,.!?;:])\s*([,.!?;:])', r'\1\2', improved)
-        
-        # Fix common style issues
-        improved = re.sub(r'\b(very|really|quite|pretty)\s+', '', improved)  # Remove weak intensifiers
-        
-        return improved.strip()
-    
-    async def _review_brand_voice(self, content: str, style_guide: Optional[Dict[str, Any]]) -> Tuple[List[ContentIssue], str]:
-        """Review and ensure brand voice consistency"""
-        
+    async def _check_seo_optimization(self, content: str) -> List[ContentIssue]:
+        """Check SEO optimization issues"""
         issues = []
         
-        if not style_guide:
-            # Cannot review brand voice without style guide
-            return issues, content
-        
-        # Check brand voice consistency
-        brand_voice_score = await self._evaluate_brand_voice_consistency(content, style_guide)
-        
-        if brand_voice_score < 0.8:
+        # Check for missing headers
+        if '##' not in content and '#' not in content:
             issue = ContentIssue(
-                issue_type=IssueType.BRAND_VOICE,
+                issue_type=IssueType.SEO,
                 severity=IssueSeverity.MEDIUM,
-                description=f"Brand voice consistency score: {brand_voice_score:.2f}",
-                location="Throughout content",
-                suggested_fix="Improve alignment with brand voice guidelines",
-                original_text="Brand voice inconsistency"
+                description="No headers found in content",
+                location="Content structure",
+                suggested_fix="Add H2 and H3 headers to improve content structure and SEO"
             )
             issues.append(issue)
         
-        return issues, content
-    
-    async def _evaluate_brand_voice_consistency(self, content: str, style_guide: Dict[str, Any]) -> float:
-        """Evaluate brand voice consistency"""
-        
-        try:
-            # Extract brand voice requirements
-            brand_voice_elements = style_guide.get('brand_voice_elements', {})
-            personality_traits = brand_voice_elements.get('personality_traits', [])
-            
-            # Simple brand voice evaluation
-            content_lower = content.lower()
-            
-            # Check for personality trait indicators
-            trait_matches = 0
-            for trait in personality_traits[:3]:
-                if trait.lower() in content_lower:
-                    trait_matches += 1
-            
-            # Calculate score based on trait presence
-            if personality_traits:
-                return trait_matches / min(len(personality_traits), 3)
-            else:
-                return 0.8  # Default score when no traits specified
-                
-        except Exception as e:
-            self.logger.error(f"Brand voice evaluation failed: {e}")
-            return 0.7
-    
-    async def _review_seo_optimization(self, content: str, content_plan: Optional[Dict[str, Any]]) -> Tuple[List[ContentIssue], str]:
-        """Review and optimize SEO elements"""
-        
-        issues = []
-        
-        if not content_plan or 'seo_strategy' not in content_plan:
-            return issues, content
-        
-        seo_strategy = content_plan['seo_strategy']
-        
-        # Check keyword density
-        keyword_issues = await self._check_keyword_density(content, seo_strategy)
-        issues.extend(keyword_issues)
-        
-        return issues, content
-    
-    async def _check_keyword_density(self, content: str, seo_strategy: Dict[str, Any]) -> List[ContentIssue]:
-        """Check keyword density and distribution"""
-        
-        issues = []
-        content_lower = content.lower()
+        # Check content length for SEO
         word_count = len(content.split())
-        
-        # Check primary keywords
-        primary_keywords = seo_strategy.get('primary_keywords', [])
-        for keyword in primary_keywords:
-            keyword_count = content_lower.count(keyword.lower())
-            density = (keyword_count / word_count) if word_count > 0 else 0
-            
-            if density < 0.01:  # Less than 1%
-                issue = ContentIssue(
-                    issue_type=IssueType.SEO,
-                    severity=IssueSeverity.MEDIUM,
-                    description=f"Low keyword density for '{keyword}': {density:.1%}",
-                    location="Throughout content",
-                    suggested_fix=f"Increase usage of '{keyword}' to reach 1-2% density",
-                    original_text=f"Current density: {density:.1%}"
-                )
-                issues.append(issue)
-            elif density > 0.025:  # More than 2.5%
-                issue = ContentIssue(
-                    issue_type=IssueType.SEO,
-                    severity=IssueSeverity.MEDIUM,
-                    description=f"High keyword density for '{keyword}': {density:.1%}",
-                    location="Throughout content",
-                    suggested_fix=f"Reduce usage of '{keyword}' to avoid keyword stuffing",
-                    original_text=f"Current density: {density:.1%}"
-                )
-                issues.append(issue)
+        if word_count < 300:
+            issue = ContentIssue(
+                issue_type=IssueType.SEO,
+                severity=IssueSeverity.MEDIUM,
+                description=f"Content too short for SEO ({word_count} words)",
+                location="Overall content",
+                suggested_fix="Expand content to at least 300 words for better SEO performance"
+            )
+            issues.append(issue)
         
         return issues
     
-    async def _final_polish(self, content: str, content_plan: Optional[Dict[str, Any]]) -> Tuple[List[ContentIssue], str]:
-        """Apply final polish and check structure"""
-        
+    async def _check_structure_and_flow(self, content: str) -> List[ContentIssue]:
+        """Check content structure and logical flow"""
         issues = []
         
-        # Check content structure
-        structure_issues = await self._check_content_structure(content)
-        issues.extend(structure_issues)
+        # Check for transition words
+        transition_words = self.editing_patterns["improvements"]["transition_words"]
+        transition_count = sum(1 for word in transition_words if word in content.lower())
         
-        # Apply final formatting
-        polished_content = self._apply_final_formatting(content)
-        
-        return issues, polished_content
-    
-    async def _check_content_structure(self, content: str) -> List[ContentIssue]:
-        """Check content structure and organization"""
-        
-        issues = []
-        
-        # Check for headers/subheaders
-        headers = re.findall(r'^#{1,6}\s+(.+)$', content, re.MULTILINE)
-        if len(headers) < 2 and len(content.split()) > 500:
+        if transition_count < len(content.split()) * 0.01:  # Less than 1% transition words
             issue = ContentIssue(
                 issue_type=IssueType.STRUCTURE,
-                severity=IssueSeverity.MEDIUM,
-                description="Long content lacks sufficient headers for structure",
-                location="Content organization",
-                suggested_fix="Add headers and subheaders to improve content structure",
-                original_text="Unstructured content"
+                severity=IssueSeverity.LOW,
+                description="Insufficient transition words for smooth flow",
+                location="Throughout content",
+                suggested_fix="Add transition words to improve content flow and readability"
             )
             issues.append(issue)
         
         return issues
     
-    def _apply_final_formatting(self, content: str) -> str:
-        """Apply final formatting improvements"""
+    async def _check_engagement_factors(self, content: str) -> List[ContentIssue]:
+        """Check content engagement factors"""
+        issues = []
         
-        formatted = content
+        # Check for questions
+        question_count = content.count('?')
+        word_count = len(content.split())
         
-        # Ensure proper spacing
-        formatted = re.sub(r'\n\s*\n\s*\n', '\n\n', formatted)
-        formatted = re.sub(r' +', ' ', formatted)
+        if word_count > 500 and question_count == 0:
+            issue = ContentIssue(
+                issue_type=IssueType.ENGAGEMENT,
+                severity=IssueSeverity.LOW,
+                description="No questions found to engage readers",
+                location="Content engagement",
+                suggested_fix="Add rhetorical or direct questions to increase reader engagement"
+            )
+            issues.append(issue)
         
-        return formatted.strip()
+        # Check for examples
+        example_indicators = ["for example", "for instance", "such as", "like", "including"]
+        example_count = sum(1 for indicator in example_indicators if indicator in content.lower())
+        
+        if word_count > 500 and example_count == 0:
+            issue = ContentIssue(
+                issue_type=IssueType.ENGAGEMENT,
+                severity=IssueSeverity.LOW,
+                description="No examples found to illustrate points",
+                location="Content examples",
+                suggested_fix="Add concrete examples to make content more relatable and clear"
+            )
+            issues.append(issue)
+        
+        return issues
     
-    def _clean_llm_response(self, response: str) -> str:
-        """Clean LLM response to extract only the content"""
+    def _find_text_location(self, content: str, text: str) -> str:
+        """Find approximate location of text in content"""
+        try:
+            index = content.lower().find(text.lower())
+            if index == -1:
+                return "Not found"
+            
+            # Find which paragraph
+            paragraphs = content.split('\n\n')
+            char_count = 0
+            
+            for i, paragraph in enumerate(paragraphs):
+                if char_count <= index <= char_count + len(paragraph):
+                    return f"Paragraph {i + 1}"
+                char_count += len(paragraph) + 2  # +2 for \n\n
+            
+            return "Content body"
+            
+        except Exception:
+            return "Unknown location"
+    
+    async def _create_edited_content(self,
+                                   original_content: str,
+                                   issues: List[ContentIssue],
+                                   style_context: Optional[Dict[str, Any]]) -> str:
+        """Create edited version of content addressing identified issues"""
         
-        # Remove common LLM response prefixes
+        try:
+            # Group issues by type for systematic editing
+            issue_groups = {}
+            for issue in issues:
+                issue_type = issue.issue_type.value
+                if issue_type not in issue_groups:
+                    issue_groups[issue_type] = []
+                issue_groups[issue_type].append(issue)
+            
+            # Create comprehensive editing prompt
+            editing_prompt = await self._create_editing_prompt(
+                original_content, issue_groups, style_context
+            )
+            
+            # Get edited content from AI
+            response = self.step(editing_prompt)
+            edited_content = self._clean_edited_content(response.msg.content)
+            
+            return edited_content
+            
+        except Exception as e:
+            self.logger.error(f"Content editing failed: {e}")
+            return original_content  # Return original if editing fails
+    
+    async def _create_editing_prompt(self,
+                                   content: str,
+                                   issue_groups: Dict[str, List[ContentIssue]],
+                                   style_context: Optional[Dict[str, Any]]) -> str:
+        """Create comprehensive editing prompt"""
+        
+        style_guidance = ""
+        if style_context and style_context.get("key_insights"):
+            insights = style_context["key_insights"]
+            style_guidance = f"""
+            BRAND VOICE REQUIREMENTS:
+            • Maintain tone: {insights.get('primary_tone', 'professional')}
+            • Formality level: {insights.get('formality_level', 3)}/5
+            • Target audience: {insights.get('audience', 'professionals')}
+            """
+        
+        issues_summary = ""
+        for issue_type, issues in issue_groups.items():
+            issues_summary += f"\n{issue_type.upper()} ISSUES ({len(issues)}):\n"
+            for issue in issues[:3]:  # Limit to top 3 issues per type
+                issues_summary += f"• {issue.description}\n"
+        
+        return f"""
+        Edit and improve this content to address the identified issues while maintaining quality and brand voice:
+
+        ORIGINAL CONTENT:
+        {content}
+
+        ISSUES TO ADDRESS:
+        {issues_summary}
+
+        {style_guidance}
+
+        EDITING REQUIREMENTS:
+        1. Fix all grammar and spelling errors
+        2. Improve clarity and readability
+        3. Maintain consistent brand voice and tone
+        4. Optimize sentence structure and flow
+        5. Enhance engagement without changing core message
+        6. Preserve all key information and intent
+        7. Ensure professional, polished final result
+
+        QUALITY STANDARDS:
+        • Error-free grammar and spelling
+        • Clear, concise language
+        • Logical flow and structure
+        • Appropriate tone and voice
+        • Enhanced readability
+        • Engaging and valuable content
+
+        Provide the edited content:
+        """
+    
+    def _clean_edited_content(self, raw_edited_content: str) -> str:
+        """Clean and format edited content"""
+        content = raw_edited_content.strip()
+        
+        # Remove common AI prefixes
         prefixes_to_remove = [
-            "Here's the corrected content:",
-            "Here is the corrected content:",
-            "Corrected content:",
-            "Here's the improved content:",
-            "CORRECTED CONTENT:",
+            "Here's the edited content:",
+            "Edited content:",
+            "Here is the improved version:",
+            "Improved content:"
         ]
         
-        cleaned = response.strip()
-        
         for prefix in prefixes_to_remove:
-            if cleaned.startswith(prefix):
-                cleaned = cleaned[len(prefix):].strip()
+            if content.startswith(prefix):
+                content = content[len(prefix):].strip()
         
-        return cleaned
+        # Clean up formatting
+        content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+        content = re.sub(r' +', ' ', content)
+        
+        return content
     
-    async def _calculate_quality_metrics(self, 
-                                       content: str,
-                                       content_plan: Optional[Dict[str, Any]],
-                                       style_guide: Optional[Dict[str, Any]],
+    async def _calculate_quality_metrics(self,
+                                       original_content: str,
+                                       edited_content: str,
+                                       style_context: Optional[Dict[str, Any]],
                                        issues: List[ContentIssue]) -> QualityMetrics:
         """Calculate comprehensive quality metrics"""
         
-        # Base scores
-        grammar_score = 1.0 - (len([i for i in issues if i.issue_type == IssueType.GRAMMAR]) * 0.1)
-        clarity_score = 1.0 - (len([i for i in issues if i.issue_type == IssueType.CLARITY]) * 0.1)
-        brand_voice_score = 1.0 - (len([i for i in issues if i.issue_type == IssueType.BRAND_VOICE]) * 0.15)
-        seo_score = 1.0 - (len([i for i in issues if i.issue_type == IssueType.SEO]) * 0.1)
-        
-        # Calculate engagement and readability scores
-        engagement_score = await self._calculate_engagement_score(content)
-        readability_score = await self._calculate_readability_score(content)
-        
-        # Adjust scores based on issue severity
-        severity_weights = {
-            IssueSeverity.CRITICAL: 0.3,
-            IssueSeverity.HIGH: 0.2,
-            IssueSeverity.MEDIUM: 0.1,
-            IssueSeverity.LOW: 0.05
-        }
-        
-        for issue in issues:
-            penalty = severity_weights.get(issue.severity, 0.1)
-            
-            if issue.issue_type == IssueType.GRAMMAR:
-                grammar_score = max(0, grammar_score - penalty)
-            elif issue.issue_type == IssueType.CLARITY:
-                clarity_score = max(0, clarity_score - penalty)
-            elif issue.issue_type == IssueType.BRAND_VOICE:
-                brand_voice_score = max(0, brand_voice_score - penalty)
-            elif issue.issue_type == IssueType.SEO:
-                seo_score = max(0, seo_score - penalty)
-        
-        # Cap all scores at 1.0
-        grammar_score = min(1.0, grammar_score)
-        clarity_score = min(1.0, clarity_score)
-        brand_voice_score = min(1.0, brand_voice_score)
-        seo_score = min(1.0, seo_score)
-        engagement_score = min(1.0, engagement_score)
-        readability_score = min(1.0, readability_score)
-        
-        # Calculate overall score (weighted average)
-        overall_score = (
-            grammar_score * 0.25 +
-            clarity_score * 0.20 +
-            brand_voice_score * 0.20 +
-            seo_score * 0.15 +
-            engagement_score * 0.10 +
-            readability_score * 0.10
-        )
-        
-        return QualityMetrics(
-            overall_score=overall_score,
-            grammar_score=grammar_score,
-            clarity_score=clarity_score,
-            brand_voice_score=brand_voice_score,
-            seo_score=seo_score,
-            engagement_score=engagement_score,
-            readability_score=readability_score
-        )
-    
-    async def _calculate_engagement_score(self, content: str) -> float:
-        """Calculate content engagement score"""
-        
         try:
-            engagement_indicators = [
-                '?',  # Questions engage readers
-                '!',  # Exclamations show energy
-                'you', 'your',  # Direct address
-                'how', 'why', 'what',  # Question words
-            ]
+            # Grammar score (based on issues found)
+            grammar_issues = [i for i in issues if i.issue_type in [IssueType.GRAMMAR, IssueType.SPELLING]]
+            grammar_score = max(0.0, 1.0 - (len(grammar_issues) * 0.1))
             
-            content_lower = content.lower()
-            engagement_count = sum(1 for indicator in engagement_indicators if indicator in content_lower)
+            # Readability score (simplified Flesch reading ease)
+            words = edited_content.split()
+            sentences = edited_content.count('.') + edited_content.count('!') + edited_content.count('?')
+            avg_sentence_length = len(words) / max(1, sentences)
+            readability_raw = max(0, min(100, 100 - (avg_sentence_length * 2)))
+            readability_score = readability_raw / 100
             
-            return min(1.0, engagement_count / 10)
+            # Clarity score (based on clarity issues)
+            clarity_issues = [i for i in issues if i.issue_type == IssueType.CLARITY]
+            clarity_score = max(0.0, 1.0 - (len(clarity_issues) * 0.15))
             
-        except Exception:
-            return 0.7
-    
-    async def _calculate_readability_score(self, content: str) -> float:
-        """Calculate content readability score"""
-        
-        try:
-            sentences = [s.strip() for s in content.split('.') if s.strip()]
-            words = content.split()
-            
-            if not sentences or not words:
-                return 0.5
-            
-            avg_sentence_length = len(words) / len(sentences)
-            
-            # Ideal range: 15-20 words per sentence
-            if 15 <= avg_sentence_length <= 20:
-                return 1.0
+            # Brand voice score
+            if style_context:
+                voice_issues = [i for i in issues if i.issue_type == IssueType.BRAND_VOICE]
+                brand_voice_score = max(0.0, 1.0 - (len(voice_issues) * 0.2))
             else:
-                return max(0.3, 1.0 - abs(avg_sentence_length - 17.5) / 20)
+                brand_voice_score = 0.8  # Default when no style context
             
-        except Exception:
-            return 0.7
+            # SEO score
+            seo_issues = [i for i in issues if i.issue_type == IssueType.SEO]
+            seo_score = max(0.0, 1.0 - (len(seo_issues) * 0.15))
+            
+            # Engagement score
+            engagement_issues = [i for i in issues if i.issue_type == IssueType.ENGAGEMENT]
+            engagement_score = max(0.0, 1.0 - (len(engagement_issues) * 0.1))
+            
+            # Consistency score
+            consistency_score = 0.85  # Default - would need more sophisticated analysis
+            
+            # Factual accuracy score
+            factual_accuracy_score = 0.9  # Default - would need fact-checking integration
+            
+            # Overall score
+            overall_score = (
+                grammar_score * 0.2 +
+                clarity_score * 0.2 +
+                brand_voice_score * 0.15 +
+                readability_score * 0.15 +
+                seo_score * 0.1 +
+                engagement_score * 0.1 +
+                consistency_score * 0.05 +
+                factual_accuracy_score * 0.05
+            )
+            
+            return QualityMetrics(
+                overall_score=overall_score,
+                grammar_score=grammar_score,
+                clarity_score=clarity_score,
+                brand_voice_score=brand_voice_score,
+                seo_score=seo_score,
+                engagement_score=engagement_score,
+                readability_score=readability_score,
+                consistency_score=consistency_score,
+                factual_accuracy_score=factual_accuracy_score
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"Quality metrics calculation failed: {e}")
+            # Return default metrics
+            return QualityMetrics(
+                overall_score=0.7,
+                grammar_score=0.8,
+                clarity_score=0.7,
+                brand_voice_score=0.7,
+                seo_score=0.6,
+                engagement_score=0.6,
+                readability_score=0.7,
+                consistency_score=0.8,
+                factual_accuracy_score=0.9
+            )
     
-    def _generate_improvements_summary(self, original: str, edited: str, issues: List[ContentIssue]) -> List[str]:
-        """Generate summary of improvements made"""
-        
+    def _extract_improvements_made(self, issues: List[ContentIssue]) -> List[str]:
+        """Extract list of improvements made based on issues addressed"""
         improvements = []
         
-        # Count improvements by type
-        issue_counts = {}
+        issue_type_counts = {}
         for issue in issues:
             issue_type = issue.issue_type.value
-            issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
+            issue_type_counts[issue_type] = issue_type_counts.get(issue_type, 0) + 1
         
-        for issue_type, count in issue_counts.items():
-            improvements.append(f"Resolved {count} {issue_type} issue{'s' if count > 1 else ''}")
-        
-        # Word count change
-        original_words = len(original.split())
-        edited_words = len(edited.split())
-        
-        if edited_words != original_words:
-            if edited_words > original_words:
-                improvements.append(f"Expanded content by {edited_words - original_words} words")
+        for issue_type, count in issue_type_counts.items():
+            if issue_type == "grammar":
+                improvements.append(f"Corrected {count} grammar and spelling errors")
+            elif issue_type == "clarity":
+                improvements.append(f"Improved clarity in {count} instances")
+            elif issue_type == "brand_voice":
+                improvements.append(f"Aligned brand voice in {count} sections")
+            elif issue_type == "seo":
+                improvements.append(f"Enhanced SEO optimization in {count} areas")
+            elif issue_type == "structure":
+                improvements.append(f"Improved structure and flow in {count} sections")
+            elif issue_type == "engagement":
+                improvements.append(f"Enhanced engagement factors in {count} areas")
             else:
-                improvements.append(f"Reduced content by {original_words - edited_words} words for better conciseness")
+                improvements.append(f"Addressed {count} {issue_type} issues")
         
         if not improvements:
-            improvements.append("Content quality maintained at high standard")
+            improvements.append("Content reviewed and polished for quality")
         
         return improvements
     
-    async def _generate_recommendations(self, 
+    async def _generate_recommendations(self,
                                       quality_metrics: QualityMetrics,
                                       issues: List[ContentIssue],
-                                      content_plan: Optional[Dict[str, Any]]) -> List[str]:
-        """Generate actionable recommendations for future content"""
-        
+                                      style_context: Optional[Dict[str, Any]]) -> List[str]:
+        """Generate actionable recommendations for content improvement"""
         recommendations = []
         
-        # Quality-based recommendations
+        # Grammar and spelling recommendations
         if quality_metrics.grammar_score < 0.9:
-            recommendations.append("Consider using grammar checking tools during initial writing")
+            recommendations.append("Consider using grammar checking tools for final review")
         
+        # Readability recommendations
+        if quality_metrics.readability_score < 0.6:
+            recommendations.append("Simplify sentence structure and reduce average sentence length")
+        elif quality_metrics.readability_score > 0.9:
+            recommendations.append("Consider adding more sophisticated language for expert audiences")
+        
+        # Brand voice recommendations
         if quality_metrics.brand_voice_score < 0.8:
-            recommendations.append("Review brand voice guidelines before writing to ensure consistency")
+            recommendations.append("Review brand voice guidelines and ensure consistent tone")
         
-        if quality_metrics.seo_score < 0.75:
-            recommendations.append("Plan keyword integration strategy before writing to improve SEO performance")
+        # SEO recommendations
+        if quality_metrics.seo_score < 0.7:
+            recommendations.append("Enhance SEO optimization with better keyword integration and structure")
         
-        if quality_metrics.engagement_score < 0.8:
-            recommendations.append("Include more questions, examples, and calls-to-action to increase engagement")
+        # Engagement recommendations
+        if quality_metrics.engagement_score < 0.7:
+            recommendations.append("Add more questions, examples, and interactive elements to increase engagement")
         
-        # Issue-based recommendations
+        # Overall quality recommendations
+        if quality_metrics.overall_score < 0.7:
+            recommendations.append("Consider comprehensive revision to meet quality standards")
+        elif quality_metrics.overall_score > 0.9:
+            recommendations.append("Excellent quality - ready for publication")
+        
+        # Issue-specific recommendations
         critical_issues = [i for i in issues if i.severity == IssueSeverity.CRITICAL]
-        high_issues = [i for i in issues if i.severity == IssueSeverity.HIGH]
-        
         if critical_issues:
-            recommendations.append(f"Address {len(critical_issues)} critical issues before publication")
+            recommendations.append("Address critical issues before publication")
         
+        high_issues = [i for i in issues if i.severity == IssueSeverity.HIGH]
         if high_issues:
-            recommendations.append(f"Review and resolve {len(high_issues)} high-priority issues")
+            recommendations.append("Review and address high-priority issues")
         
-        if not recommendations:
-            recommendations.append("Content meets all quality standards - excellent work!")
-        
-        return recommendations
-    
-    def _determine_approval_status(self, quality_metrics: QualityMetrics, issues: List[ContentIssue]) -> str:
-        """Determine content approval status based on quality metrics and issues"""
-        
-        critical_issues = len([i for i in issues if i.severity == IssueSeverity.CRITICAL])
-        high_issues = len([i for i in issues if i.severity == IssueSeverity.HIGH])
-        
-        # Check against quality standards
-        meets_standards = (
-            quality_metrics.overall_score >= self.quality_standards["minimum_overall_score"] and
-            quality_metrics.grammar_score >= self.quality_standards["minimum_grammar_score"] and
-            quality_metrics.brand_voice_score >= self.quality_standards["minimum_brand_voice_score"] and
-            quality_metrics.clarity_score >= self.quality_standards["minimum_clarity_score"] and
-            quality_metrics.seo_score >= self.quality_standards["minimum_seo_score"] and
-            critical_issues <= self.quality_standards["maximum_critical_issues"] and
-            high_issues <= self.quality_standards["maximum_high_issues"]
-        )
-        
-        if meets_standards:
-            return "approved"
-        elif critical_issues > 0:
-            return "requires_major_revision"
-        elif high_issues > 2 or quality_metrics.overall_score < 0.7:
-            return "requires_revision"
-        else:
-            return "approved_with_minor_changes"
+        return recommendations[:6]  # Limit to top 6 recommendations
     
     async def _generate_editor_notes(self, issues: List[ContentIssue], quality_metrics: QualityMetrics) -> str:
         """Generate comprehensive editor notes"""
         
-        notes = []
+        notes_parts = []
         
         # Overall assessment
-        overall_score = quality_metrics.overall_score
-        if overall_score >= 0.9:
-            notes.append("Excellent content quality with minimal issues identified.")
-        elif overall_score >= 0.8:
-            notes.append("Good content quality with some areas for improvement.")
-        elif overall_score >= 0.7:
-            notes.append("Acceptable content quality but requires attention to identified issues.")
+        if quality_metrics.overall_score >= 0.9:
+            notes_parts.append("Excellent content quality. Minor refinements made.")
+        elif quality_metrics.overall_score >= 0.8:
+            notes_parts.append("Good content quality with some improvements applied.")
+        elif quality_metrics.overall_score >= 0.7:
+            notes_parts.append("Acceptable quality with several improvements needed.")
         else:
-            notes.append("Content requires significant improvement before publication.")
-        
-        # Specific area highlights
-        if quality_metrics.grammar_score < 0.9:
-            notes.append(f"Grammar and mechanics need attention (score: {quality_metrics.grammar_score:.2f}).")
-        
-        if quality_metrics.brand_voice_score < 0.8:
-            notes.append(f"Brand voice consistency could be improved (score: {quality_metrics.brand_voice_score:.2f}).")
-        
-        if quality_metrics.seo_score < 0.75:
-            notes.append(f"SEO optimization needs enhancement (score: {quality_metrics.seo_score:.2f}).")
+            notes_parts.append("Content requires significant improvements for publication readiness.")
         
         # Issue summary
         if issues:
-            issue_summary = {}
-            for issue in issues:
-                severity = issue.severity.value
-                issue_summary[severity] = issue_summary.get(severity, 0) + 1
+            critical_count = sum(1 for i in issues if i.severity == IssueSeverity.CRITICAL)
+            high_count = sum(1 for i in issues if i.severity == IssueSeverity.HIGH)
+            medium_count = sum(1 for i in issues if i.severity == IssueSeverity.MEDIUM)
             
-            summary_parts = []
-            for severity, count in issue_summary.items():
-                summary_parts.append(f"{count} {severity}")
+            issue_summary = f"Issues identified: {len(issues)} total"
+            if critical_count:
+                issue_summary += f" ({critical_count} critical"
+            if high_count:
+                issue_summary += f", {high_count} high priority"
+            if medium_count:
+                issue_summary += f", {medium_count} medium priority)"
             
-            notes.append(f"Issues identified: {', '.join(summary_parts)}.")
+            notes_parts.append(issue_summary)
         
-        # Positive feedback
-        if quality_metrics.overall_score >= 0.85:
-            notes.append("Content demonstrates strong adherence to brand guidelines and quality standards.")
+        # Specific strengths and weaknesses
+        strengths = []
+        weaknesses = []
         
-        return " ".join(notes)
+        if quality_metrics.grammar_score >= 0.9:
+            strengths.append("strong grammar and spelling")
+        elif quality_metrics.grammar_score < 0.7:
+            weaknesses.append("grammar and spelling errors")
+        
+        if quality_metrics.brand_voice_score >= 0.8:
+            strengths.append("consistent brand voice")
+        elif quality_metrics.brand_voice_score < 0.7:
+            weaknesses.append("brand voice inconsistencies")
+        
+        if quality_metrics.engagement_score >= 0.8:
+            strengths.append("good reader engagement")
+        elif quality_metrics.engagement_score < 0.6:
+            weaknesses.append("limited reader engagement elements")
+        
+        if strengths:
+            notes_parts.append(f"Strengths: {', '.join(strengths)}")
+        
+        if weaknesses:
+            notes_parts.append(f"Areas for improvement: {', '.join(weaknesses)}")
+        
+        return ". ".join(notes_parts) + "."
     
-    async def _store_editing_report(self, report: EditingReport):
+    def _calculate_confidence_score(self, quality_metrics: QualityMetrics, issue_count: int) -> float:
+        """Calculate confidence score for the editing assessment"""
+        
+        # Base confidence on overall quality score
+        base_confidence = quality_metrics.overall_score
+        
+        # Adjust based on number of issues found
+        issue_factor = max(0.0, 1.0 - (issue_count * 0.02))  # Reduce confidence for each issue
+        
+        # Adjust based on consistency of scores
+        score_variance = abs(quality_metrics.grammar_score - quality_metrics.clarity_score)
+        consistency_factor = max(0.8, 1.0 - score_variance)
+        
+        # Calculate final confidence
+        confidence = base_confidence * 0.6 + issue_factor * 0.3 + consistency_factor * 0.1
+        
+        return min(1.0, max(0.0, confidence))
+    
+    async def _store_editing_report(self, editing_report: EditingReport):
         """Store editing report in knowledge base"""
+        if not self.knowledge_base:
+            return
+        
         try:
-            report_data = {
-                "title": f"Editing Report: {report.content_title}",
+            report_document = {
                 "type": "editing_report",
-                "content": json.dumps(report.to_dict(), indent=2),
+                "title": f"Editing Report: {editing_report.content_title}",
+                "content": json.dumps(editing_report.to_dict(), indent=2),
                 "metadata": {
-                    "content_title": report.content_title,
-                    "review_date": report.review_date.isoformat(),
-                    "overall_quality_score": report.quality_metrics.overall_score,
-                    "approval_status": report.approval_status,
-                    "issues_count": len(report.issues_identified),
-                    "word_count_change": report.edited_word_count - report.original_word_count
+                    "report_id": editing_report.report_id,
+                    "overall_quality_score": editing_report.quality_metrics.overall_score,
+                    "issues_count": len(editing_report.issues_identified),
+                    "improvements_count": len(editing_report.improvements_made),
+                    "confidence_score": editing_report.confidence_score,
+                    "review_date": editing_report.review_date.isoformat()
                 }
             }
             
-            await self.knowledge_base.store_document(report_data)
-            self.logger.info(f"Editing report stored in knowledge base: {report.content_title}")
+            await self.knowledge_base.store_document(report_document)
+            self.logger.info(f"Editing report stored: {editing_report.report_id}")
             
         except Exception as e:
             self.logger.error(f"Failed to store editing report: {e}")
     
-    async def quick_review(self, content: str, focus_areas: List[str] = None) -> Dict[str, Any]:
-        """Perform quick content review focusing on specific areas"""
-        
-        if focus_areas is None:
-            focus_areas = ["grammar", "clarity", "brand_voice"]
-        
-        quick_issues = []
-        
-        # Quick grammar check
-        if "grammar" in focus_areas:
-            grammar_issues, _ = await self._review_grammar_mechanics(content)
-            quick_issues.extend(grammar_issues)
-        
-        # Quick clarity check
-        if "clarity" in focus_areas:
-            readability_issues = await self._check_readability(content)
-            quick_issues.extend(readability_issues)
-        
-        # Quick brand voice check (basic)
-        if "brand_voice" in focus_areas:
-            tone_score = await self._basic_tone_check(content)
-            if tone_score < 0.7:
-                issue = ContentIssue(
-                    issue_type=IssueType.BRAND_VOICE,
-                    severity=IssueSeverity.MEDIUM,
-                    description=f"Tone consistency score: {tone_score:.2f}",
-                    location="Throughout content",
-                    suggested_fix="Review and improve tone consistency"
-                )
-                quick_issues.append(issue)
-        
-        # Calculate quick quality score
-        total_score = 1.0 - (len(quick_issues) * 0.1)
-        quality_score = max(0.0, min(1.0, total_score))
-        
+    async def _format_editing_output(self, editing_report: EditingReport) -> Dict[str, Any]:
+        """Format editing report for workflow system"""
         return {
-            "quality_score": quality_score,
-            "issues_found": len(quick_issues),
-            "issues": [issue.to_dict() for issue in quick_issues],
-            "recommendation": "approved" if quality_score >= 0.8 else "needs_review"
+            "report_id": editing_report.report_id,
+            "status": "completed",
+            "content_title": editing_report.content_title,
+            "approval_status": editing_report.approval_status,
+            
+            # Edited content
+            "edited_content": {
+                "content": editing_report.edited_content,
+                "word_count": editing_report.edited_word_count,
+                "word_count_change": editing_report.edited_word_count - editing_report.original_word_count
+            },
+            
+            # Quality assessment
+            "quality_assessment": {
+                "overall_score": editing_report.quality_metrics.overall_score,
+                "quality_breakdown": editing_report.quality_metrics.to_dict(),
+                "confidence_score": editing_report.confidence_score
+            },
+            
+            # Issues and improvements
+            "review_details": {
+                "issues_identified": [issue.to_dict() for issue in editing_report.issues_identified],
+                "improvements_made": editing_report.improvements_made,
+                "recommendations": editing_report.recommendations,
+                "editor_notes": editing_report.editor_notes
+            },
+            
+            # Issue summary
+            "issue_summary": {
+                "total_issues": len(editing_report.issues_identified),
+                "critical_issues": len([i for i in editing_report.issues_identified if i.severity == IssueSeverity.CRITICAL]),
+                "high_priority_issues": len([i for i in editing_report.issues_identified if i.severity == IssueSeverity.HIGH]),
+                "medium_priority_issues": len([i for i in editing_report.issues_identified if i.severity == IssueSeverity.MEDIUM]),
+                "low_priority_issues": len([i for i in editing_report.issues_identified if i.severity == IssueSeverity.LOW])
+            },
+            
+            # Metadata
+            "metadata": {
+                "review_date": editing_report.review_date.isoformat(),
+                "project_id": self.project_id,
+                "original_word_count": editing_report.original_word_count
+            }
         }
     
-    async def _basic_tone_check(self, content: str) -> float:
-        """Basic tone consistency check"""
+    def _update_metrics(self, review_time: float, issues: List[ContentIssue], quality_metrics: QualityMetrics):
+        """Update performance metrics"""
+        self.metrics["content_reviewed"] += 1
+        self.metrics["issues_identified"] += len(issues)
+        self.metrics["improvements_made"] += len([i for i in issues if i.severity in [IssueSeverity.HIGH, IssueSeverity.CRITICAL]])
         
-        # Simple tone indicators
-        professional_indicators = ['furthermore', 'moreover', 'consequently', 'therefore']
-        casual_indicators = ['you\'ll', 'here\'s', 'let\'s', 'don\'t', 'can\'t']
+        # Update average review time
+        prev_avg_time = self.metrics["average_review_time"]
+        count = self.metrics["content_reviewed"]
+        self.metrics["average_review_time"] = ((prev_avg_time * (count - 1)) + review_time) / count
         
-        content_lower = content.lower()
-        professional_count = sum(1 for indicator in professional_indicators if indicator in content_lower)
-        casual_count = sum(1 for indicator in casual_indicators if indicator in content_lower)
+        # Update average quality improvement (simplified)
+        quality_improvement = max(0.0, quality_metrics.overall_score - 0.7)  # Assume baseline of 0.7
+        prev_avg_quality = self.metrics["average_quality_improvement"]
+        self.metrics["average_quality_improvement"] = ((prev_avg_quality * (count - 1)) + quality_improvement) / count
+    
+    async def validate_final_content(self, content: str, quality_threshold: float = 0.8) -> Dict[str, Any]:
+        """Perform final validation check on content"""
+        try:
+            # Quick quality check
+            quick_issues = await self._quick_quality_check(content)
+            
+            # Calculate validation score
+            validation_score = max(0.0, 1.0 - (len(quick_issues) * 0.1))
+            
+            # Determine approval status
+            if validation_score >= quality_threshold and len([i for i in quick_issues if i.severity == IssueSeverity.CRITICAL]) == 0:
+                approval_status = "approved"
+            elif validation_score >= 0.6:
+                approval_status = "approved_with_minor_issues"
+            else:
+                approval_status = "requires_revision"
+            
+            return {
+                "validation_score": validation_score,
+                "approval_status": approval_status,
+                "issues_found": len(quick_issues),
+                "critical_issues": len([i for i in quick_issues if i.severity == IssueSeverity.CRITICAL]),
+                "recommendations": self._get_quick_recommendations(quick_issues, validation_score)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Final validation failed: {e}")
+            return {
+                "validation_score": 0.0,
+                "approval_status": "validation_failed",
+                "error": str(e)
+            }
+    
+    async def _quick_quality_check(self, content: str) -> List[ContentIssue]:
+        """Perform quick quality check for validation"""
+        issues = []
         
-        # Score based on consistency
-        if professional_count == 0 and casual_count == 0:
-            return 0.7  # Neutral tone
-        elif professional_count > 0 and casual_count > 0:
-            # Mixed tone - check balance
-            total = professional_count + casual_count
-            balance = min(professional_count, casual_count) / total
-            return 0.5 + (balance * 0.3)  # Score between 0.5-0.8
+        # Check for obvious grammar errors (simplified)
+        if re.search(r'\b(there|their|they\'re)\b.*\b(there|their|they\'re)\b', content, re.IGNORECASE):
+            issues.append(ContentIssue(
+                issue_type=IssueType.GRAMMAR,
+                severity=IssueSeverity.MEDIUM,
+                description="Potential grammar error with there/their/they're",
+                location="Content body",
+                suggested_fix="Review usage of there/their/they're"
+            ))
+        
+        # Check for excessive repetition
+        words = content.lower().split()
+        word_freq = {}
+        for word in words:
+            if len(word) > 4:  # Only check longer words
+                word_freq[word] = word_freq.get(word, 0) + 1
+        
+        for word, freq in word_freq.items():
+            if freq > len(words) * 0.02:  # More than 2% frequency
+                issues.append(ContentIssue(
+                    issue_type=IssueType.CLARITY,
+                    severity=IssueSeverity.LOW,
+                    description=f"Word '{word}' appears {freq} times (may be excessive)",
+                    location="Throughout content",
+                    suggested_fix=f"Consider using synonyms for '{word}'"
+                ))
+        
+        return issues
+    
+    def _get_quick_recommendations(self, issues: List[ContentIssue], validation_score: float) -> List[str]:
+        """Get quick recommendations based on validation"""
+        recommendations = []
+        
+        if validation_score >= 0.9:
+            recommendations.append("Content meets high quality standards")
+        elif validation_score >= 0.8:
+            recommendations.append("Content meets quality standards with minor refinements")
+        elif validation_score >= 0.6:
+            recommendations.append("Content needs moderate improvements before publication")
         else:
-            return 0.9  # Consistent tone (either professional or casual)
+            recommendations.append("Content requires significant revision")
+        
+        critical_issues = [i for i in issues if i.severity == IssueSeverity.CRITICAL]
+        if critical_issues:
+            recommendations.append("Address critical issues immediately")
+        
+        return recommendations
+    
+    def get_editing_metrics(self) -> Dict[str, Any]:
+        """Get editor/QA performance metrics"""
+        return {
+            "content_reviewed": self.metrics["content_reviewed"],
+            "issues_identified": self.metrics["issues_identified"],
+            "improvements_made": self.metrics["improvements_made"],
+            "average_review_time": self.metrics["average_review_time"],
+            "average_quality_improvement": self.metrics["average_quality_improvement"],
+            "cached_reports": len(self.review_cache)
+        }
     
     def process_task(self, task):
         """Process editing task - legacy method for backwards compatibility"""
         response = self.step(task)
         return response
 
-
 # Backwards compatibility class (matches existing naming convention)
 class editorqaAgent(ProductionEditorQAAgent):
     """Backwards compatibility wrapper for existing code"""
     pass
-
 
 # Factory function for easy instantiation
 async def create_editor_qa_agent(project_id: str = None) -> ProductionEditorQAAgent:
@@ -997,7 +1313,6 @@ async def create_editor_qa_agent(project_id: str = None) -> ProductionEditorQAAg
     """
     editor = ProductionEditorQAAgent(project_id)
     return editor
-
 
 # Export main classes
 __all__ = [
