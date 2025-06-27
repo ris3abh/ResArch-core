@@ -4,535 +4,372 @@ Production Semantic Retriever for SpinScribe
 Provides intelligent knowledge retrieval using semantic search and contextual filtering.
 """
 
-import asyncio
-import logging
-from typing import Dict, List, Any, Optional, Union, Tuple
-from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass
+from datetime import datetime
+import logging
+import asyncio
 import json
+from pathlib import Path
 
-from app.knowledge.storage.vector_storage import VectorStorage, VectorSearchResult
-from app.knowledge.processors.document_processor import DocumentProcessor, ProcessedDocument
-from app.services.knowledge_service import get_knowledge_service
-from app.database.connection import SessionLocal
+from camel.retrievers import AutoRetriever
+from camel.types import StorageType
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from sentence_transformers import SentenceTransformer
+
 from app.database.models.knowledge_item import KnowledgeItem
+from app.database.models.project import Project
+from app.core.config import settings
+from app.core.exceptions import KnowledgeError, ServiceError
 
 logger = logging.getLogger(__name__)
 
 @dataclass
-class RetrievalContext:
-    """Context for knowledge retrieval"""
-    query: str
-    knowledge_types: Optional[List[str]] = None
-    time_range: Optional[Tuple[datetime, datetime]] = None
-    content_length_preference: Optional[str] = None  # "short", "medium", "long"
-    language: str = "en"
-    priority_keywords: Optional[List[str]] = None
-    exclude_keywords: Optional[List[str]] = None
-
-@dataclass
-class EnrichedSearchResult:
-    """Search result enriched with additional context"""
+class SearchResult:
+    """Single search result with relevance scoring"""
     content: str
-    title: str
-    knowledge_type: str
-    similarity_score: float
     metadata: Dict[str, Any]
-    source_document: Dict[str, Any]
-    relevance_factors: Dict[str, float]
-    chunk_context: Optional[str] = None
-    related_chunks: Optional[List[str]] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "content": self.content,
-            "title": self.title,
-            "knowledge_type": self.knowledge_type,
-            "similarity_score": self.similarity_score,
-            "metadata": self.metadata,
-            "source_document": self.source_document,
-            "relevance_factors": self.relevance_factors,
-            "chunk_context": self.chunk_context,
-            "related_chunks": self.related_chunks
-        }
+    score: float
+    knowledge_item_id: Optional[str] = None
+    source_type: Optional[str] = None
+    project_id: Optional[str] = None
 
 @dataclass
-class RetrievalResult:
-    """Complete retrieval result with analytics"""
+class SearchQuery:
+    """Structured search query with context"""
     query: str
-    results: List[EnrichedSearchResult]
-    total_found: int
-    search_time: float
-    retrieval_strategy: str
-    quality_score: float
-    suggestions: List[str]
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "query": self.query,
-            "results": [result.to_dict() for result in self.results],
-            "total_found": self.total_found,
-            "search_time": self.search_time,
-            "retrieval_strategy": self.retrieval_strategy,
-            "quality_score": self.quality_score,
-            "suggestions": self.suggestions
-        }
+    project_id: str
+    filters: Optional[Dict[str, Any]] = None
+    limit: int = 10
+    min_score: float = 0.3
+    content_types: Optional[List[str]] = None
 
 class SemanticRetriever:
     """
-    Production-grade semantic retriever that provides intelligent knowledge retrieval
-    with contextual understanding and quality optimization.
+    Production semantic retriever for SpinScribe knowledge management.
+    Integrates CAMEL-AI with Qdrant for high-performance semantic search.
     """
     
     def __init__(self, project_id: str):
         self.project_id = project_id
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}.{project_id}")
+        self.collection_name = f"spinscribe_project_{project_id}"
         
-        # Initialize components
-        self.vector_storage = VectorStorage(project_id)
-        self.knowledge_service = get_knowledge_service()
+        # Initialize embedding model
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.embedding_dimension = 384
         
-        # Retrieval configuration
-        self.default_limit = 10
-        self.min_similarity_threshold = 0.3
-        self.quality_threshold = 0.7
-        
-        # Context window for chunk expansion
-        self.context_window_size = 500  # Characters before/after chunk
-        
-        # Performance tracking
-        self.metrics = {
-            "total_queries": 0,
-            "average_response_time": 0.0,
-            "cache_hits": 0,
-            "quality_scores": []
-        }
-        
-        # Simple cache for frequent queries
-        self.query_cache: Dict[str, Tuple[RetrievalResult, datetime]] = {}
-        self.cache_ttl = timedelta(minutes=15)
-        
-        self.logger.info(f"Semantic retriever initialized for project: {project_id}")
-    
-    async def retrieve_knowledge(self,
-                                context: RetrievalContext,
-                                limit: Optional[int] = None,
-                                include_context: bool = True) -> RetrievalResult:
-        """
-        Retrieve knowledge using semantic search with contextual filtering
-        
-        Args:
-            context: Retrieval context with query and filters
-            limit: Maximum number of results
-            include_context: Whether to include chunk context
-            
-        Returns:
-            Complete retrieval result with enriched information
-        """
-        start_time = datetime.utcnow()
-        limit = limit or self.default_limit
-        
-        try:
-            # Check cache first
-            cache_key = self._generate_cache_key(context, limit)
-            cached_result = self._get_cached_result(cache_key)
-            if cached_result:
-                self.metrics["cache_hits"] += 1
-                return cached_result
-            
-            # Determine retrieval strategy
-            strategy = self._determine_strategy(context)
-            
-            # Perform semantic search
-            search_results = await self._perform_semantic_search(context, limit * 2)  # Get more for filtering
-            
-            # Enrich results with additional context
-            enriched_results = await self._enrich_search_results(
-                search_results, context, include_context
-            )
-            
-            # Apply intelligent filtering and ranking
-            filtered_results = self._apply_intelligent_filtering(enriched_results, context)
-            
-            # Limit final results
-            final_results = filtered_results[:limit]
-            
-            # Calculate quality score
-            quality_score = self._calculate_quality_score(final_results, context)
-            
-            # Generate suggestions
-            suggestions = self._generate_suggestions(final_results, context)
-            
-            # Calculate response time
-            response_time = (datetime.utcnow() - start_time).total_seconds()
-            
-            # Create result
-            result = RetrievalResult(
-                query=context.query,
-                results=final_results,
-                total_found=len(search_results),
-                search_time=response_time,
-                retrieval_strategy=strategy,
-                quality_score=quality_score,
-                suggestions=suggestions
-            )
-            
-            # Update metrics
-            self._update_metrics(response_time, quality_score)
-            
-            # Cache result
-            self._cache_result(cache_key, result)
-            
-            self.logger.info(f"Retrieved {len(final_results)} results for query: {context.query[:50]}...")
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Knowledge retrieval failed: {e}")
-            raise
-    
-    async def retrieve_by_type(self,
-                              knowledge_type: str,
-                              limit: int = 10,
-                              recent_first: bool = True) -> List[EnrichedSearchResult]:
-        """Retrieve knowledge items by type"""
-        try:
-            # Get from database first for type filtering
-            with self.knowledge_service.get_db_session() as db:
-                items = db.query(KnowledgeItem).filter(
-                    KnowledgeItem.project_id == self.project_id,
-                    KnowledgeItem.knowledge_type == knowledge_type
-                ).limit(limit * 2).all()
-            
-            if not items:
-                return []
-            
-            # Convert to enriched results
-            enriched_results = []
-            for item in items:
-                enriched_result = EnrichedSearchResult(
-                    content=item.content or "",
-                    title=item.title,
-                    knowledge_type=item.knowledge_type,
-                    similarity_score=1.0,  # Perfect match for type
-                    metadata=item.metadata or {},
-                    relevance_factors={"type_match": 1.0, "recency": 0.8}
-                )
-                enriched_results.append(enriched_result)
-            
-            # Sort by recency if requested
-            if recent_first:
-                enriched_results.sort(key=lambda x: x.source_document.get("updated_at", ""), reverse=True)
-            
-            return enriched_results[:limit]
-            
-        except Exception as e:
-            self.logger.error(f"Type-based retrieval failed: {e}")
-            return []
-    
-    async def find_similar_content(self,
-                                 reference_content: str,
-                                 limit: int = 5,
-                                 exclude_self: bool = True) -> List[EnrichedSearchResult]:
-        """Find content similar to reference content"""
-        context = RetrievalContext(query=reference_content[:1000])  # Limit query size
-        
-        result = await self.retrieve_knowledge(context, limit)
-        return result.results
-    
-    # Private methods
-    
-    async def _perform_semantic_search(self,
-                                     context: RetrievalContext,
-                                     limit: int) -> List[VectorSearchResult]:
-        """Perform the core semantic search"""
-        # Prepare metadata filters
-        metadata_filters = {}
-        
-        if context.knowledge_types:
-            metadata_filters["knowledge_type"] = context.knowledge_types
-        
-        # Perform search
-        results = await self.vector_storage.semantic_search(
-            query=context.query,
-            limit=limit,
-            score_threshold=self.min_similarity_threshold,
-            metadata_filters=metadata_filters
+        # Initialize Qdrant client
+        self.qdrant_client = QdrantClient(
+            host=settings.qdrant_host,
+            port=settings.qdrant_port,
+            timeout=30
         )
         
-        return results
+        # Initialize CAMEL AutoRetriever
+        self.auto_retriever = AutoRetriever(
+            vector_storage_local_path=f"storage/vector_db/{project_id}",
+            storage_type=StorageType.QDRANT
+        )
+        
+        # Ensure collection exists
+        self._initialize_collection()
+        
+        logger.info(f"SemanticRetriever initialized for project {project_id}")
     
-    async def _enrich_search_results(self,
-                                   search_results: List[VectorSearchResult],
-                                   context: RetrievalContext,
-                                   include_context: bool) -> List[EnrichedSearchResult]:
-        """Enrich search results with additional information"""
-        enriched_results = []
-        
-        # Get source documents from database
-        knowledge_items = await self._get_source_documents([r.document_id for r in search_results])
-        
-        for result in search_results:
-            # Find corresponding knowledge item
-            knowledge_item = knowledge_items.get(result.document_id)
-            
-            if not knowledge_item:
-                continue
-            
-            # Get chunk context if requested
-            chunk_context = None
-            if include_context:
-                chunk_context = await self._get_chunk_context(result)
-            
-            # Calculate relevance factors
-            relevance_factors = self._calculate_relevance_factors(result, context)
-            
-            enriched_result = EnrichedSearchResult(
-                content=result.content,
-                title=knowledge_item.get("title", "Untitled"),
-                knowledge_type=knowledge_item.get("knowledge_type", "unknown"),
-                similarity_score=result.similarity_score,
-                metadata=result.metadata,
-                source_document=knowledge_item,
-                relevance_factors=relevance_factors,
-                chunk_context=chunk_context
+    def _initialize_collection(self) -> None:
+        """Initialize Qdrant collection for the project"""
+        try:
+            # Check if collection exists
+            collections = self.qdrant_client.get_collections()
+            collection_exists = any(
+                collection.name == self.collection_name 
+                for collection in collections.collections
             )
             
-            enriched_results.append(enriched_result)
-        
-        return enriched_results
-    
-    async def _get_source_documents(self, document_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Get source knowledge items from database"""
-        documents = {}
-        
-        try:
-            with self.knowledge_service.get_db_session() as db:
-                # Note: document_id in vector storage corresponds to file_hash or knowledge_id
-                items = db.query(KnowledgeItem).filter(
-                    KnowledgeItem.project_id == self.project_id
-                ).all()
-                
-                for item in items:
-                    # Create lookup by both knowledge_id and potential file_hash
-                    doc_data = {
-                        "knowledge_id": item.knowledge_id,
-                        "title": item.title,
-                        "knowledge_type": item.knowledge_type,
-                        "created_at": item.created_at.isoformat(),
-                        "updated_at": item.updated_at.isoformat(),
-                        "metadata": item.metadata or {}
-                    }
-                    
-                    documents[item.knowledge_id] = doc_data
-                    # Also add by file_hash if it exists in metadata
-                    if item.metadata and "file_hash" in item.metadata:
-                        documents[item.metadata["file_hash"]] = doc_data
-        
-        except Exception as e:
-            self.logger.error(f"Failed to get source documents: {e}")
-        
-        return documents
-    
-    async def _get_chunk_context(self, result: VectorSearchResult) -> Optional[str]:
-        """Get expanded context around a chunk"""
-        try:
-            # This would require storing chunk relationships in metadata
-            # For now, return the chunk content as context
-            return result.content
-        except Exception as e:
-            self.logger.warning(f"Failed to get chunk context: {e}")
-            return None
-    
-    def _calculate_relevance_factors(self,
-                                   result: VectorSearchResult,
-                                   context: RetrievalContext) -> Dict[str, float]:
-        """Calculate various relevance factors"""
-        factors = {
-            "semantic_similarity": result.similarity_score,
-            "query_length_match": 1.0,
-            "keyword_density": 1.0,
-            "recency": 1.0,
-            "content_quality": 1.0
-        }
-        
-        # Keyword matching
-        if context.priority_keywords:
-            content_lower = result.content.lower()
-            keyword_matches = sum(1 for kw in context.priority_keywords if kw.lower() in content_lower)
-            factors["keyword_density"] = keyword_matches / len(context.priority_keywords)
-        
-        # Content length preference
-        if context.content_length_preference:
-            content_length = len(result.content)
-            if context.content_length_preference == "short" and content_length < 500:
-                factors["length_preference"] = 1.0
-            elif context.content_length_preference == "medium" and 500 <= content_length <= 2000:
-                factors["length_preference"] = 1.0
-            elif context.content_length_preference == "long" and content_length > 2000:
-                factors["length_preference"] = 1.0
+            if not collection_exists:
+                # Create collection with appropriate vector configuration
+                self.qdrant_client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(
+                        size=self.embedding_dimension,
+                        distance=Distance.COSINE
+                    )
+                )
+                logger.info(f"Created Qdrant collection: {self.collection_name}")
             else:
-                factors["length_preference"] = 0.7
-        
-        return factors
+                logger.info(f"Using existing Qdrant collection: {self.collection_name}")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize Qdrant collection: {e}")
+            raise KnowledgeError(f"Vector database initialization failed: {e}")
     
-    def _apply_intelligent_filtering(self,
-                                   results: List[EnrichedSearchResult],
-                                   context: RetrievalContext) -> List[EnrichedSearchResult]:
-        """Apply intelligent filtering and reranking"""
-        filtered_results = results.copy()
-        
-        # Remove excluded keywords
-        if context.exclude_keywords:
-            filtered_results = [
-                r for r in filtered_results
-                if not any(kw.lower() in r.content.lower() for kw in context.exclude_keywords)
-            ]
-        
-        # Sort by combined relevance score
-        def combined_score(result: EnrichedSearchResult) -> float:
-            base_score = result.similarity_score
+    async def add_knowledge_item(self, knowledge_item: KnowledgeItem) -> bool:
+        """Add a knowledge item to the vector database"""
+        try:
+            # Extract content for embedding
+            content_text = self._extract_text_content(knowledge_item.content)
             
-            # Weight by relevance factors
-            factor_weights = {
-                "semantic_similarity": 0.4,
-                "keyword_density": 0.3,
-                "recency": 0.2,
-                "content_quality": 0.1
+            if not content_text.strip():
+                logger.warning(f"No text content found in knowledge item {knowledge_item.item_id}")
+                return False
+            
+            # Generate embedding
+            embedding = self.embedding_model.encode(content_text).tolist()
+            
+            # Prepare metadata
+            metadata = {
+                "knowledge_item_id": knowledge_item.item_id,
+                "project_id": knowledge_item.project_id,
+                "item_type": knowledge_item.item_type,
+                "title": knowledge_item.title,
+                "created_at": knowledge_item.created_at.isoformat(),
+                "content_type": knowledge_item.metadata.get("content_type", "text"),
+                "source": knowledge_item.metadata.get("source", "manual"),
+                "tags": knowledge_item.metadata.get("tags", [])
             }
             
-            weighted_score = base_score
-            for factor, weight in factor_weights.items():
-                if factor in result.relevance_factors:
-                    weighted_score += result.relevance_factors[factor] * weight
+            # Create point for Qdrant
+            point = PointStruct(
+                id=knowledge_item.item_id,
+                vector=embedding,
+                payload=metadata
+            )
             
-            return weighted_score
-        
-        filtered_results.sort(key=combined_score, reverse=True)
-        
-        return filtered_results
+            # Insert into Qdrant
+            self.qdrant_client.upsert(
+                collection_name=self.collection_name,
+                points=[point]
+            )
+            
+            logger.info(f"Added knowledge item {knowledge_item.item_id} to vector database")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to add knowledge item to vector database: {e}")
+            raise KnowledgeError(f"Failed to index knowledge item: {e}")
     
-    def _determine_strategy(self, context: RetrievalContext) -> str:
-        """Determine the best retrieval strategy"""
-        if context.knowledge_types:
-            return "filtered_semantic"
-        elif context.priority_keywords:
-            return "keyword_enhanced_semantic"
-        else:
-            return "pure_semantic"
+    async def search(self, query: SearchQuery) -> List[SearchResult]:
+        """Perform semantic search across project knowledge"""
+        try:
+            # Generate query embedding
+            query_embedding = self.embedding_model.encode(query.query).tolist()
+            
+            # Build filters
+            search_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="project_id",
+                        match=MatchValue(value=query.project_id)
+                    )
+                ]
+            )
+            
+            # Add content type filters if specified
+            if query.content_types:
+                search_filter.must.append(
+                    FieldCondition(
+                        key="content_type",
+                        match=MatchValue(value=query.content_types)
+                    )
+                )
+            
+            # Perform vector search
+            search_results = self.qdrant_client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                query_filter=search_filter,
+                limit=query.limit,
+                score_threshold=query.min_score
+            )
+            
+            # Convert to SearchResult objects
+            results = []
+            for result in search_results:
+                # Get full content from database
+                content = await self._get_full_content(result.payload["knowledge_item_id"])
+                
+                search_result = SearchResult(
+                    content=content,
+                    metadata=result.payload,
+                    score=result.score,
+                    knowledge_item_id=result.payload["knowledge_item_id"],
+                    source_type=result.payload.get("item_type"),
+                    project_id=result.payload["project_id"]
+                )
+                results.append(search_result)
+            
+            logger.info(f"Semantic search returned {len(results)} results for query: {query.query[:50]}...")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Semantic search failed: {e}")
+            raise KnowledgeError(f"Search operation failed: {e}")
     
-    def _calculate_quality_score(self,
-                               results: List[EnrichedSearchResult],
-                               context: RetrievalContext) -> float:
-        """Calculate overall quality score for results"""
-        if not results:
-            return 0.0
-        
-        # Average similarity score
-        avg_similarity = sum(r.similarity_score for r in results) / len(results)
-        
-        # Coverage score (how well we covered the query)
-        coverage_score = min(1.0, len(results) / 5)  # Prefer at least 5 results
-        
-        # Diversity score (avoid too similar results)
-        diversity_score = 1.0  # Simplified for now
-        
-        return (avg_similarity * 0.5 + coverage_score * 0.3 + diversity_score * 0.2)
+    async def get_related_content(self, knowledge_item_id: str, limit: int = 5) -> List[SearchResult]:
+        """Find content related to a specific knowledge item"""
+        try:
+            # Get the source item's vector
+            points = self.qdrant_client.retrieve(
+                collection_name=self.collection_name,
+                ids=[knowledge_item_id],
+                with_vectors=True
+            )
+            
+            if not points:
+                raise KnowledgeError(f"Knowledge item {knowledge_item_id} not found in vector database")
+            
+            source_vector = points[0].vector
+            
+            # Search for similar items
+            search_results = self.qdrant_client.search(
+                collection_name=self.collection_name,
+                query_vector=source_vector,
+                query_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="project_id",
+                            match=MatchValue(value=self.project_id)
+                        )
+                    ],
+                    must_not=[
+                        FieldCondition(
+                            key="knowledge_item_id",
+                            match=MatchValue(value=knowledge_item_id)
+                        )
+                    ]
+                ),
+                limit=limit
+            )
+            
+            # Convert to SearchResult objects
+            results = []
+            for result in search_results:
+                content = await self._get_full_content(result.payload["knowledge_item_id"])
+                
+                search_result = SearchResult(
+                    content=content,
+                    metadata=result.payload,
+                    score=result.score,
+                    knowledge_item_id=result.payload["knowledge_item_id"],
+                    source_type=result.payload.get("item_type"),
+                    project_id=result.payload["project_id"]
+                )
+                results.append(search_result)
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to get related content: {e}")
+            raise KnowledgeError(f"Related content search failed: {e}")
     
-    def _generate_suggestions(self,
-                            results: List[EnrichedSearchResult],
-                            context: RetrievalContext) -> List[str]:
-        """Generate search suggestions"""
-        suggestions = []
-        
-        if not results:
-            suggestions.append("Try broader keywords")
-            suggestions.append("Check spelling and try synonyms")
-        elif len(results) < 3:
-            suggestions.append("Try more general terms")
-            suggestions.append("Consider related topics")
-        
-        # Extract common themes from results
-        if results:
-            common_types = set(r.knowledge_type for r in results)
-            if len(common_types) == 1:
-                suggestions.append(f"More results available in {common_types.pop()}")
-        
-        return suggestions[:3]  # Limit to 3 suggestions
+    async def remove_knowledge_item(self, knowledge_item_id: str) -> bool:
+        """Remove a knowledge item from the vector database"""
+        try:
+            self.qdrant_client.delete(
+                collection_name=self.collection_name,
+                points_selector=[knowledge_item_id]
+            )
+            
+            logger.info(f"Removed knowledge item {knowledge_item_id} from vector database")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to remove knowledge item from vector database: {e}")
+            return False
     
-    def _generate_cache_key(self, context: RetrievalContext, limit: int) -> str:
-        """Generate cache key for query"""
-        key_parts = [
-            context.query,
-            str(sorted(context.knowledge_types or [])),
-            str(limit),
-            str(context.priority_keywords or [])
-        ]
-        return "|".join(key_parts)
+    async def update_knowledge_item(self, knowledge_item: KnowledgeItem) -> bool:
+        """Update a knowledge item in the vector database"""
+        try:
+            # Remove old version
+            await self.remove_knowledge_item(knowledge_item.item_id)
+            
+            # Add updated version
+            return await self.add_knowledge_item(knowledge_item)
+            
+        except Exception as e:
+            logger.error(f"Failed to update knowledge item in vector database: {e}")
+            return False
     
-    def _get_cached_result(self, cache_key: str) -> Optional[RetrievalResult]:
-        """Get cached result if still valid"""
-        if cache_key in self.query_cache:
-            result, timestamp = self.query_cache[cache_key]
-            if datetime.utcnow() - timestamp < self.cache_ttl:
-                return result
+    def _extract_text_content(self, content: Dict[str, Any]) -> str:
+        """Extract searchable text from knowledge item content"""
+        if isinstance(content, dict):
+            # Handle different content types
+            if "text" in content:
+                return content["text"]
+            elif "content" in content:
+                return content["content"]
+            elif "body" in content:
+                return content["body"]
             else:
-                del self.query_cache[cache_key]
-        return None
+                # Concatenate all string values
+                text_parts = []
+                for value in content.values():
+                    if isinstance(value, str):
+                        text_parts.append(value)
+                    elif isinstance(value, dict):
+                        text_parts.append(self._extract_text_content(value))
+                return " ".join(text_parts)
+        elif isinstance(content, str):
+            return content
+        else:
+            return str(content)
     
-    def _cache_result(self, cache_key: str, result: RetrievalResult):
-        """Cache result with timestamp"""
-        self.query_cache[cache_key] = (result, datetime.utcnow())
-        
-        # Simple cache cleanup (keep last 100 entries)
-        if len(self.query_cache) > 100:
-            oldest_key = min(self.query_cache.keys(), 
-                           key=lambda k: self.query_cache[k][1])
-            del self.query_cache[oldest_key]
+    async def _get_full_content(self, knowledge_item_id: str) -> str:
+        """Get full content for a knowledge item from database"""
+        try:
+            # This would typically query the database
+            # For now, return a placeholder that would be replaced with actual DB query
+            from app.database.connection import SessionLocal
+            from sqlalchemy import select
+            
+            with SessionLocal() as db:
+                result = db.execute(
+                    select(KnowledgeItem).where(KnowledgeItem.item_id == knowledge_item_id)
+                ).scalar_one_or_none()
+                
+                if result:
+                    return self._extract_text_content(result.content)
+                else:
+                    return "Content not found"
+                    
+        except Exception as e:
+            logger.error(f"Failed to get full content for {knowledge_item_id}: {e}")
+            return "Error retrieving content"
     
-    def _update_metrics(self, response_time: float, quality_score: float):
-        """Update performance metrics"""
-        self.metrics["total_queries"] += 1
-        
-        # Update average response time
-        prev_avg = self.metrics["average_response_time"]
-        count = self.metrics["total_queries"]
-        self.metrics["average_response_time"] = ((prev_avg * (count - 1)) + response_time) / count
-        
-        # Track quality scores
-        self.metrics["quality_scores"].append(quality_score)
-        if len(self.metrics["quality_scores"]) > 100:
-            self.metrics["quality_scores"] = self.metrics["quality_scores"][-100:]
-    
-    async def get_retrieval_stats(self) -> Dict[str, Any]:
-        """Get retrieval performance statistics"""
-        avg_quality = (sum(self.metrics["quality_scores"]) / len(self.metrics["quality_scores"]) 
-                      if self.metrics["quality_scores"] else 0.0)
-        
-        return {
-            **self.metrics,
-            "average_quality_score": avg_quality,
-            "cache_size": len(self.query_cache),
-            "cache_hit_rate": (self.metrics["cache_hits"] / max(1, self.metrics["total_queries"]))
-        }
+    async def get_collection_stats(self) -> Dict[str, Any]:
+        """Get statistics about the knowledge collection"""
+        try:
+            collection_info = self.qdrant_client.get_collection(self.collection_name)
+            
+            return {
+                "total_items": collection_info.points_count,
+                "vector_dimension": self.embedding_dimension,
+                "collection_name": self.collection_name,
+                "project_id": self.project_id,
+                "status": "active"
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get collection stats: {e}")
+            return {
+                "total_items": 0,
+                "vector_dimension": self.embedding_dimension,
+                "collection_name": self.collection_name,
+                "project_id": self.project_id,
+                "status": "error",
+                "error": str(e)
+            }
 
-# Factory function
+# Factory function for easy instantiation
 def create_semantic_retriever(project_id: str) -> SemanticRetriever:
-    """
-    Factory function to create a SemanticRetriever instance
-    
-    Args:
-        project_id: Project ID for retriever
-        
-    Returns:
-        Initialized SemanticRetriever
-    """
+    """Create a semantic retriever for a specific project"""
     return SemanticRetriever(project_id)
 
 # Export main classes
 __all__ = [
     'SemanticRetriever',
-    'RetrievalContext',
-    'EnrichedSearchResult', 
-    'RetrievalResult',
+    'SearchResult', 
+    'SearchQuery',
     'create_semantic_retriever'
 ]
