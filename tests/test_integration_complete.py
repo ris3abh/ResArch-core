@@ -158,8 +158,8 @@ async def test_complete_integration():
                 db=db
             )
             
-            print(f"   ✅ Created chat: {chat.name}")
-            print(f"   📋 Chat ID: {chat.chat_id}")
+            print(f"   ✅ Created chat: {chat.title}")
+            print(f"   📋 Chat ID: {chat.chat_instance_id}")
         
         print("\n5️⃣ TESTING AGENT COORDINATION")
         print("-" * 40)
@@ -175,7 +175,7 @@ async def test_complete_integration():
         
         coordination_session_id = await agent_coordinator.create_collaboration_session(
             project_id=project.project_id,
-            chat_id=chat.chat_id,
+            chat_id=chat.chat_instance_id,
             agent_types=agent_types,
             coordination_mode=CoordinationMode.SEQUENTIAL
         )
@@ -210,7 +210,7 @@ async def test_complete_integration():
         # Start workflow through chat service
         with SessionLocal() as db:
             workflow_id = await chat_service.start_content_workflow(
-                chat_id=chat.chat_id,
+                chat_id=chat.chat_instance_id,
                 workflow_type="blog_post",
                 content_requirements=content_requirements,
                 db=db
@@ -240,7 +240,7 @@ async def test_complete_integration():
                 
                 # Get and auto-approve checkpoints for testing
                 with SessionLocal() as db:
-                    checkpoints = await chat_service.get_active_checkpoints(chat.chat_id, db)
+                    checkpoints = await chat_service.get_active_checkpoints(chat.chat_instance_id, db)
                     
                     for checkpoint in checkpoints:
                         print(f"   ✅ Auto-approving checkpoint: {checkpoint.checkpoint_type}")
@@ -319,15 +319,15 @@ async def test_complete_integration():
             ]
             
             for msg_data in test_messages:
-                message = await chat_service.send_message(chat.chat_id, msg_data, db=db)
+                message = await chat_service.send_message(chat.chat_instance_id, msg_data, db=db)
                 print(f"   ✅ Sent message: {message.message_id}")
             
             # Get chat messages
-            messages = await chat_service.get_chat_messages(chat.chat_id, limit=10, db=db)
+            messages = await chat_service.get_chat_messages(chat.chat_instance_id, limit=10, db=db)
             print(f"   📨 Total messages in chat: {len(messages)}")
             
             # Get chat status
-            chat_status = await chat_service.get_chat_status(chat.chat_id, db)
+            chat_status = await chat_service.get_chat_status(chat.chat_instance_id, db)
             print(f"   📊 Chat status: {chat_status['status']}")
             print(f"   💬 Message count: {chat_status['message_count']}")
         
@@ -388,7 +388,7 @@ async def test_complete_integration():
             print(f"   ✅ Chat instances: {len(project_chats)} created")
             
             # Get final chat status
-            final_chat_status = await chat_service.get_chat_status(chat.chat_id, db)
+            final_chat_status = await chat_service.get_chat_status(chat.chat_instance_id, db)
             print(f"   📊 Final message count: {final_chat_status['message_count']}")
             print(f"   📊 Active checkpoints: {final_chat_status['active_checkpoints']}")
         
@@ -434,7 +434,7 @@ async def test_complete_integration():
         return {
             "test_status": "SUCCESS",
             "project_id": project.project_id,
-            "chat_id": chat.chat_id,
+            "chat_id": chat.chat_instance_id,
             "workflow_id": workflow_id,
             "coordination_session_id": coordination_session_id,
             "components_tested": [

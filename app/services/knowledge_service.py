@@ -758,6 +758,75 @@ class KnowledgeService(BaseService[KnowledgeItem]):
             tone_counts[tone] = count
         
         return tone_counts
+    
+    def before_create(self, data: KnowledgeCreateData, db: Session) -> KnowledgeItem:
+        """Convert KnowledgeCreateData to KnowledgeItem instance - FIXED VERSION"""
+        
+        # Validate project exists
+        from app.services.project_service import get_project_service
+        project_service = get_project_service()
+        project = project_service.get_by_id_or_raise(data.project_id, db)
+        
+        # Validate knowledge type
+        if data.item_type not in self.knowledge_types:
+            raise ValidationError(f"Invalid knowledge type: {data.item_type}")
+        
+        # Create KnowledgeItem instance from data
+        return KnowledgeItem(
+            project_id=data.project_id,
+            item_type=data.item_type,
+            title=data.title,
+            content=data.content,  # This is now JSON type, can handle dict
+            meta_data=data.metadata or {},
+            is_processed=False,
+            processing_status="pending"
+        )
+    
+    def get_by_project_id(
+        self, 
+        project_id: str, 
+        db: Optional[Session] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None
+    ) -> List[KnowledgeItem]:
+        """Get all knowledge items for a specific project"""
+        
+        with self.get_db_session(db) as session:
+            query = session.query(KnowledgeItem).filter(
+                KnowledgeItem.project_id == project_id,
+                KnowledgeItem.is_active == True
+            ).order_by(KnowledgeItem.created_at.desc())
+            
+            if offset:
+                query = query.offset(offset)
+            if limit:
+                query = query.limit(limit)
+                
+            return query.all()
+        
+    def get_by_type(
+        self,
+        project_id: str,
+        item_type: str,
+        db: Optional[Session] = None
+    ) -> List[KnowledgeItem]:
+        """Get knowledge items by type for a project"""
+        
+        with self.get_db_session(db) as session:
+            return session.query(KnowledgeItem).filter(
+                KnowledgeItem.project_id == project_id,
+                KnowledgeItem.item_type == item_type,
+                KnowledgeItem.is_active == True
+            ).all()
+
+    def count_by_project(self, project_id: str, db: Optional[Session] = None) -> int:
+        """Count knowledge items for a project"""
+        
+        with self.get_db_session(db) as session:
+            return session.query(KnowledgeItem).filter(
+                KnowledgeItem.project_id == project_id,
+                KnowledgeItem.is_active == True
+            ).count()
 
 
 # Service instance factory

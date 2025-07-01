@@ -1,14 +1,13 @@
-# app/database/models/knowledge_item.py - COMPLETE FIXED FILE
+# app/database/models/knowledge_item.py - FIXED VERSION
 """
 Knowledge Item model with proper SQLAlchemy 2.0 syntax using Mapped annotations.
-Updated to follow modern best practices and fix relationship issues.
-FIXED: Renamed 'metadata' to 'meta_data' to avoid SQLAlchemy conflict.
+FIXED: Changed content field from Text to JSON to properly handle dictionary data.
 """
 from sqlalchemy import String, DateTime, JSON, Text, ForeignKey, Integer, Boolean, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, Union, TYPE_CHECKING
 
 from app.database.connection import Base
 
@@ -39,7 +38,9 @@ class KnowledgeItem(Base):
     # Content information
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    
+    # FIXED: Changed from Text to JSON to properly handle dictionary data
+    content: Mapped[Optional[Union[str, Dict[str, Any]]]] = mapped_column(JSON, nullable=True)
     
     # Metadata and configuration (renamed to avoid SQLAlchemy conflict)
     meta_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True, default=dict)

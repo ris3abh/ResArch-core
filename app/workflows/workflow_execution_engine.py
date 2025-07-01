@@ -33,6 +33,24 @@ from app.core.exceptions import (
 
 logger = logging.getLogger(__name__)
 
+class WorkflowPriority(Enum):
+    """Workflow priority levels"""
+    LOW = 1
+    NORMAL = 2
+    HIGH = 3
+    URGENT = 4
+
+@dataclass
+class WorkflowRequest:
+    """Request to start a workflow"""
+    project_id: str
+    chat_instance_id: str
+    workflow_type: str
+    content_type: str
+    content_requirements: Dict[str, Any]
+    priority: WorkflowPriority = WorkflowPriority.NORMAL
+    metadata: Optional[Dict[str, Any]] = None
+
 class WorkflowState(Enum):
     """Workflow execution states"""
     PENDING = "pending"
@@ -266,15 +284,15 @@ class WorkflowExecutionEngine:
         
         logger.info(f"Initialized {len(self.workflow_definitions)} workflow templates")
     
-    async def start_workflow(
-        self, 
-        workflow_type: str, 
-        project_id: str, 
-        chat_instance_id: str,
-        content_requirements: Dict[str, Any],
-        custom_config: Optional[Dict[str, Any]] = None
-    ) -> str:
+    async def start_workflow(self, request: WorkflowRequest) -> str:
         """Start a new workflow execution"""
+        
+        # Extract values from request
+        workflow_type = request.workflow_type
+        project_id = request.project_id
+        chat_instance_id = request.chat_instance_id
+        content_requirements = request.content_requirements
+        custom_config = request.metadata
         
         # Validate inputs
         if workflow_type not in self.workflow_definitions:
@@ -316,7 +334,8 @@ class WorkflowExecutionEngine:
             metadata={
                 "content_requirements": content_requirements,
                 "custom_config": custom_config or {},
-                "created_at": datetime.utcnow().isoformat()
+                "created_at": datetime.utcnow().isoformat(),
+                "priority": request.priority.value
             }
         )
         
@@ -621,7 +640,7 @@ class WorkflowExecutionEngine:
         try:
             with get_db_session() as db:
                 pending_checkpoints = db.query(HumanCheckpoint).filter(
-                    HumanCheckpoint.chat_id == execution.chat_instance_id,
+                    HumanCheckpoint.chat_instance_id == execution.chat_instance_id,
                     HumanCheckpoint.status == "pending"
                 ).all()
                 
@@ -658,7 +677,7 @@ class WorkflowExecutionEngine:
             with get_db_session() as db:
                 completion_message = ChatMessage(
                     message_id=f"msg_workflow_complete_{uuid.uuid4().hex[:8]}",
-                    chat_id=execution.chat_instance_id,
+                    chat_instance_id=execution.chat_instance_id,
                     sender_id="system",
                     sender_type="system",
                     content={
@@ -870,10 +889,12 @@ workflow_engine = WorkflowExecutionEngine()
 __all__ = [
     'WorkflowExecutionEngine',
     'WorkflowState',
+    'WorkflowPriority',  
     'TaskType', 
     'TaskStatus',
     'WorkflowTask',
     'WorkflowDefinition',
     'WorkflowExecution',
+    'WorkflowRequest',    
     'workflow_engine'
 ]
