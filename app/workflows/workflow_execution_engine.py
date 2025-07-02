@@ -14,6 +14,7 @@ import uuid
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from sqlalchemy import desc
 
 from app.services.base_service import BaseService
 from app.services.project_service import get_project_service
@@ -571,7 +572,7 @@ class WorkflowExecutionEngine:
             with get_db_session() as db:
                 checkpoint = HumanCheckpoint(
                     checkpoint_id=f"checkpoint_{task.task_id}_{uuid.uuid4().hex[:8]}",
-                    chat_id=execution.chat_instance_id,
+                    chat_instance_id=execution.chat_instance_id,  # FIXED: chat_id → chat_instance_id
                     checkpoint_type=task.task_type.value,
                     content_reference=task.task_id,
                     status="pending",
@@ -592,19 +593,26 @@ class WorkflowExecutionEngine:
         """Log task completion to chat"""
         try:
             with get_db_session() as db:
+                # Get next sequence number
+                last_message = db.query(ChatMessage).filter(
+                    ChatMessage.chat_instance_id == execution.chat_instance_id
+                ).order_by(desc(ChatMessage.sequence_number)).first()
+                
+                next_sequence = (last_message.sequence_number + 1) if last_message else 1
+                
                 message = ChatMessage(
-                    message_id=f"msg_{task.task_id}_{uuid.uuid4().hex[:8]}",
-                    chat_id=execution.chat_instance_id,
-                    sender_id=task.agent_type.value,
-                    sender_type="agent",
-                    content={
+                    chat_instance_id=execution.chat_instance_id,  # FIXED: chat_id → chat_instance_id
+                    sequence_number=next_sequence,                # ADDED: required field
+                    message_type="agent_task",                    # ADDED: required field
+                    participant_type="agent",                     # ADDED: required field
+                    participant_id=task.agent_type.value,         # FIXED: sender_id → participant_id
+                    content=json.dumps({                          # ENSURE: content is string
                         "type": "task_completion",
                         "task_id": task.task_id,
                         "task_type": task.task_type.value,
                         "result_summary": task.result.get("content", "")[:200] + "..." if task.result else "No result",
                         "completed_at": task.completed_at.isoformat() if task.completed_at else None
-                    },
-                    created_at=datetime.utcnow()
+                    })
                 )
                 
                 db.add(message)

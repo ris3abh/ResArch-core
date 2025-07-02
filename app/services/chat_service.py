@@ -177,6 +177,12 @@ class ChatService(BaseService[ChatInstance]):
                 ChatMessage.chat_instance_id == chat_id
             ).order_by(desc(ChatMessage.created_at)).limit(5).all()
             
+            # FIXED: Get active checkpoints for this chat
+            active_checkpoints = session.query(HumanCheckpoint).filter(
+                HumanCheckpoint.chat_instance_id == chat_id,
+                HumanCheckpoint.status == "pending"
+            ).all()
+            
             return {
                 "chat_id": chat.chat_instance_id,  # FIXED: Return correct field
                 "title": chat.title,
@@ -189,6 +195,7 @@ class ChatService(BaseService[ChatInstance]):
                 "requires_human_review": chat.requires_human_review,
                 "created_at": chat.created_at.isoformat() if chat.created_at else None,
                 "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
+                "active_checkpoints": len(active_checkpoints),  # FIXED: Add missing field
                 "recent_messages": [
                     {
                         "message_id": msg.message_id,

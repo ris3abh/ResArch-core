@@ -13,6 +13,7 @@ import logging
 import json
 from concurrent.futures import ThreadPoolExecutor
 import uuid
+from sqlalchemy import desc
 
 from app.agents.base.agent_factory import agent_factory, AgentType
 from app.knowledge.retrievers.semantic_retriever import create_semantic_retriever, SearchQuery
@@ -832,20 +833,27 @@ You are reviewing and editing content for quality and consistency. Your role is 
         """Log agent task execution to chat"""
         try:
             with get_db_session() as db:
+                # Get next sequence number
+                last_message = db.query(ChatMessage).filter(
+                    ChatMessage.chat_instance_id == agent_session.chat_id
+                ).order_by(desc(ChatMessage.sequence_number)).first()
+                
+                next_sequence = (last_message.sequence_number + 1) if last_message else 1
+                
                 message = ChatMessage(
-                    message_id=f"msg_{task_id}_{uuid.uuid4().hex[:8]}",
-                    chat_id=agent_session.chat_id,
-                    sender_id=agent_session.agent_id,
-                    sender_type="agent",
-                    content={
+                    chat_instance_id=agent_session.chat_id,        
+                    sequence_number=next_sequence,                 
+                    message_type="agent_task",                     
+                    participant_type="agent",                      
+                    participant_id=agent_session.agent_id,         
+                    content=json.dumps({                           
                         "type": "agent_task_completion",
                         "agent_type": agent_session.agent_type.value,
                         "task_id": task_id,
                         "task_type": task_type,
                         "result_preview": result.get("content", "")[:200] + "..." if result.get("content") else "No content",
                         "metadata": result.get("metadata", {})
-                    },
-                    created_at=datetime.utcnow()
+                    })
                 )
                 
                 db.add(message)
@@ -862,12 +870,20 @@ You are reviewing and editing content for quality and consistency. Your role is 
         """Log coordination completion"""
         try:
             with get_db_session() as db:
+                # Get next sequence number
+                last_message = db.query(ChatMessage).filter(
+                    ChatMessage.chat_instance_id == session.chat_id
+                ).order_by(desc(ChatMessage.sequence_number)).first()
+                
+                next_sequence = (last_message.sequence_number + 1) if last_message else 1
+                
                 completion_message = ChatMessage(
-                    message_id=f"msg_coordination_complete_{uuid.uuid4().hex[:8]}",
-                    chat_id=session.chat_id,
-                    sender_id="coordinator_system",
-                    sender_type="system",
-                    content={
+                    chat_instance_id=session.chat_id,
+                    sequence_number=next_sequence,
+                    message_type="coordination_completion",
+                    participant_type="system",
+                    participant_id="coordinator_system",
+                    content=json.dumps({
                         "type": "coordination_completion",
                         "session_id": session.session_id,
                         "workflow_summary": {
@@ -881,8 +897,7 @@ You are reviewing and editing content for quality and consistency. Your role is 
                             "word_count": result.get("final_content", {}).get("final_word_count", 0),
                             "ready_for_review": True
                         }
-                    },
-                    created_at=datetime.utcnow()
+                    })
                 )
                 
                 db.add(completion_message)

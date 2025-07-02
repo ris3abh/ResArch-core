@@ -404,7 +404,7 @@ async def create_knowledge_item(
     knowledge_item = knowledge_service.create(create_data, db)
     
     return {
-        "item_id": knowledge_item.item_id,
+        "item_id": knowledge_item.knowledge_id,  # FIXED: Use knowledge_id
         "project_id": knowledge_item.project_id,
         "title": knowledge_item.title,
         "item_type": knowledge_item.item_type,
@@ -424,7 +424,7 @@ async def get_project_knowledge(
     
     return [
         {
-            "item_id": item.item_id,
+            "item_id": item.knowledge_id,  # FIXED: Use knowledge_id
             "title": item.title,
             "item_type": item.item_type,
             "created_at": item.created_at.isoformat(),
@@ -444,12 +444,12 @@ async def get_knowledge_item(
     item = knowledge_service.get_by_id_or_raise(item_id, db)
     
     return {
-        "item_id": item.item_id,
+        "item_id": item.knowledge_id,  # FIXED: Use knowledge_id
         "project_id": item.project_id,
         "title": item.title,
         "item_type": item.item_type,
         "content": item.content,
-        "metadata": item.metadata,
+        "metadata": item.meta_data,  # FIXED: Use meta_data field name
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat() if item.updated_at else None
     }
