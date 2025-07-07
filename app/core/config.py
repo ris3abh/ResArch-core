@@ -23,6 +23,20 @@ class Settings(BaseSettings):
     
     # Database Settings - Use 127.0.0.1 instead of localhost
     database_url: str = "postgresql://spinscribe:spinscribe123@127.0.0.1:5432/spinscribe"
+    @field_validator('database_url')
+    @classmethod
+    def decode_database_url(cls, v):
+        """Fix for improperly loaded env variables with hex-encoded characters"""
+        # Decode both percent-encoded (%3A) and \x3a formats
+        try:
+            v = v.encode().decode('unicode_escape')  # decode \x3a → :
+        except Exception:
+            pass
+        try:
+            v = unquote(v)  # decode %3A → :
+        except Exception:
+            pass
+        return v
     echo_sql: bool = False  # Set to True for SQL debugging
     
     # Redis Settings (for caching and sessions)

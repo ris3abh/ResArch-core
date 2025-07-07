@@ -81,10 +81,10 @@ class KnowledgeItem(Base):
     )
     
     # FIXED: Use original 'metadata' column name (not 'item_metadata')
-    metadata: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    meta_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSON, 
-        nullable=True,
-        default=dict,
+        nullable=True, 
+        default=dict, 
         doc="Additional metadata and configuration"
     )
     
@@ -253,7 +253,7 @@ class KnowledgeItem(Base):
             "category": self.category,
             "description": self.description,
             "content": self.content,
-            "metadata": self.metadata,
+            "metadata": self.meta_data,
             "tags": self.tags,
             "file_path": self.file_path,
             "file_name": self.file_name,
@@ -374,27 +374,27 @@ class KnowledgeItem(Base):
     
     def get_metadata(self, key: str, default: Any = None) -> Any:
         """Get a metadata value by key"""
-        if not self.metadata:
+        if not self.meta_data:
             return default
-        return self.metadata.get(key, default)
+        return self.meta_data.get(key, default)
     
     def set_metadata(self, key: str, value: Any):
         """Set a metadata value"""
-        if not self.metadata:
-            self.metadata = {}
-        self.metadata[key] = value
+        if not self.meta_data:
+            self.meta_data = {}
+        self.meta_data[key] = value
         self.update_activity()
     
     def update_metadata(self, metadata_dict: Dict[str, Any]):
         """Update multiple metadata values"""
-        if not self.metadata:
-            self.metadata = {}
-        self.metadata.update(metadata_dict)
+        if not self.meta_data:
+            self.meta_data = {}
+        self.meta_data.update(metadata_dict)
         self.update_activity()
     
     def clear_metadata(self):
         """Clear all metadata"""
-        self.metadata = {}
+        self.meta_data = {}
         self.update_activity()
     
     def mark_as_processed(self, analysis_results: Dict[str, Any] = None):
