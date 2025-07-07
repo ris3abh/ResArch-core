@@ -1,0 +1,6 @@
+camel-ai[all]==0.2.16
+qdrant-client>=1.7.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+numpy>=1.24.0
+openai>=1.0.0
