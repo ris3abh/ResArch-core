@@ -1,7 +1,7 @@
-# ─── NEW FILE: spinscribe/checkpoints/checkpoint_manager.py ────
+# ─── FILE: spinscribe/checkpoints/checkpoint_manager.py ────────
 """
-Core checkpoint management system for SpinScribe.
-Handles creation, assignment, and resolution of human checkpoints.
+Checkpoint Manager with enhanced logging.
+UPDATE: Add logging to existing checkpoint_manager.py
 """
 
 import logging
@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 import uuid
+
+from spinscribe.utils.enhanced_logging import workflow_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +77,17 @@ class Checkpoint:
 
 class CheckpointManager:
     """
-    Manages human checkpoints in the SpinScribe workflow.
-    Handles creation, assignment, notifications, and resolution.
+    Manages human checkpoints with comprehensive logging.
     """
     
     def __init__(self):
         self.checkpoints: Dict[str, Checkpoint] = {}
         self.checkpoint_callbacks: Dict[str, Callable] = {}
         self.notification_handlers: List[Callable] = []
+        
+        # Setup logging
+        self.logger = logging.getLogger('checkpoint_manager')
+        self.logger.info("✋ Checkpoint Manager initialized")
         
     def create_checkpoint(
         self,
@@ -98,30 +103,18 @@ class CheckpointManager:
         context_data: Dict[str, Any] = None,
         due_hours: Optional[int] = None
     ) -> str:
-        """
-        Create a new human checkpoint.
+        """Create a new human checkpoint with detailed logging."""
         
-        Args:
-            project_id: Project identifier
-            checkpoint_type: Type of checkpoint
-            title: Checkpoint title
-            description: Detailed description
-            content_reference: Reference to content being reviewed
-            assigned_to: User ID to assign checkpoint to
-            assigned_by: User ID who created the checkpoint
-            priority: Priority level
-            workflow_stage: Current workflow stage
-            context_data: Additional context information
-            due_hours: Hours until due (optional)
-            
-        Returns:
-            checkpoint_id: ID of created checkpoint
-        """
+        self.logger.info(f"🔨 Creating checkpoint: {title}")
+        self.logger.debug(f"📋 Checkpoint details: type={checkpoint_type.value}, "
+                         f"priority={priority.value}, project={project_id}")
+        
         checkpoint_id = str(uuid.uuid4())
         
         due_date = None
         if due_hours:
             due_date = datetime.now() + timedelta(hours=due_hours)
+            self.logger.debug(f"⏰ Checkpoint due date set: {due_date}")
         
         checkpoint = Checkpoint(
             checkpoint_id=checkpoint_id,
@@ -140,10 +133,15 @@ class CheckpointManager:
         
         self.checkpoints[checkpoint_id] = checkpoint
         
+        # Track in workflow tracker
+        workflow_tracker.track_checkpoint(project_id, checkpoint_id, checkpoint_type.value, "created")
+        
         # Send notifications
         self._notify_checkpoint_created(checkpoint)
         
-        logger.info(f"✋ Created checkpoint: {title} (ID: {checkpoint_id})")
+        self.logger.info(f"✅ Checkpoint created successfully: {checkpoint_id}")
+        self.logger.debug(f"📊 Total checkpoints now: {len(self.checkpoints)}")
+        
         return checkpoint_id
     
     def assign_checkpoint(
@@ -152,19 +150,12 @@ class CheckpointManager:
         assigned_to: str,
         assigned_by: Optional[str] = None
     ) -> bool:
-        """
-        Assign a checkpoint to a user.
+        """Assign a checkpoint to a user with logging."""
         
-        Args:
-            checkpoint_id: ID of checkpoint to assign
-            assigned_to: User ID to assign to
-            assigned_by: User ID making the assignment
-            
-        Returns:
-            bool: True if assignment successful
-        """
+        self.logger.info(f"📋 Assigning checkpoint {checkpoint_id} to {assigned_to}")
+        
         if checkpoint_id not in self.checkpoints:
-            logger.error(f"Checkpoint not found: {checkpoint_id}")
+            self.logger.error(f"❌ Checkpoint not found: {checkpoint_id}")
             return False
         
         checkpoint = self.checkpoints[checkpoint_id]
@@ -174,10 +165,11 @@ class CheckpointManager:
         
         if checkpoint.status == CheckpointStatus.PENDING:
             checkpoint.status = CheckpointStatus.IN_REVIEW
+            self.logger.info(f"🔄 Checkpoint status updated to IN_REVIEW")
         
         self._notify_checkpoint_assigned(checkpoint)
         
-        logger.info(f"📋 Assigned checkpoint {checkpoint_id} to {assigned_to}")
+        self.logger.info(f"✅ Checkpoint assigned successfully")
         return True
     
     def submit_response(
@@ -190,23 +182,13 @@ class CheckpointManager:
         changes_requested: List[Dict[str, Any]] = None,
         time_spent_minutes: Optional[int] = None
     ) -> bool:
-        """
-        Submit a response to a checkpoint.
+        """Submit a response to a checkpoint with logging."""
         
-        Args:
-            checkpoint_id: ID of checkpoint
-            reviewer_id: ID of reviewer
-            decision: 'approve', 'reject', or 'needs_revision'
-            feedback: Reviewer feedback
-            suggestions: List of suggestions
-            changes_requested: Specific changes requested
-            time_spent_minutes: Time spent on review
-            
-        Returns:
-            bool: True if response submitted successfully
-        """
+        self.logger.info(f"📝 Submitting response for checkpoint: {checkpoint_id}")
+        self.logger.info(f"👤 Reviewer: {reviewer_id}, Decision: {decision}")
+        
         if checkpoint_id not in self.checkpoints:
-            logger.error(f"Checkpoint not found: {checkpoint_id}")
+            self.logger.error(f"❌ Checkpoint not found: {checkpoint_id}")
             return False
         
         checkpoint = self.checkpoints[checkpoint_id]
@@ -229,11 +211,22 @@ class CheckpointManager:
         if decision == 'approve':
             checkpoint.status = CheckpointStatus.APPROVED
             checkpoint.resolved_at = datetime.now()
+            self.logger.info(f"✅ Checkpoint APPROVED")
         elif decision == 'reject':
             checkpoint.status = CheckpointStatus.REJECTED
             checkpoint.resolved_at = datetime.now()
+            self.logger.info(f"❌ Checkpoint REJECTED")
         elif decision == 'needs_revision':
             checkpoint.status = CheckpointStatus.NEEDS_REVISION
+            self.logger.info(f"🔄 Checkpoint needs REVISION")
+        
+        # Track resolution in workflow tracker
+        workflow_tracker.track_checkpoint(
+            checkpoint.project_id, 
+            checkpoint_id, 
+            checkpoint.checkpoint_type.value, 
+            decision
+        )
         
         # Notify about response
         self._notify_checkpoint_responded(checkpoint, response)
@@ -241,11 +234,12 @@ class CheckpointManager:
         # Execute callback if registered
         if checkpoint_id in self.checkpoint_callbacks:
             try:
+                self.logger.debug(f"🔗 Executing callback for checkpoint {checkpoint_id}")
                 self.checkpoint_callbacks[checkpoint_id](checkpoint, response)
             except Exception as e:
-                logger.error(f"Checkpoint callback failed: {e}")
+                self.logger.error(f"❌ Checkpoint callback failed: {e}")
         
-        logger.info(f"✅ Response submitted for checkpoint {checkpoint_id}: {decision}")
+        self.logger.info(f"✅ Response processed successfully")
         return True
     
     def get_checkpoint(self, checkpoint_id: str) -> Optional[Checkpoint]:
@@ -268,10 +262,12 @@ class CheckpointManager:
     def register_callback(self, checkpoint_id: str, callback: Callable) -> None:
         """Register a callback for when a checkpoint is resolved."""
         self.checkpoint_callbacks[checkpoint_id] = callback
+        self.logger.debug(f"🔗 Callback registered for checkpoint {checkpoint_id}")
     
     def add_notification_handler(self, handler: Callable) -> None:
         """Add a notification handler."""
         self.notification_handlers.append(handler)
+        self.logger.debug(f"📢 Notification handler added (total: {len(self.notification_handlers)})")
     
     def _notify_checkpoint_created(self, checkpoint: Checkpoint) -> None:
         """Send notification when checkpoint is created."""
@@ -279,7 +275,7 @@ class CheckpointManager:
             try:
                 handler('checkpoint_created', checkpoint)
             except Exception as e:
-                logger.error(f"Notification handler failed: {e}")
+                self.logger.error(f"❌ Notification handler failed: {e}")
     
     def _notify_checkpoint_assigned(self, checkpoint: Checkpoint) -> None:
         """Send notification when checkpoint is assigned."""
@@ -287,7 +283,7 @@ class CheckpointManager:
             try:
                 handler('checkpoint_assigned', checkpoint)
             except Exception as e:
-                logger.error(f"Notification handler failed: {e}")
+                self.logger.error(f"❌ Notification handler failed: {e}")
     
     def _notify_checkpoint_responded(self, checkpoint: Checkpoint, response: CheckpointResponse) -> None:
         """Send notification when checkpoint receives response."""
@@ -295,4 +291,4 @@ class CheckpointManager:
             try:
                 handler('checkpoint_responded', checkpoint, response)
             except Exception as e:
-                logger.error(f"Notification handler failed: {e}")
+                self.logger.error(f"❌ Notification handler failed: {e}")

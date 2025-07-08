@@ -1,4 +1,4 @@
-# ─── FILE: spinscribe/knowledge/document_processor.py ───────
+# ─── FIXED FILE: spinscribe/knowledge/document_processor.py ───────
 """
 Document processing system for SpinScribe client documents.
 Handles PDF, DOCX, TXT, and other document types using CAMEL loaders.
@@ -9,14 +9,19 @@ import asyncio
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime  # FIXED: Added missing datetime import
 import hashlib
 
-from camel.loaders import create_file_from_raw_bytes
+try:
+    from camel.loaders import UnstructuredReader
+except ImportError:
+    from camel.loaders import create_file_from_raw_bytes
+
+import uuid
+
 from camel.embeddings import OpenAIEmbedding
-from camel.storages import QdrantStorage
-from qdrant_client.models import Distance, VectorParams
-from qdrant_client import QdrantClient
+from camel.storages.vectordb_storages import QdrantStorage  # FIXED: Correct import path
+from camel.storages import VectorRecord
 
 from config.settings import (
     QDRANT_HOST, QDRANT_PORT, QDRANT_API_KEY, 
@@ -64,17 +69,17 @@ class DocumentProcessor:
             '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             '.doc': 'application/msword',
             '.txt': 'text/plain',
-            '.md': 'text/markdown',
+            '.md': 'text/markdown',  # FIXED: Added markdown support
             '.html': 'text/html'
         }
         
     def _setup_vector_storage(self) -> QdrantStorage:
         """Initialize Qdrant vector storage for document chunks."""
         try:
-            qdrant_url = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
+            # FIXED: Updated for CAMEL 0.2.16 API
             storage = QdrantStorage(
-                url_and_api_key=(qdrant_url, QDRANT_API_KEY if QDRANT_API_KEY else None),
                 vector_dim=QDRANT_VECTOR_DIM,
+                url_and_api_key=(f"http://{QDRANT_HOST}:{QDRANT_PORT}", QDRANT_API_KEY if QDRANT_API_KEY else None),
                 collection_name=f"{QDRANT_COLLECTION}_knowledge"
             )
             logger.info("Vector storage for knowledge base initialized successfully")
@@ -111,7 +116,7 @@ class DocumentProcessor:
             raise FileNotFoundError(f"Document not found: {file_path}")
         
         if file_path.suffix.lower() not in self.supported_types:
-            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+            raise ValueError(f"File type {file_path.suffix.lower()} not supported")
         
         logger.info(f"🔄 Processing document: {file_path.name}")
         
@@ -122,16 +127,38 @@ class DocumentProcessor:
         # Calculate content hash for deduplication
         content_hash = hashlib.sha256(file_content).hexdigest()
         
-        # Create file object using CAMEL loaders
-        file_obj = create_file_from_raw_bytes(file_content, str(file_path))
-        
-        # Extract text content from document
+        # FIXED: Extract text content based on file type
         extracted_content = []
-        for doc in file_obj.docs:
-            extracted_content.append({
-                'content': doc.get('page_content', ''),
-                'metadata': doc.get('metadata', {})
-            })
+        if file_path.suffix.lower() == '.md':
+            # Handle markdown files directly
+            with open(file_path, 'r', encoding='utf-8') as f:
+                text_content = f.read()
+            extracted_content = [{'content': text_content, 'metadata': {'source': str(file_path)}}]
+        elif file_path.suffix.lower() == '.txt':
+            # Handle text files directly
+            with open(file_path, 'r', encoding='utf-8') as f:
+                text_content = f.read()
+            extracted_content = [{'content': text_content, 'metadata': {'source': str(file_path)}}]
+        else:
+            # Use CAMEL loaders for other formats (PDF, DOCX, etc.)
+            try:
+                from camel.loaders import UnstructuredReader
+                reader = UnstructuredReader()
+                documents = reader.read_file(file_path)
+                for doc in documents:
+                    extracted_content.append({
+                        'content': doc.get('page_content', ''),
+                        'metadata': doc.get('metadata', {})
+                    })
+            except ImportError:
+                # Fallback for older CAMEL versions
+                from camel.loaders import create_file_from_raw_bytes
+                file_obj = create_file_from_raw_bytes(file_content, str(file_path))
+                for doc in file_obj.docs:
+                    extracted_content.append({
+                        'content': doc.get('page_content', ''),
+                        'metadata': doc.get('metadata', {})
+                    })
         
         # Create document metadata
         metadata = DocumentMetadata(
@@ -171,36 +198,41 @@ class DocumentProcessor:
         chunk_index = 0
         
         for content_item in extracted_content:
-            content = content_item['content']
-            if not content.strip():
+            content_text = content_item['content']
+            
+            if not content_text or not content_text.strip():
                 continue
-                
-            # Split content into smaller chunks (approximately 500 words each)
-            words = content.split()
-            chunk_size = 500
+            
+            # Simple chunking by words (can be improved with semantic chunking)
+            words = content_text.split()
+            chunk_size = 500  # words per chunk
             
             for i in range(0, len(words), chunk_size):
                 chunk_words = words[i:i + chunk_size]
-                chunk_content = ' '.join(chunk_words)
+                chunk_text = ' '.join(chunk_words)
                 
-                if len(chunk_content.strip()) < 50:  # Skip very small chunks
+                if not chunk_text.strip():
                     continue
                 
-                chunk_id = f"{metadata.content_hash}_{chunk_index}"
+                # FIXED: Use UUID for Qdrant compatibility
+                chunk_id = str(uuid.uuid4())
                 
                 chunk = DocumentChunk(
                     chunk_id=chunk_id,
                     document_id=metadata.content_hash,
                     chunk_index=chunk_index,
-                    content=chunk_content,
+                    content=chunk_text,
                     metadata={
+                        'file_name': metadata.file_name,
+                        'file_type': metadata.file_type,
                         'client_id': metadata.client_id,
                         'project_id': metadata.project_id,
                         'document_type': metadata.document_type,
-                        'file_name': metadata.file_name,
+                        'upload_timestamp': metadata.upload_timestamp.isoformat(),
                         'tags': metadata.tags,
-                        'chunk_size': len(chunk_content),
-                        'word_count': len(chunk_words)
+                        'original_document_hash': metadata.content_hash,  # Keep original hash in metadata
+                        'chunk_index': chunk_index,
+                        **content_item.get('metadata', {})
                     }
                 )
                 
@@ -211,40 +243,35 @@ class DocumentProcessor:
         return chunks
     
     async def _store_chunks(self, chunks: List[DocumentChunk]) -> None:
-        """Store document chunks in vector database."""
+        """Store chunks in vector database."""
         if not chunks:
+            logger.warning("No chunks to store")
             return
-            
-        # Generate embeddings for chunks
-        chunk_contents = [chunk.content for chunk in chunks]
-        embeddings = await self._generate_embeddings(chunk_contents)
         
-        # Store in vector database
-        for chunk, embedding in zip(chunks, embeddings):
-            try:
-                # Store vector with metadata
-                vector_id = await self.vector_storage.add(
-                    vectors=embedding,
-                    payload=chunk.metadata,
-                    ids=chunk.chunk_id
-                )
-                chunk.vector_id = vector_id
-                logger.debug(f"Stored chunk {chunk.chunk_id} in vector database")
-            except Exception as e:
-                logger.error(f"Failed to store chunk {chunk.chunk_id}: {e}")
-                raise
-    
-    async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for text chunks."""
         try:
-            embeddings = []
-            for text in texts:
-                # Use CAMEL's OpenAI embedding
-                embedding = self.embedding_model.embed_list([text])[0]
-                embeddings.append(embedding)
-            return embeddings
+            # Generate embeddings for all chunks
+            chunk_texts = [chunk.content for chunk in chunks]
+            embeddings = self.embedding_model.embed_list(chunk_texts)
+            
+            # Create VectorRecord objects with UUID IDs
+            records = []
+            for chunk, embedding in zip(chunks, embeddings):
+                record = VectorRecord(
+                    id=chunk.chunk_id,  # This is now a UUID string
+                    vector=embedding,
+                    payload={**chunk.metadata, 'content': chunk.content}
+                )
+                records.append(record)
+            
+            # Add to storage
+            self.vector_storage.add(records)
+            
+            logger.info(f"✅ Stored {len(records)} chunks in vector database")
+            
         except Exception as e:
-            logger.error(f"Failed to generate embeddings: {e}")
+            logger.error(f"Failed to store chunks: {e}")
+            import traceback
+            logger.error(f"Full error trace: {traceback.format_exc()}")
             raise
 
     async def search_knowledge(
@@ -275,11 +302,11 @@ class DocumentProcessor:
             if document_types:
                 search_filter['document_type'] = {'$in': document_types}
             
-            # Search vector database
-            results = await self.vector_storage.query(
+            # FIXED: Use correct search API
+            results = self.vector_storage.query(
                 query_vector=query_embedding,
-                limit=limit,
-                filter_conditions=search_filter
+                top_k=limit,
+                vector_filter=search_filter
             )
             
             # Format results
@@ -287,7 +314,7 @@ class DocumentProcessor:
             for result in results:
                 formatted_results.append({
                     'content': result.payload.get('content', ''),
-                    'score': result.score,
+                    'score': getattr(result, 'score', 0.0),
                     'metadata': result.payload,
                     'chunk_id': result.id
                 })

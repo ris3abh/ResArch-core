@@ -1,0 +1,20 @@
+
+TechCorp Style Guide
+
+Writing Style:
+- Conversational yet professional
+- Use second person (you/your) to engage readers
+- Include industry expertise while remaining accessible
+- Focus on benefits and outcomes for customers
+
+Formatting:
+- Use bullet points for easy scanning
+- Include subheadings every 2-3 paragraphs
+- Bold key concepts and takeaways
+- Include call-to-action in conclusions
+
+Content Types:
+- Blog posts: 800-1200 words, educational focus
+- Landing pages: 500-800 words, conversion-focused
+- Case studies: 1000-1500 words, story-driven
+        

@@ -16,6 +16,7 @@ sys.path.insert(0, str(project_root))
 
 from spinscribe.knowledge.knowledge_manager import KnowledgeManager
 from spinscribe.checkpoints.checkpoint_manager import CheckpointManager
+from spinscribe.checkpoints.checkpoint_manager import CheckpointManager, CheckpointType  # FIXED: Added CheckpointType import
 from config.settings import *
 
 logging.basicConfig(level=logging.INFO)
