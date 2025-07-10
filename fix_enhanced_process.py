@@ -1,4 +1,9 @@
+#!/usr/bin/env python3
 """
+Fix the enhanced_process.py to handle synchronous workflow correctly.
+"""
+
+fixed_process_content = '''"""
 Enhanced content creation process with proper sync/async handling.
 """
 
@@ -184,3 +189,10 @@ async def run_enhanced_content_task(
             "project_id": project_id,
             "enhanced": True
         }
+'''
+
+# Write the fixed enhanced process
+with open('spinscribe/tasks/enhanced_process.py', 'w') as f:
+    f.write(fixed_process_content)
+
+print("✅ Enhanced process fixed to handle synchronous workflow correctly")

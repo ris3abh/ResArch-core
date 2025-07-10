@@ -1,4 +1,9 @@
-# File: spinscribe/workforce/enhanced_builder.py (FIXED)
+#!/usr/bin/env python3
+"""
+Fix enhanced builder to use standard agents when checkpoints disabled.
+"""
+
+enhanced_builder_content = '''# File: spinscribe/workforce/enhanced_builder.py (FIXED)
 """
 Enhanced workforce builder with conditional agent selection.
 Uses standard agents when checkpoints are disabled.
@@ -125,3 +130,10 @@ def build_enhanced_content_workflow(project_id: str = "default") -> Workforce:
     logger.info(f"📊 Summary: Project={project_id}, Mode={agent_type}, Checkpoints={ENABLE_HUMAN_CHECKPOINTS}")
     
     return workforce
+'''
+
+# Write the fixed enhanced builder
+with open('spinscribe/workforce/enhanced_builder.py', 'w') as f:
+    f.write(enhanced_builder_content)
+
+print("✅ Enhanced builder fixed to use standard agents when checkpoints disabled")
