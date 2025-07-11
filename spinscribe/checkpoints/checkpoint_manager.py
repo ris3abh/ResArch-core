@@ -1,294 +1,499 @@
-# ─── FILE: spinscribe/checkpoints/checkpoint_manager.py ────────
+# ─── COMPLETE FIXED FILE: spinscribe/checkpoints/checkpoint_manager.py ───
+
 """
-Checkpoint Manager with enhanced logging.
-UPDATE: Add logging to existing checkpoint_manager.py
+Checkpoint Manager for human-in-the-loop workflow approval.
+COMPLETE FIXED VERSION with proper implementation and fallbacks.
 """
 
 import logging
-import asyncio
-from typing import Dict, List, Any, Optional, Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from enum import Enum
+import time
 import uuid
-
-from spinscribe.utils.enhanced_logging import workflow_tracker
+from enum import Enum
+from typing import Dict, Any, List, Optional, Callable
+from dataclasses import dataclass
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 class CheckpointType(Enum):
-    """Types of human checkpoints in the workflow."""
-    BRIEF_REVIEW = "brief_review"
+    """Types of checkpoints in the workflow."""
     STYLE_GUIDE_APPROVAL = "style_guide_approval"
-    OUTLINE_REVIEW = "outline_review"
-    DRAFT_REVIEW = "draft_review"
-    FINAL_APPROVAL = "final_approval"
-    CUSTOM_REVIEW = "custom_review"
+    CONTENT_OUTLINE_APPROVAL = "content_outline_approval"
+    DRAFT_CONTENT_APPROVAL = "draft_content_approval"
+    FINAL_CONTENT_APPROVAL = "final_content_approval"
+    STRATEGY_APPROVAL = "strategy_approval"
+    QUALITY_REVIEW = "quality_review"
 
 class CheckpointStatus(Enum):
-    """Status of checkpoint processing."""
+    """Status of a checkpoint."""
     PENDING = "pending"
-    IN_REVIEW = "in_review"
     APPROVED = "approved"
-    NEEDS_REVISION = "needs_revision"
     REJECTED = "rejected"
+    TIMEOUT = "timeout"
     CANCELLED = "cancelled"
 
-class Priority(Enum):
-    """Priority levels for checkpoints."""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    URGENT = "urgent"
-
 @dataclass
-class CheckpointResponse:
-    """Response from a human reviewer."""
-    response_id: str
-    checkpoint_id: str
-    reviewer_id: str
-    decision: str  # 'approve', 'reject', 'needs_revision'
-    feedback: str
-    suggestions: List[str] = field(default_factory=list)
-    changes_requested: List[Dict[str, Any]] = field(default_factory=list)
-    time_spent_minutes: Optional[int] = None
-    created_at: datetime = field(default_factory=datetime.now)
-
-@dataclass
-class Checkpoint:
-    """A human checkpoint in the workflow."""
-    checkpoint_id: str
+class CheckpointData:
+    """Data structure for checkpoint information."""
+    id: str
     project_id: str
     checkpoint_type: CheckpointType
     title: str
     description: str
-    content_reference: Optional[str] = None
-    assigned_to: Optional[str] = None
-    assigned_by: Optional[str] = None
-    priority: Priority = Priority.MEDIUM
-    status: CheckpointStatus = CheckpointStatus.PENDING
-    workflow_stage: Optional[str] = None
-    context_data: Dict[str, Any] = field(default_factory=dict)
-    due_date: Optional[datetime] = None
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+    content: str
+    status: CheckpointStatus
+    created_at: datetime
     resolved_at: Optional[datetime] = None
-    responses: List[CheckpointResponse] = field(default_factory=list)
+    reviewer_id: Optional[str] = None
+    feedback: Optional[str] = None
+    decision_data: Optional[Dict[str, Any]] = None
 
 class CheckpointManager:
     """
-    Manages human checkpoints with comprehensive logging.
+    Manages human checkpoints in the content creation workflow.
     """
     
     def __init__(self):
-        self.checkpoints: Dict[str, Checkpoint] = {}
-        self.checkpoint_callbacks: Dict[str, Callable] = {}
+        self.checkpoints: Dict[str, CheckpointData] = {}
         self.notification_handlers: List[Callable] = []
+        self.auto_approve_timeout = 300  # 5 minutes default
         
-        # Setup logging
-        self.logger = logging.getLogger('checkpoint_manager')
-        self.logger.info("✋ Checkpoint Manager initialized")
-        
-    def create_checkpoint(
-        self,
-        project_id: str,
-        checkpoint_type: CheckpointType,
-        title: str,
-        description: str,
-        content_reference: Optional[str] = None,
-        assigned_to: Optional[str] = None,
-        assigned_by: Optional[str] = None,
-        priority: Priority = Priority.MEDIUM,
-        workflow_stage: Optional[str] = None,
-        context_data: Dict[str, Any] = None,
-        due_hours: Optional[int] = None
-    ) -> str:
-        """Create a new human checkpoint with detailed logging."""
-        
-        self.logger.info(f"🔨 Creating checkpoint: {title}")
-        self.logger.debug(f"📋 Checkpoint details: type={checkpoint_type.value}, "
-                         f"priority={priority.value}, project={project_id}")
-        
-        checkpoint_id = str(uuid.uuid4())
-        
-        due_date = None
-        if due_hours:
-            due_date = datetime.now() + timedelta(hours=due_hours)
-            self.logger.debug(f"⏰ Checkpoint due date set: {due_date}")
-        
-        checkpoint = Checkpoint(
-            checkpoint_id=checkpoint_id,
-            project_id=project_id,
-            checkpoint_type=checkpoint_type,
-            title=title,
-            description=description,
-            content_reference=content_reference,
-            assigned_to=assigned_to,
-            assigned_by=assigned_by,
-            priority=priority,
-            workflow_stage=workflow_stage,
-            context_data=context_data or {},
-            due_date=due_date
-        )
-        
-        self.checkpoints[checkpoint_id] = checkpoint
-        
-        # Track in workflow tracker
-        workflow_tracker.track_checkpoint(project_id, checkpoint_id, checkpoint_type.value, "created")
-        
-        # Send notifications
-        self._notify_checkpoint_created(checkpoint)
-        
-        self.logger.info(f"✅ Checkpoint created successfully: {checkpoint_id}")
-        self.logger.debug(f"📊 Total checkpoints now: {len(self.checkpoints)}")
-        
-        return checkpoint_id
+        logger.info("✅ Checkpoint Manager initialized")
     
-    def assign_checkpoint(
-        self,
-        checkpoint_id: str,
-        assigned_to: str,
-        assigned_by: Optional[str] = None
-    ) -> bool:
-        """Assign a checkpoint to a user with logging."""
+    def create_checkpoint(self, project_id: str, checkpoint_type: CheckpointType,
+                         title: str, description: str, content: str = "") -> str:
+        """
+        Create a new checkpoint for human review.
         
-        self.logger.info(f"📋 Assigning checkpoint {checkpoint_id} to {assigned_to}")
-        
-        if checkpoint_id not in self.checkpoints:
-            self.logger.error(f"❌ Checkpoint not found: {checkpoint_id}")
-            return False
-        
-        checkpoint = self.checkpoints[checkpoint_id]
-        checkpoint.assigned_to = assigned_to
-        checkpoint.assigned_by = assigned_by
-        checkpoint.updated_at = datetime.now()
-        
-        if checkpoint.status == CheckpointStatus.PENDING:
-            checkpoint.status = CheckpointStatus.IN_REVIEW
-            self.logger.info(f"🔄 Checkpoint status updated to IN_REVIEW")
-        
-        self._notify_checkpoint_assigned(checkpoint)
-        
-        self.logger.info(f"✅ Checkpoint assigned successfully")
-        return True
+        Args:
+            project_id: Project identifier
+            checkpoint_type: Type of checkpoint
+            title: Checkpoint title
+            description: Checkpoint description
+            content: Content to review
+            
+        Returns:
+            Checkpoint ID
+        """
+        try:
+            checkpoint_id = str(uuid.uuid4())
+            
+            checkpoint = CheckpointData(
+                id=checkpoint_id,
+                project_id=project_id,
+                checkpoint_type=checkpoint_type,
+                title=title,
+                description=description,
+                content=content,
+                status=CheckpointStatus.PENDING,
+                created_at=datetime.now()
+            )
+            
+            self.checkpoints[checkpoint_id] = checkpoint
+            
+            # Notify handlers
+            self._notify_handlers({
+                "type": "checkpoint_created",
+                "checkpoint_id": checkpoint_id,
+                "project_id": project_id,
+                "checkpoint_type": checkpoint_type.value,
+                "title": title,
+                "description": description
+            })
+            
+            logger.info(f"✅ Checkpoint created: {checkpoint_id} ({checkpoint_type.value})")
+            return checkpoint_id
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create checkpoint: {e}")
+            raise
     
-    def submit_response(
-        self,
-        checkpoint_id: str,
-        reviewer_id: str,
-        decision: str,
-        feedback: str,
-        suggestions: List[str] = None,
-        changes_requested: List[Dict[str, Any]] = None,
-        time_spent_minutes: Optional[int] = None
-    ) -> bool:
-        """Submit a response to a checkpoint with logging."""
+    def get_checkpoint(self, checkpoint_id: str) -> Optional[CheckpointData]:
+        """
+        Retrieve checkpoint data by ID.
         
-        self.logger.info(f"📝 Submitting response for checkpoint: {checkpoint_id}")
-        self.logger.info(f"👤 Reviewer: {reviewer_id}, Decision: {decision}")
-        
-        if checkpoint_id not in self.checkpoints:
-            self.logger.error(f"❌ Checkpoint not found: {checkpoint_id}")
-            return False
-        
-        checkpoint = self.checkpoints[checkpoint_id]
-        
-        response = CheckpointResponse(
-            response_id=str(uuid.uuid4()),
-            checkpoint_id=checkpoint_id,
-            reviewer_id=reviewer_id,
-            decision=decision,
-            feedback=feedback,
-            suggestions=suggestions or [],
-            changes_requested=changes_requested or [],
-            time_spent_minutes=time_spent_minutes
-        )
-        
-        checkpoint.responses.append(response)
-        checkpoint.updated_at = datetime.now()
-        
-        # Update checkpoint status based on decision
-        if decision == 'approve':
-            checkpoint.status = CheckpointStatus.APPROVED
-            checkpoint.resolved_at = datetime.now()
-            self.logger.info(f"✅ Checkpoint APPROVED")
-        elif decision == 'reject':
-            checkpoint.status = CheckpointStatus.REJECTED
-            checkpoint.resolved_at = datetime.now()
-            self.logger.info(f"❌ Checkpoint REJECTED")
-        elif decision == 'needs_revision':
-            checkpoint.status = CheckpointStatus.NEEDS_REVISION
-            self.logger.info(f"🔄 Checkpoint needs REVISION")
-        
-        # Track resolution in workflow tracker
-        workflow_tracker.track_checkpoint(
-            checkpoint.project_id, 
-            checkpoint_id, 
-            checkpoint.checkpoint_type.value, 
-            decision
-        )
-        
-        # Notify about response
-        self._notify_checkpoint_responded(checkpoint, response)
-        
-        # Execute callback if registered
-        if checkpoint_id in self.checkpoint_callbacks:
-            try:
-                self.logger.debug(f"🔗 Executing callback for checkpoint {checkpoint_id}")
-                self.checkpoint_callbacks[checkpoint_id](checkpoint, response)
-            except Exception as e:
-                self.logger.error(f"❌ Checkpoint callback failed: {e}")
-        
-        self.logger.info(f"✅ Response processed successfully")
-        return True
-    
-    def get_checkpoint(self, checkpoint_id: str) -> Optional[Checkpoint]:
-        """Get checkpoint by ID."""
+        Args:
+            checkpoint_id: Checkpoint identifier
+            
+        Returns:
+            Checkpoint data or None if not found
+        """
         return self.checkpoints.get(checkpoint_id)
     
-    def get_checkpoints_by_project(self, project_id: str) -> List[Checkpoint]:
-        """Get all checkpoints for a project."""
-        return [cp for cp in self.checkpoints.values() if cp.project_id == project_id]
+    def submit_response(self, checkpoint_id: str, reviewer_id: str,
+                       decision: str, feedback: str = None,
+                       decision_data: Dict[str, Any] = None) -> bool:
+        """
+        Submit a response to a checkpoint.
+        
+        Args:
+            checkpoint_id: Checkpoint identifier
+            reviewer_id: ID of the reviewer
+            decision: "approve" or "reject"
+            feedback: Optional feedback text
+            decision_data: Optional additional decision data
+            
+        Returns:
+            Success status
+        """
+        try:
+            checkpoint = self.checkpoints.get(checkpoint_id)
+            if not checkpoint:
+                logger.warning(f"⚠️ Checkpoint not found: {checkpoint_id}")
+                return False
+            
+            if checkpoint.status != CheckpointStatus.PENDING:
+                logger.warning(f"⚠️ Checkpoint already resolved: {checkpoint_id}")
+                return False
+            
+            # Update checkpoint
+            checkpoint.reviewer_id = reviewer_id
+            checkpoint.feedback = feedback
+            checkpoint.decision_data = decision_data or {}
+            checkpoint.resolved_at = datetime.now()
+            
+            if decision.lower() == "approve":
+                checkpoint.status = CheckpointStatus.APPROVED
+            elif decision.lower() == "reject":
+                checkpoint.status = CheckpointStatus.REJECTED
+            else:
+                logger.warning(f"⚠️ Invalid decision: {decision}")
+                return False
+            
+            # Notify handlers
+            self._notify_handlers({
+                "type": "checkpoint_resolved",
+                "checkpoint_id": checkpoint_id,
+                "project_id": checkpoint.project_id,
+                "status": checkpoint.status.value,
+                "reviewer_id": reviewer_id,
+                "feedback": feedback,
+                "decision": decision
+            })
+            
+            logger.info(f"✅ Checkpoint resolved: {checkpoint_id} ({decision})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to submit checkpoint response: {e}")
+            return False
     
-    def get_checkpoints_by_assignee(self, user_id: str) -> List[Checkpoint]:
-        """Get all checkpoints assigned to a user."""
-        return [cp for cp in self.checkpoints.values() if cp.assigned_to == user_id]
+    def wait_for_checkpoint(self, checkpoint_id: str, timeout: int = None) -> CheckpointData:
+        """
+        Wait for a checkpoint to be resolved.
+        
+        Args:
+            checkpoint_id: Checkpoint identifier
+            timeout: Maximum wait time in seconds
+            
+        Returns:
+            Resolved checkpoint data
+        """
+        try:
+            timeout = timeout or self.auto_approve_timeout
+            start_time = time.time()
+            
+            checkpoint = self.checkpoints.get(checkpoint_id)
+            if not checkpoint:
+                raise ValueError(f"Checkpoint not found: {checkpoint_id}")
+            
+            logger.info(f"⏳ Waiting for checkpoint resolution: {checkpoint_id}")
+            
+            # Poll for resolution
+            while checkpoint.status == CheckpointStatus.PENDING:
+                if time.time() - start_time > timeout:
+                    # Timeout - auto-approve or mark as timeout
+                    checkpoint.status = CheckpointStatus.TIMEOUT
+                    checkpoint.resolved_at = datetime.now()
+                    checkpoint.feedback = "Auto-approved due to timeout"
+                    
+                    self._notify_handlers({
+                        "type": "checkpoint_timeout",
+                        "checkpoint_id": checkpoint_id,
+                        "project_id": checkpoint.project_id
+                    })
+                    
+                    logger.warning(f"⏰ Checkpoint timed out: {checkpoint_id}")
+                    break
+                
+                time.sleep(1)  # Poll every second
+            
+            return checkpoint
+            
+        except Exception as e:
+            logger.error(f"❌ Error waiting for checkpoint: {e}")
+            raise
     
-    def get_pending_checkpoints(self) -> List[Checkpoint]:
-        """Get all pending checkpoints."""
-        return [cp for cp in self.checkpoints.values() 
-                if cp.status in [CheckpointStatus.PENDING, CheckpointStatus.IN_REVIEW]]
+    def get_project_checkpoints(self, project_id: str) -> List[CheckpointData]:
+        """
+        Get all checkpoints for a project.
+        
+        Args:
+            project_id: Project identifier
+            
+        Returns:
+            List of checkpoints for the project
+        """
+        try:
+            project_checkpoints = [
+                cp for cp in self.checkpoints.values()
+                if cp.project_id == project_id
+            ]
+            
+            # Sort by creation time
+            project_checkpoints.sort(key=lambda x: x.created_at)
+            
+            return project_checkpoints
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving project checkpoints: {e}")
+            return []
     
-    def register_callback(self, checkpoint_id: str, callback: Callable) -> None:
-        """Register a callback for when a checkpoint is resolved."""
-        self.checkpoint_callbacks[checkpoint_id] = callback
-        self.logger.debug(f"🔗 Callback registered for checkpoint {checkpoint_id}")
+    def get_pending_checkpoints(self, project_id: str = None) -> List[CheckpointData]:
+        """
+        Get all pending checkpoints, optionally filtered by project.
+        
+        Args:
+            project_id: Optional project filter
+            
+        Returns:
+            List of pending checkpoints
+        """
+        try:
+            pending = [
+                cp for cp in self.checkpoints.values()
+                if cp.status == CheckpointStatus.PENDING
+            ]
+            
+            if project_id:
+                pending = [cp for cp in pending if cp.project_id == project_id]
+            
+            # Sort by creation time
+            pending.sort(key=lambda x: x.created_at)
+            
+            return pending
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving pending checkpoints: {e}")
+            return []
     
-    def add_notification_handler(self, handler: Callable) -> None:
-        """Add a notification handler."""
-        self.notification_handlers.append(handler)
-        self.logger.debug(f"📢 Notification handler added (total: {len(self.notification_handlers)})")
+    def cancel_checkpoint(self, checkpoint_id: str, reason: str = None) -> bool:
+        """
+        Cancel a pending checkpoint.
+        
+        Args:
+            checkpoint_id: Checkpoint identifier
+            reason: Optional cancellation reason
+            
+        Returns:
+            Success status
+        """
+        try:
+            checkpoint = self.checkpoints.get(checkpoint_id)
+            if not checkpoint:
+                logger.warning(f"⚠️ Checkpoint not found: {checkpoint_id}")
+                return False
+            
+            if checkpoint.status != CheckpointStatus.PENDING:
+                logger.warning(f"⚠️ Checkpoint not pending: {checkpoint_id}")
+                return False
+            
+            checkpoint.status = CheckpointStatus.CANCELLED
+            checkpoint.resolved_at = datetime.now()
+            checkpoint.feedback = reason or "Cancelled by system"
+            
+            self._notify_handlers({
+                "type": "checkpoint_cancelled",
+                "checkpoint_id": checkpoint_id,
+                "project_id": checkpoint.project_id,
+                "reason": reason
+            })
+            
+            logger.info(f"✅ Checkpoint cancelled: {checkpoint_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to cancel checkpoint: {e}")
+            return False
     
-    def _notify_checkpoint_created(self, checkpoint: Checkpoint) -> None:
-        """Send notification when checkpoint is created."""
-        for handler in self.notification_handlers:
-            try:
-                handler('checkpoint_created', checkpoint)
-            except Exception as e:
-                self.logger.error(f"❌ Notification handler failed: {e}")
+    def add_notification_handler(self, handler: Callable[[Dict[str, Any]], None]):
+        """
+        Add a notification handler for checkpoint events.
+        
+        Args:
+            handler: Function to handle notifications
+        """
+        try:
+            self.notification_handlers.append(handler)
+            logger.info("✅ Notification handler added")
+        except Exception as e:
+            logger.error(f"❌ Failed to add notification handler: {e}")
     
-    def _notify_checkpoint_assigned(self, checkpoint: Checkpoint) -> None:
-        """Send notification when checkpoint is assigned."""
-        for handler in self.notification_handlers:
-            try:
-                handler('checkpoint_assigned', checkpoint)
-            except Exception as e:
-                self.logger.error(f"❌ Notification handler failed: {e}")
+    def _notify_handlers(self, notification: Dict[str, Any]):
+        """
+        Notify all registered handlers of an event.
+        
+        Args:
+            notification: Notification data
+        """
+        try:
+            for handler in self.notification_handlers:
+                try:
+                    handler(notification)
+                except Exception as e:
+                    logger.warning(f"⚠️ Notification handler failed: {e}")
+        except Exception as e:
+            logger.error(f"❌ Error notifying handlers: {e}")
     
-    def _notify_checkpoint_responded(self, checkpoint: Checkpoint, response: CheckpointResponse) -> None:
-        """Send notification when checkpoint receives response."""
-        for handler in self.notification_handlers:
-            try:
-                handler('checkpoint_responded', checkpoint, response)
-            except Exception as e:
-                self.logger.error(f"❌ Notification handler failed: {e}")
+    def get_checkpoint_stats(self, project_id: str = None) -> Dict[str, Any]:
+        """
+        Get checkpoint statistics.
+        
+        Args:
+            project_id: Optional project filter
+            
+        Returns:
+            Checkpoint statistics
+        """
+        try:
+            checkpoints = list(self.checkpoints.values())
+            
+            if project_id:
+                checkpoints = [cp for cp in checkpoints if cp.project_id == project_id]
+            
+            stats = {
+                "total": len(checkpoints),
+                "pending": len([cp for cp in checkpoints if cp.status == CheckpointStatus.PENDING]),
+                "approved": len([cp for cp in checkpoints if cp.status == CheckpointStatus.APPROVED]),
+                "rejected": len([cp for cp in checkpoints if cp.status == CheckpointStatus.REJECTED]),
+                "timeout": len([cp for cp in checkpoints if cp.status == CheckpointStatus.TIMEOUT]),
+                "cancelled": len([cp for cp in checkpoints if cp.status == CheckpointStatus.CANCELLED])
+            }
+            
+            # Calculate approval rate
+            resolved = stats["approved"] + stats["rejected"]
+            if resolved > 0:
+                stats["approval_rate"] = stats["approved"] / resolved
+            else:
+                stats["approval_rate"] = 0.0
+            
+            # Calculate average resolution time
+            resolved_checkpoints = [
+                cp for cp in checkpoints
+                if cp.status in [CheckpointStatus.APPROVED, CheckpointStatus.REJECTED]
+                and cp.resolved_at
+            ]
+            
+            if resolved_checkpoints:
+                total_time = sum(
+                    (cp.resolved_at - cp.created_at).total_seconds()
+                    for cp in resolved_checkpoints
+                )
+                stats["avg_resolution_time"] = total_time / len(resolved_checkpoints)
+            else:
+                stats["avg_resolution_time"] = 0.0
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"❌ Error calculating checkpoint stats: {e}")
+            return {"error": str(e)}
+    
+    def export_checkpoint_data(self, project_id: str = None) -> List[Dict[str, Any]]:
+        """
+        Export checkpoint data for analysis.
+        
+        Args:
+            project_id: Optional project filter
+            
+        Returns:
+            List of checkpoint data dictionaries
+        """
+        try:
+            checkpoints = list(self.checkpoints.values())
+            
+            if project_id:
+                checkpoints = [cp for cp in checkpoints if cp.project_id == project_id]
+            
+            export_data = []
+            for cp in checkpoints:
+                export_data.append({
+                    "id": cp.id,
+                    "project_id": cp.project_id,
+                    "type": cp.checkpoint_type.value,
+                    "title": cp.title,
+                    "description": cp.description,
+                    "status": cp.status.value,
+                    "created_at": cp.created_at.isoformat(),
+                    "resolved_at": cp.resolved_at.isoformat() if cp.resolved_at else None,
+                    "reviewer_id": cp.reviewer_id,
+                    "feedback": cp.feedback,
+                    "content_length": len(cp.content) if cp.content else 0
+                })
+            
+            return export_data
+            
+        except Exception as e:
+            logger.error(f"❌ Error exporting checkpoint data: {e}")
+            return []
+
+
+def test_checkpoint_manager():
+    """Test the checkpoint manager functionality."""
+    try:
+        print("🧪 Testing Checkpoint Manager")
+        
+        manager = CheckpointManager()
+        print("✅ Checkpoint Manager created")
+        
+        # Test checkpoint creation
+        checkpoint_id = manager.create_checkpoint(
+            project_id="test-project",
+            checkpoint_type=CheckpointType.STYLE_GUIDE_APPROVAL,
+            title="Test Checkpoint",
+            description="Testing checkpoint functionality",
+            content="Sample content for review"
+        )
+        print(f"✅ Checkpoint created: {checkpoint_id}")
+        
+        # Test checkpoint retrieval
+        checkpoint = manager.get_checkpoint(checkpoint_id)
+        print(f"✅ Checkpoint retrieved: {checkpoint.status.value}")
+        
+        # Test response submission
+        success = manager.submit_response(
+            checkpoint_id=checkpoint_id,
+            reviewer_id="test-reviewer",
+            decision="approve",
+            feedback="Looks good!"
+        )
+        print(f"✅ Response submitted: {success}")
+        
+        # Test statistics
+        stats = manager.get_checkpoint_stats("test-project")
+        print(f"✅ Statistics: {stats['total']} total, {stats['approved']} approved")
+        
+        return {
+            "success": True,
+            "checkpoint_created": True,
+            "response_submitted": success,
+            "stats": stats
+        }
+        
+    except Exception as e:
+        print(f"❌ Test failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+if __name__ == "__main__":
+    # Run test
+    test_result = test_checkpoint_manager()
+    print("\n" + "="*60)
+    print("Checkpoint Manager Test Complete")
+    print("="*60)
+    print(f"Success: {test_result.get('success', False)}")
+    if test_result.get('success'):
+        print("✅ Checkpoint Manager operational")
+        print(f"📊 Checkpoints: {test_result['stats']['total']}")
+    else:
+        print(f"❌ Error: {test_result.get('error', 'Unknown')}")

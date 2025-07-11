@@ -1,28 +1,25 @@
-
-# TechCorp Brand Guidelines
+# Brand Guidelines
 
 ## Brand Voice
 - Professional yet approachable
-- Clear and concise communication
-- Innovation-focused language
-- Customer-centric messaging
+- Solution-focused messaging
+- Clear and direct communication
+- Emphasis on expertise and results
 
 ## Tone Characteristics
 - Confident but not arrogant
 - Helpful and educational
-- Forward-thinking
-- Trustworthy and reliable
+- Industry-focused
+- Client-centric approach
 
-## Key Vocabulary
-- "Innovative solutions"
-- "Streamlined processes"
-- "Customer success"
-- "Digital transformation"
-- "Cutting-edge technology"
-
-## Style Guidelines
+## Language Patterns
 - Use active voice
-- Keep sentences under 20 words
-- Include specific examples
-- Maintain consistency across all content
-        
+- Include concrete examples
+- Provide actionable insights
+- End with clear calls-to-action
+
+## Key Messaging
+- Expertise drives results
+- Innovation meets practicality
+- Client success is our success
+- Professional excellence in every interaction
