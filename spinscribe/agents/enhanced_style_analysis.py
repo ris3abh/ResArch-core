@@ -1,303 +1,265 @@
-# File: spinscribe/agents/enhanced_style_analysis.py (UPDATED)
+# ─── UPDATE FILE: spinscribe/agents/enhanced_style_analysis.py ───
+
 """
-Enhanced Style Analysis Agent with synchronous execution.
-Removes async blocking that causes workforce to hang.
+Enhanced Style Analysis Agent with RAG and checkpoint integration.
+FIXED VERSION with proper tool integration following CAMEL patterns.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
+
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.messages import BaseMessage
+from camel.toolkits import FunctionTool
+
 from spinscribe.memory.memory_setup import get_memory
+from spinscribe.knowledge.knowledge_toolkit import KnowledgeAccessToolkit
+from spinscribe.checkpoints.enhanced_agents import CheckpointEnabledAgent
+from spinscribe.checkpoints.checkpoint_manager import CheckpointType, Priority
 from config.settings import MODEL_PLATFORM, MODEL_TYPE, MODEL_CONFIG
 
 logger = logging.getLogger(__name__)
 
-class EnhancedStyleAnalysisAgent(ChatAgent):
+class EnhancedStyleAnalysisAgent(CheckpointEnabledAgent, ChatAgent):
     """
-    Enhanced Style Analysis Agent that works synchronously with CAMEL Workforce.
-    Removes async operations that cause blocking.
+    Enhanced Style Analysis Agent with RAG knowledge and human checkpoints.
+    FIXED VERSION with proper tool integration.
     """
     
-    def __init__(self, project_id: str):
-        # Create model and memory
+    def __init__(self, project_id: str = None):
+        self.project_id = project_id or "default"
+        
+        # Create model
         model = ModelFactory.create(
             model_platform=MODEL_PLATFORM,
             model_type=MODEL_TYPE,
             model_config_dict=MODEL_CONFIG,
         )
         
-        # Enhanced system message
-        system_message = BaseMessage.make_assistant_message(
-            role_name="Enhanced Style Analysis Agent",
-            content=(
-                "You are an expert brand voice analyst specializing in extracting "
-                "and codifying writing styles from client materials.\n\n"
-                "Your responsibilities:\n"
-                "1. Analyze provided client materials to extract brand voice patterns\n"
-                "2. Identify tone, key vocabulary, and linguistic markers\n"
-                "3. Generate style guidelines and language codes\n"
-                "4. Create brand voice consistency recommendations\n"
-                "5. Provide actionable style analysis for content creation\n\n"
-                "Work efficiently and provide detailed analysis without requiring "
-                "external approvals or additional resources."
-            )
+        # Enhanced system message with tool usage instructions
+        sys_msg = (
+            "You are an Enhanced Style Analysis Agent specialized in extracting and codifying brand voice patterns. "
+            
+            "Your responsibilities:\n"
+            "1. Use your knowledge access tools to gather client documents and style guides\n"
+            "2. Analyze brand voice, writing style, and content patterns using available information\n"
+            "3. Generate actionable style guidelines and language codes\n"
+            "4. Create brand voice consistency recommendations\n"
+            "5. Provide detailed analysis for content creation teams\n\n"
+            
+            "Available Tools:\n"
+            "- search_brand_documents: Search for relevant client documents and brand materials\n"
+            "- get_style_guidelines: Retrieve style guide information and voice patterns\n"
+            "- analyze_sample_content: Access and analyze sample content for voice patterns\n"
+            "- get_comprehensive_knowledge: Get complete overview of all client knowledge\n\n"
+            
+            "Workflow Process:\n"
+            "1. ALWAYS start by using get_comprehensive_knowledge to gather all available information\n"
+            "2. Use search_brand_documents to find specific brand voice information\n"
+            "3. Retrieve style guidelines using get_style_guidelines\n"
+            "4. Analyze sample content patterns with analyze_sample_content\n"
+            "5. Generate comprehensive style analysis and recommendations\n\n"
+            
+            "When performing style analysis:\n"
+            "- Always use your tools to access processed client knowledge\n"
+            "- Extract specific language patterns, tone characteristics, and vocabulary\n"
+            "- Identify brand voice consistency requirements\n"
+            "- Generate actionable guidelines for content creation\n"
+            "- Provide specific examples and recommendations\n\n"
+            
+            "IMPORTANT: You have access to processed client documents through your tools. "
+            "Use them to provide detailed, accurate style analysis based on actual client materials."
         )
         
-        # Initialize ChatAgent
-        super().__init__(
-            system_message=system_message,
+        # Initialize memory
+        try:
+            memory = get_memory()
+            logger.info("✅ Memory initialized for Enhanced Style Analysis Agent")
+        except Exception as e:
+            logger.warning(f"⚠️ Memory initialization failed: {e}")
+            memory = None
+        
+        # Create knowledge access toolkit with tools
+        try:
+            self.knowledge_toolkit = KnowledgeAccessToolkit(project_id=self.project_id)
+            tools_list = self.knowledge_toolkit.get_tools()
+            logger.info(f"✅ Knowledge toolkit created with {len(tools_list)} tools")
+        except Exception as e:
+            logger.error(f"❌ Failed to create knowledge toolkit: {e}")
+            tools_list = []
+        
+        # Initialize ChatAgent with tools (CAMEL pattern)
+        super(ChatAgent, self).__init__()
+        ChatAgent.__init__(
+            self,
+            system_message=sys_msg,
             model=model,
-            memory=get_memory()
+            memory=memory,
+            tools=tools_list  # This is the key fix - attaching tools properly
         )
         
-        self.project_id = project_id
-        self.checkpoint_integration = None
+        # Initialize checkpoint integration
+        try:
+            CheckpointEnabledAgent.__init__(self, project_id=self.project_id)
+            logger.info("✅ Checkpoint integration initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ Checkpoint integration failed: {e}")
+    
+    def perform_enhanced_style_analysis(self, task_content: str = None) -> Dict[str, Any]:
+        """
+        Perform comprehensive style analysis using available tools and knowledge.
         
-        logger.info(f"✅ Enhanced Style Analysis Agent initialized for project: {project_id}")
-    
-    def set_checkpoint_integration(self, integration, project_id: str):
-        """
-        Set checkpoint integration (kept for compatibility).
-        In sync mode, this is a no-op.
-        """
-        self.checkpoint_integration = integration
-        logger.info(f"📝 Checkpoint integration set for {project_id} (sync mode)")
-    
-    def analyze_style(self, content: str) -> Dict[str, Any]:
-        """
-        Analyze style synchronously without blocking operations.
+        Args:
+            task_content: Optional task description
+            
+        Returns:
+            Comprehensive style analysis results
         """
         try:
-            # Create analysis prompt
+            logger.info(f"🎨 Starting enhanced style analysis for project: {self.project_id}")
+            
+            # Create analysis prompt that instructs the agent to use its tools
             analysis_prompt = f"""
-            Analyze the following content and extract the brand voice patterns:
+            Perform enhanced style analysis for project: {self.project_id}
             
-            Content:
-            {content}
+            Task: {task_content or 'Complete brand voice and style analysis'}
             
-            Please provide:
-            1. Tone analysis (professional, casual, technical, etc.)
-            2. Key vocabulary and phrases
-            3. Sentence structure patterns
-            4. Voice characteristics
-            5. Style guidelines for consistency
+            Please follow this process:
             
-            Format your response as a structured analysis.
+            1. Use get_comprehensive_knowledge() to gather all available client information
+            2. Use search_brand_documents() to find specific brand voice patterns
+            3. Use get_style_guidelines() to access detailed style requirements
+            4. Use analyze_sample_content() to extract voice patterns from examples
+            5. Generate comprehensive style analysis with:
+               - Brand voice characteristics
+               - Tone and style patterns
+               - Key vocabulary and language patterns
+               - Writing style recommendations
+               - Brand consistency guidelines
+            
+            Provide detailed, actionable analysis based on the retrieved information.
             """
             
-            logger.info(f"🔍 Analyzing style for project: {self.project_id}")
-            
-            # Get response synchronously
+            # Send the prompt to the agent (it will use its tools automatically)
             response = self.step(analysis_prompt)
             
-            # Extract content from response
-            if hasattr(response, 'msgs') and response.msgs:
-                analysis_result = response.msgs[0].content
+            # Extract the content from the response
+            if response and response.msgs:
+                analysis_content = response.msgs[0].content
+                
+                analysis_result = {
+                    "project_id": self.project_id,
+                    "task_content": task_content,
+                    "analysis_content": analysis_content,
+                    "tools_used": len(self.tools) if hasattr(self, 'tools') else 0,
+                    "success": True,
+                    "tool_calls": response.info.get('tool_calls', []),
+                    "timestamp": self._get_current_timestamp()
+                }
+                
+                logger.info("✅ Enhanced style analysis completed successfully")
+                return analysis_result
             else:
-                analysis_result = str(response)
-            
-            logger.info(f"✅ Style analysis completed for project: {self.project_id}")
-            
-            return {
-                'analysis': analysis_result,
-                'project_id': self.project_id,
-                'status': 'completed',
-                'approved': True  # Auto-approve in sync mode
-            }
-            
+                raise Exception("No response received from agent")
+                
         except Exception as e:
-            logger.error(f"❌ Style analysis failed for project {self.project_id}: {e}")
+            logger.error(f"❌ Style analysis failed: {e}")
             return {
-                'analysis': f"Error during style analysis: {str(e)}",
-                'project_id': self.project_id,
-                'status': 'failed',
-                'approved': False
+                "success": False,
+                "error": str(e),
+                "project_id": self.project_id,
+                "fallback_analysis": self._get_fallback_analysis()
             }
+    
+    def _get_fallback_analysis(self) -> Dict[str, Any]:
+        """Provide fallback analysis when primary analysis fails."""
+        return {
+            "message": "Fallback style analysis based on available information",
+            "brand_voice": "Professional, confident, solution-oriented",
+            "key_elements": ["innovation", "excellence", "collaboration", "results"],
+            "tone": "Straightforward yet comprehensive",
+            "recommendations": [
+                "Maintain professional tone with approachable language",
+                "Use confident, solution-focused messaging",
+                "Emphasize collaboration and transparency",
+                "Include specific examples and case studies"
+            ],
+            "status": "Analysis completed with available resources"
+        }
+    
+    def _get_current_timestamp(self):
+        """Get current timestamp."""
+        from datetime import datetime
+        return datetime.now().isoformat()
 
-# Keep the same pattern for other enhanced agents
-class EnhancedContentPlanningAgent(ChatAgent):
-    """Enhanced Content Planning Agent - Synchronous Version"""
-    
-    def __init__(self, project_id: str):
-        model = ModelFactory.create(
-            model_platform=MODEL_PLATFORM,
-            model_type=MODEL_TYPE,
-            model_config_dict=MODEL_CONFIG,
-        )
-        
-        system_message = BaseMessage.make_assistant_message(
-            role_name="Enhanced Content Planning Agent",
-            content=(
-                "You are an expert content strategist specializing in creating "
-                "structured content outlines and strategic frameworks.\n\n"
-                "Your responsibilities:\n"
-                "1. Create detailed content outlines based on requirements\n"
-                "2. Develop strategic content frameworks\n"
-                "3. Ensure content aligns with brand voice and objectives\n"
-                "4. Provide clear structure for content generation\n"
-                "5. Consider audience needs and content goals\n\n"
-                "Work efficiently and provide comprehensive planning without "
-                "requiring external approvals."
-            )
-        )
-        
-        super().__init__(
-            system_message=system_message,
-            model=model,
-            memory=get_memory()
-        )
-        
-        self.project_id = project_id
-        self.checkpoint_integration = None
-        
-        logger.info(f"✅ Enhanced Content Planning Agent initialized for project: {project_id}")
-    
-    def set_checkpoint_integration(self, integration, project_id: str):
-        """Set checkpoint integration (sync mode no-op)"""
-        self.checkpoint_integration = integration
-        logger.info(f"📝 Checkpoint integration set for {project_id} (sync mode)")
-    
-    def create_content_plan(self, requirements: str, style_guide: str = "") -> Dict[str, Any]:
-        """Create content plan synchronously"""
-        try:
-            planning_prompt = f"""
-            Create a comprehensive content plan based on these requirements:
-            
-            Requirements:
-            {requirements}
-            
-            Style Guide:
-            {style_guide}
-            
-            Please provide:
-            1. Content outline with main sections
-            2. Key points for each section
-            3. Tone and style recommendations
-            4. Target audience considerations
-            5. Content goals and objectives
-            
-            Format as a structured content plan.
-            """
-            
-            logger.info(f"📋 Creating content plan for project: {self.project_id}")
-            
-            response = self.step(planning_prompt)
-            
-            if hasattr(response, 'msgs') and response.msgs:
-                plan_result = response.msgs[0].content
-            else:
-                plan_result = str(response)
-            
-            logger.info(f"✅ Content plan completed for project: {self.project_id}")
-            
-            return {
-                'plan': plan_result,
-                'project_id': self.project_id,
-                'status': 'completed',
-                'approved': True
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Content planning failed for project {self.project_id}: {e}")
-            return {
-                'plan': f"Error during content planning: {str(e)}",
-                'project_id': self.project_id,
-                'status': 'failed',
-                'approved': False
-            }
 
-class EnhancedContentGenerationAgent(ChatAgent):
-    """Enhanced Content Generation Agent - Synchronous Version"""
-    
-    def __init__(self, project_id: str):
-        model = ModelFactory.create(
-            model_platform=MODEL_PLATFORM,
-            model_type=MODEL_TYPE,
-            model_config_dict=MODEL_CONFIG,
-        )
+# ─── Factory Function ───
+
+def create_enhanced_style_analysis_agent(project_id: str = None) -> EnhancedStyleAnalysisAgent:
+    """
+    Create enhanced style analysis agent with proper tool integration.
+    CORRECTED VERSION.
+    """
+    try:
+        agent = EnhancedStyleAnalysisAgent(project_id=project_id)
+        logger.info(f"✅ Enhanced Style Analysis Agent created for project: {project_id}")
+        logger.info(f"🔧 Agent has {len(agent.tools) if hasattr(agent, 'tools') else 0} tools attached")
+        return agent
+    except Exception as e:
+        logger.error(f"❌ Failed to create Enhanced Style Analysis Agent: {e}")
+        raise
+
+
+# ─── Direct Test Function ───
+
+def test_enhanced_style_agent_with_tools(project_id: str = "test-camel-fix"):
+    """Test the enhanced style analysis agent with tools."""
+    try:
+        print(f"🧪 Testing Enhanced Style Analysis Agent for project: {project_id}")
         
-        system_message = BaseMessage.make_assistant_message(
-            role_name="Enhanced Content Generation Agent",
-            content=(
-                "You are an expert content creator specializing in generating "
-                "high-quality, brand-consistent content.\n\n"
-                "Your responsibilities:\n"
-                "1. Generate content based on approved outlines\n"
-                "2. Apply brand voice and style guidelines consistently\n"
-                "3. Create engaging, well-structured content\n"
-                "4. Ensure content meets quality standards\n"
-                "5. Adapt content for target audience\n\n"
-                "Work efficiently and produce high-quality content without "
-                "requiring external approvals during generation."
-            )
-        )
+        # Create agent
+        agent = create_enhanced_style_analysis_agent(project_id)
+        tool_count = len(agent.tools) if hasattr(agent, 'tools') else 0
+        print(f"✅ Agent created with {tool_count} tools")
         
-        super().__init__(
-            system_message=system_message,
-            model=model,
-            memory=get_memory()
-        )
+        if tool_count == 0:
+            print("⚠️ WARNING: Agent has 0 tools - tool attachment failed")
+            return {"success": False, "error": "No tools attached to agent"}
         
-        self.project_id = project_id
-        self.checkpoint_integration = None
-        
-        logger.info(f"✅ Enhanced Content Generation Agent initialized for project: {project_id}")
-    
-    def set_checkpoint_integration(self, integration, project_id: str):
-        """Set checkpoint integration (sync mode no-op)"""
-        self.checkpoint_integration = integration
-        logger.info(f"📝 Checkpoint integration set for {project_id} (sync mode)")
-    
-    def generate_content(self, outline: str, style_guide: str = "", requirements: str = "") -> Dict[str, Any]:
-        """Generate content synchronously"""
+        # Test a simple analysis request
         try:
-            generation_prompt = f"""
-            Generate high-quality content based on this outline and style guide:
+            test_message = "Please use your tools to perform a comprehensive style analysis for this project."
+            response = agent.step(test_message)
             
-            Content Outline:
-            {outline}
-            
-            Style Guide:
-            {style_guide}
-            
-            Additional Requirements:
-            {requirements}
-            
-            Please create:
-            1. Complete content following the outline structure
-            2. Consistent brand voice throughout
-            3. Engaging and well-written text
-            4. Proper formatting and flow
-            5. Content that meets the specified requirements
-            
-            Generate the final content ready for review.
-            """
-            
-            logger.info(f"✍️ Generating content for project: {self.project_id}")
-            
-            response = self.step(generation_prompt)
-            
-            if hasattr(response, 'msgs') and response.msgs:
-                content_result = response.msgs[0].content
+            if response and response.msgs:
+                analysis_content = response.msgs[0].content
+                tool_calls = response.info.get('tool_calls', [])
+                
+                result = {
+                    "success": True,
+                    "tools_used": len(tool_calls),
+                    "analysis_content": analysis_content,
+                    "agent_tools_count": tool_count
+                }
+                
+                print(f"✅ Analysis completed - {len(tool_calls)} tool calls made")
+                return result
             else:
-                content_result = str(response)
-            
-            logger.info(f"✅ Content generation completed for project: {self.project_id}")
-            
-            return {
-                'content': content_result,
-                'project_id': self.project_id,
-                'status': 'completed',
-                'approved': True
-            }
-            
+                return {"success": False, "error": "No response from agent"}
+                
         except Exception as e:
-            logger.error(f"❌ Content generation failed for project {self.project_id}: {e}")
-            return {
-                'content': f"Error during content generation: {str(e)}",
-                'project_id': self.project_id,
-                'status': 'failed',
-                'approved': False
-            }
+            print(f"❌ Agent step failed: {e}")
+            return {"success": False, "error": f"Agent execution failed: {e}"}
+        
+    except Exception as e:
+        print(f"❌ Test setup failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+if __name__ == "__main__":
+    # Run test
+    test_result = test_enhanced_style_agent_with_tools()
+    print("\n" + "="*60)
+    print("Enhanced Style Analysis Agent Test Complete")
+    print("="*60)
