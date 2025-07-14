@@ -1,7 +1,6 @@
 README.md
 setup.py
 config/__init__.py
-config/checkpoint_settings.py
 config/settings.py
 spinscribe/__init__.py
 spinscribe/enhanced_process.py
@@ -17,14 +16,14 @@ spinscribe/agents/coordinator.py
 spinscribe/agents/enhanced_content_generation.py
 spinscribe/agents/enhanced_content_planning.py
 spinscribe/agents/enhanced_style_analysis.py
+spinscribe/agents/memory_patch.py
 spinscribe/agents/qa.py
 spinscribe/agents/style_analysis.py
 spinscribe/agents/task_planner.py
-spinscribe/checkpoints/__init__.py
-spinscribe/checkpoints/checkpoint_manager.py
-spinscribe/checkpoints/enhanced_agents.py
-spinscribe/checkpoints/mock_reviewer.py
-spinscribe/checkpoints/workflow_integration.py
+spinscribe/interaction/__init__.py
+spinscribe/interaction/intelligent_human_interaction.py
+spinscribe/interaction/interaction_triggers.py
+spinscribe/interaction/question_generators.py
 spinscribe/knowledge/__init__.py
 spinscribe/knowledge/document_processor.py
 spinscribe/knowledge/integration.py
@@ -40,6 +39,7 @@ spinscribe/tasks/process.py
 spinscribe/utils/__init__.py
 spinscribe/utils/enhanced_logging.py
 spinscribe/utils/logging_config.py
+spinscribe/utils/model_config_fix.py
 spinscribe/utils/proper_workforce_async.py
 spinscribe/workforce/__init__.py
 spinscribe/workforce/builder.py
