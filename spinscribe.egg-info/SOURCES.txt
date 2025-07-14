@@ -1,8 +1,10 @@
 README.md
 setup.py
 config/__init__.py
+config/checkpoint_settings.py
 config/settings.py
 spinscribe/__init__.py
+spinscribe/enhanced_process.py
 spinscribe.egg-info/PKG-INFO
 spinscribe.egg-info/SOURCES.txt
 spinscribe.egg-info/dependency_links.txt
