@@ -19,7 +19,7 @@ from camel.societies import RolePlaying
 # Import enhanced modules with fallbacks
 try:
     from spinscribe.utils.enhanced_logging import workflow_tracker, setup_enhanced_logging
-except ImportError:
+except ImportError: 
     print("⚠️ enhanced_logging not available, using basic logging")
     workflow_tracker = None
     def setup_enhanced_logging(*args, **kwargs):
