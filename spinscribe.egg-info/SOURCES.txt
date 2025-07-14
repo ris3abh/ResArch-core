@@ -35,6 +35,10 @@ spinscribe/tasks/__init__.py
 spinscribe/tasks/debug_enhanced_process.py
 spinscribe/tasks/enhanced_process.py
 spinscribe/tasks/process.py
+spinscribe/utils/__init__.py
+spinscribe/utils/enhanced_logging.py
+spinscribe/utils/logging_config.py
+spinscribe/utils/proper_workforce_async.py
 spinscribe/workforce/__init__.py
 spinscribe/workforce/builder.py
 spinscribe/workforce/enhanced_builder.py

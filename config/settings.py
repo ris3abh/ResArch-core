@@ -3,6 +3,7 @@
 """
 Configuration settings for SpinScribe.
 COMPLETE FIXED VERSION with all required settings and fallbacks.
+MEMORY TOKEN LIMITS REMOVED - now handled dynamically by memory system.
 """
 
 import os
@@ -46,9 +47,20 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE_PATH = PROJECT_ROOT / "logs" / "spinscribe.log"
 ENABLE_FILE_LOGGING = os.getenv("ENABLE_FILE_LOGGING", "true").lower() == "true"
 
-# ─── Memory Configuration ───
+# ─── Memory Configuration (FIXED - Token limits now dynamic) ───
 MEMORY_TYPE = os.getenv("MEMORY_TYPE", "chat_history")
-MEMORY_MAX_TOKENS = int(os.getenv("MEMORY_MAX_TOKENS", "4000"))
+# REMOVED: MEMORY_TOKEN_LIMIT and MEMORY_MAX_TOKENS - now handled dynamically
+MEMORY_KEEP_RATE = float(os.getenv("MEMORY_KEEP_RATE", "0.9"))
+
+# Optional: Manual override for memory token limits (only use if needed for testing)
+MANUAL_MEMORY_TOKEN_OVERRIDE = int(os.getenv("MANUAL_MEMORY_TOKEN_OVERRIDE", "0"))  # 0 = auto
+
+# ─── Vector Database Configuration (Added for completeness) ───
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "spinscribe")
+QDRANT_VECTOR_DIM = int(os.getenv("QDRANT_VECTOR_DIM", "1536"))
 
 # ─── Content Configuration ───
 DEFAULT_CONTENT_LENGTH = {
@@ -144,6 +156,10 @@ def validate_settings():
     if AGENT_TIMEOUT < 30:
         warnings.append("AGENT_TIMEOUT is very low, agents may not complete tasks")
     
+    # Check memory configuration
+    if MANUAL_MEMORY_TOKEN_OVERRIDE > 0:
+        warnings.append(f"Manual memory token override set to {MANUAL_MEMORY_TOKEN_OVERRIDE}")
+    
     return warnings
 
 def get_model_config():
@@ -190,6 +206,18 @@ def get_knowledge_config():
         "supported_types": SUPPORTED_DOCUMENT_TYPES,
         "max_document_size": MAX_DOCUMENT_SIZE,
         "max_documents": MAX_DOCUMENTS_PER_PROJECT
+    }
+
+def get_memory_config():
+    """Get memory configuration."""
+    return {
+        "type": MEMORY_TYPE,
+        "keep_rate": MEMORY_KEEP_RATE,
+        "manual_override": MANUAL_MEMORY_TOKEN_OVERRIDE,
+        "qdrant_host": QDRANT_HOST,
+        "qdrant_port": QDRANT_PORT,
+        "qdrant_collection": QDRANT_COLLECTION,
+        "qdrant_vector_dim": QDRANT_VECTOR_DIM
     }
 
 def get_content_config():
@@ -252,6 +280,7 @@ def get_config_summary():
         },
         "model": get_model_config(),
         "workflow": get_workflow_config(),
+        "memory": get_memory_config(),  # Added memory config
         "knowledge": get_knowledge_config(),
         "quality": get_quality_config(),
         "logging": get_logging_config(),
@@ -305,3 +334,5 @@ if __name__ == "__main__":
         print("Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.")
     
     print("\n💡 To modify settings, set environment variables or edit this file.")
+    print("\n🧠 Memory token limits are now handled dynamically by the memory system.")
+    print("   GPT-4o models: ~100K tokens, GPT-4: ~6K tokens, GPT-3.5: ~12K tokens")

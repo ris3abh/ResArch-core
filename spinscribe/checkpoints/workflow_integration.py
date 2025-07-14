@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 from typing import Dict, Any, Optional, Callable
-from .checkpoint_manager import CheckpointManager, CheckpointType, Priority, CheckpointStatus
+from .checkpoint_manager import CheckpointManager, CheckpointType, CheckpointStatus, Priority
 
 logger = logging.getLogger(__name__)
 

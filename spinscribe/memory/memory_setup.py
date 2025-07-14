@@ -1,7 +1,7 @@
-# File: spinscribe/memory/memory_setup.py (CORRECT CAMEL API VERSION)
+# File: spinscribe/memory/memory_setup.py (COMPLETE FIX)
 """
-Memory setup with correct CAMEL API usage.
-Based on CAMEL 0.2.70 memory API documentation.
+Memory setup with FIXED token limits for GPT-4o models.
+This fixes the context truncation issues by using proper token limits.
 """
 
 import logging
@@ -23,7 +23,7 @@ from camel.utils import OpenAITokenCounter
 # Import config
 import os
 
-# **Use actual config variables from your settings**
+# **FIXED: Use proper token limits for GPT-4o models**
 try:
     from config.settings import (
         QDRANT_HOST, 
@@ -31,8 +31,7 @@ try:
         QDRANT_API_KEY, 
         QDRANT_COLLECTION,
         QDRANT_VECTOR_DIM,
-        MEMORY_TOKEN_LIMIT,
-        MEMORY_KEEP_RATE
+        MODEL_TYPE
     )
 except ImportError as e:
     # Fallback values
@@ -41,15 +40,42 @@ except ImportError as e:
     QDRANT_API_KEY = ""
     QDRANT_COLLECTION = "spinscribe"
     QDRANT_VECTOR_DIM = 1536
-    MEMORY_TOKEN_LIMIT = 2048
-    MEMORY_KEEP_RATE = 0.9
+    MODEL_TYPE = "gpt-4o-mini"
+
+# **CRITICAL FIX: Use appropriate token limits based on model capacity**
+# GPT-4o models have 128K context window, use 80% for safety
+MODEL_TOKEN_LIMITS = {
+    "gpt-4o": 100000,        # 80% of 128K context
+    "gpt-4o-mini": 100000,   # 80% of 128K context  
+    "gpt-4": 6000,           # 80% of 8K context
+    "gpt-3.5-turbo": 12000   # 80% of 16K context
+}
+
+# **FIXED: Get appropriate token limit based on model**
+def get_token_limit_for_model(model_name: str) -> int:
+    """Get appropriate token limit based on model capacity."""
+    # Clean model name (remove version suffixes)
+    clean_model = model_name.lower().replace('-0613', '').replace('-0314', '')
+    
+    if 'gpt-4o' in clean_model:
+        return MODEL_TOKEN_LIMITS["gpt-4o"]
+    elif 'gpt-4' in clean_model:
+        return MODEL_TOKEN_LIMITS["gpt-4"]
+    elif 'gpt-3.5' in clean_model:
+        return MODEL_TOKEN_LIMITS["gpt-3.5-turbo"]
+    else:
+        # Default to GPT-4o limit for unknown models
+        return MODEL_TOKEN_LIMITS["gpt-4o"]
 
 logger = logging.getLogger(__name__)
 
-def create_context_creator(model_name: str = "gpt-4o", token_limit: int = None) -> ScoreBasedContextCreator:
-    """Create a proper context creator for CAMEL memory."""
+def create_context_creator(model_name: str = "gpt-4o-mini", token_limit: int = None) -> ScoreBasedContextCreator:
+    """Create a proper context creator for CAMEL memory with FIXED token limits."""
+    
+    # **CRITICAL FIX: Use model-appropriate token limit instead of hardcoded 2048**
     if token_limit is None:
-        token_limit = MEMORY_TOKEN_LIMIT
+        token_limit = get_token_limit_for_model(model_name)
+        logger.info(f"🔧 Using token limit {token_limit} for model {model_name}")
     
     # Map model names to CAMEL ModelType
     model_type_map = {
@@ -59,7 +85,17 @@ def create_context_creator(model_name: str = "gpt-4o", token_limit: int = None) 
         "gpt-3.5-turbo": ModelType.GPT_3_5_TURBO
     }
     
-    model_type = model_type_map.get(model_name, ModelType.GPT_4O)
+    clean_model = model_name.lower().replace('-0613', '').replace('-0314', '')
+    if 'gpt-4o-mini' in clean_model:
+        model_type = ModelType.GPT_4O_MINI
+    elif 'gpt-4o' in clean_model:
+        model_type = ModelType.GPT_4O
+    elif 'gpt-4' in clean_model:
+        model_type = ModelType.GPT_4
+    else:
+        model_type = ModelType.GPT_4O_MINI  # Default
+    
+    logger.info(f"🔧 Creating ScoreBasedContextCreator with token_limit={token_limit}, model_type={model_type}")
     
     return ScoreBasedContextCreator(
         token_counter=OpenAITokenCounter(model_type),
@@ -68,18 +104,20 @@ def create_context_creator(model_name: str = "gpt-4o", token_limit: int = None) 
 
 def setup_agent_memory(
     agent_id: str = None,
-    model_name: str = "gpt-4o",
+    model_name: str = "gpt-4o-mini",
     enable_vector_storage: bool = True,
-    memory_type: str = "chat_history"  # "chat_history", "vector_db", or "longterm"
+    memory_type: str = "chat_history",  # "chat_history", "vector_db", or "longterm"
+    token_limit: int = None  # **NEW: Allow override of token limit**
 ) -> Any:
     """
-    Set up agent memory using correct CAMEL API.
+    Set up agent memory using correct CAMEL API with FIXED token limits.
     
     Args:
         agent_id: Unique identifier for the agent
         model_name: Model name for token counting
         enable_vector_storage: Whether to enable vector storage
         memory_type: Type of memory to create
+        token_limit: Optional override for token limit
         
     Returns:
         Configured memory instance
@@ -88,10 +126,11 @@ def setup_agent_memory(
         agent_id = f"agent_{uuid.uuid4().hex[:8]}"
     
     logger.info(f"Setting up {memory_type} memory for agent: {agent_id}")
+    logger.info(f"Model: {model_name}, Token limit override: {token_limit}")
     
     try:
-        # Create context creator
-        context_creator = create_context_creator(model_name, MEMORY_TOKEN_LIMIT)
+        # **FIXED: Create context creator with proper token limit**
+        context_creator = create_context_creator(model_name, token_limit)
         
         if memory_type == "chat_history" or not enable_vector_storage:
             # Use simple chat history memory
@@ -100,7 +139,7 @@ def setup_agent_memory(
             memory = ChatHistoryMemory(
                 context_creator=context_creator
             )
-            logger.info("Memory system initialized with chat history only")
+            logger.info("✅ Memory system initialized with chat history only")
             
         elif memory_type == "longterm" and enable_vector_storage:
             # Use longterm memory with both chat history and vector DB
@@ -111,7 +150,7 @@ def setup_agent_memory(
                 from qdrant_client import QdrantClient
                 client = QdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}")
                 collections = client.get_collections()
-                logger.info("Vector storage connection successful")
+                logger.info("✅ Vector storage connection successful")
                 
                 # Create memory blocks
                 chat_history_block = ChatHistoryBlock()
@@ -122,56 +161,44 @@ def setup_agent_memory(
                     chat_history_block=chat_history_block,
                     vector_db_block=vector_db_block
                 )
-                logger.info("Memory system initialized with chat history and vector storage")
+                logger.info("✅ Memory system initialized with chat history and vector storage")
                 
             except Exception as e:
-                logger.warning(f"Vector storage failed, falling back to chat history: {e}")
+                logger.warning(f"⚠️ Vector storage failed, falling back to chat history: {e}")
                 memory = ChatHistoryMemory(
                     context_creator=context_creator
                 )
-                logger.info("Memory system initialized with chat history only")
+                logger.info("✅ Memory system initialized with chat history fallback")
+        
         else:
-            # Default to chat history
+            # Fallback to simple memory
+            logger.info("Creating fallback ChatHistoryMemory")
             memory = ChatHistoryMemory(
                 context_creator=context_creator
             )
-            logger.info("Memory system initialized with chat history only")
+            logger.info("✅ Memory system initialized with fallback chat history")
         
         return memory
         
     except Exception as e:
-        logger.error(f"Failed to setup memory for {agent_id}: {e}")
-        logger.info("Creating basic chat history memory as fallback")
+        logger.error(f"❌ Failed to setup memory: {e}")
+        # **FIXED: Emergency fallback with high token limit**
+        emergency_context_creator = ScoreBasedContextCreator(
+            token_counter=OpenAITokenCounter(ModelType.GPT_4O_MINI),
+            token_limit=100000  # High limit for emergency fallback
+        )
         
-        # **FINAL FALLBACK: Basic chat history memory**
-        try:
-            context_creator = create_context_creator(model_name, 1024)  # Smaller limit for fallback
-            return ChatHistoryMemory(context_creator=context_creator)
-        except Exception as fallback_error:
-            logger.error(f"Even fallback memory failed: {fallback_error}")
-            raise Exception(f"Could not create any memory type: {e}, fallback: {fallback_error}")
+        fallback_memory = ChatHistoryMemory(
+            context_creator=emergency_context_creator
+        )
+        logger.warning("⚠️ Using emergency fallback memory with high token limit")
+        return fallback_memory
 
-# **Backward compatibility functions with correct API**
-def get_memory(agent_id: str = None, model_name: str = "gpt-4o"):
-    """Backward compatibility function for existing code."""
-    return setup_agent_memory(
-        agent_id=agent_id, 
-        model_name=model_name, 
-        enable_vector_storage=False,  # Start with simple memory
-        memory_type="chat_history"
-    )
-
-def create_agent_memory(agent_id: str = None, model_name: str = "gpt-4o"):
-    """Alternative backward compatibility function."""
-    return setup_agent_memory(
-        agent_id=agent_id,
-        model_name=model_name,
-        enable_vector_storage=False,
-        memory_type="chat_history"
-    )
-
-def get_enhanced_memory(agent_id: str = None, model_name: str = "gpt-4o"):
-    """Get enhanced memory with vector storage."""
+def get_memory(agent_id: str = None, model_name: str = None):
+    """Get enhanced memory with proper token limits."""
+    if model_name is None:
+        model_name = MODEL_TYPE
+    
     return setup_agent_memory(
         agent_id=agent_id,
         model_name=model_name,
@@ -179,63 +206,10 @@ def get_enhanced_memory(agent_id: str = None, model_name: str = "gpt-4o"):
         memory_type="longterm"
     )
 
-def get_chat_memory():
-    """Get basic chat history memory."""
-    context_creator = create_context_creator("gpt-4o", 1024)
+def get_chat_memory(model_name: str = None, token_limit: int = None):
+    """Get basic chat history memory with proper token limits."""
+    if model_name is None:
+        model_name = MODEL_TYPE
+        
+    context_creator = create_context_creator(model_name, token_limit)
     return ChatHistoryMemory(context_creator=context_creator)
-
-# **Health check function**
-def check_memory_health() -> Dict[str, Any]:
-    """Check the health of the memory system."""
-    health = {
-        "camel_memory_available": False,
-        "qdrant_available": False,
-        "errors": []
-    }
-    
-    try:
-        # Test CAMEL memory creation
-        test_memory = get_memory()
-        health["camel_memory_available"] = True
-    except Exception as e:
-        health["errors"].append(f"CAMEL memory: {str(e)}")
-    
-    try:
-        # Test Qdrant connection
-        from qdrant_client import QdrantClient
-        client = QdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}")
-        collections = client.get_collections()
-        health["qdrant_available"] = True
-    except Exception as e:
-        health["errors"].append(f"Qdrant: {str(e)}")
-    
-    return health
-
-# **Initialize on import**
-def initialize_memory_system():
-    """Initialize the memory system and perform health checks."""
-    logger.info("Initializing SpinScribe memory system...")
-    
-    # Check health
-    health = check_memory_health()
-    if health["camel_memory_available"]:
-        logger.info("✅ CAMEL memory system available")
-    else:
-        logger.warning("⚠️ CAMEL memory system issues detected")
-    
-    if health["qdrant_available"]:
-        logger.info("✅ Qdrant vector database available")
-    else:
-        logger.warning("⚠️ Qdrant not available - using chat history only")
-    
-    if health["errors"]:
-        for error in health["errors"]:
-            logger.warning(f"   Error: {error}")
-    
-    return health
-
-# Initialize on import
-try:
-    initialize_memory_system()
-except Exception as e:
-    logger.warning(f"Memory system initialization warning: {e}")
