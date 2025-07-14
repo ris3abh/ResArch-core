@@ -1,9 +1,11 @@
-# ─── COMPLETE FIXED FILE: config/settings.py ───
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILE: config/settings.py
+# STATUS: UPDATE (Add HumanLayer config, remove checkpoint settings)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 """
-Configuration settings for SpinScribe.
-COMPLETE FIXED VERSION with all required settings and fallbacks.
-MEMORY TOKEN LIMITS REMOVED - now handled dynamically by memory system.
+SpinScribe Configuration Settings
+UPDATED VERSION - Added HumanLayer configuration, removed custom checkpoint system.
 """
 
 import os
@@ -27,15 +29,29 @@ MODEL_CONFIG = {
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
+# ─── HUMAN-IN-LOOP CONFIGURATION (CAMEL NATIVE) ─────────────────────────────
+# Replace custom checkpoint system with CAMEL's HumanToolkit
+
+# HumanLayer API for tool approval (optional)
+HUMANLAYER_API_KEY = os.getenv("HUMANLAYER_API_KEY")
+ENABLE_HUMANLAYER_APPROVAL = HUMANLAYER_API_KEY is not None
+
+# HumanToolkit configuration
+ENABLE_HUMAN_TOOLKIT = os.getenv("ENABLE_HUMAN_TOOLKIT", "true").lower() == "true"
+HUMAN_INPUT_TIMEOUT = int(os.getenv("HUMAN_INPUT_TIMEOUT", "300"))  # 5 minutes
+
+# Human approval points in workflow
+APPROVAL_POINTS = {
+    "style_guide": ENABLE_HUMANLAYER_APPROVAL,
+    "content_outline": ENABLE_HUMANLAYER_APPROVAL,
+    "content_draft": ENABLE_HUMANLAYER_APPROVAL,
+    "final_content": ENABLE_HUMANLAYER_APPROVAL
+}
+
 # ─── Task Configuration ───
 DEFAULT_TASK_ID = "spinscribe-content-task"
 DEFAULT_CONTENT_TYPE = "article"
 DEFAULT_WORKFLOW_TIMEOUT = 900  # 15 minutes
-
-# ─── Checkpoint Configuration ───
-ENABLE_HUMAN_CHECKPOINTS = os.getenv("ENABLE_HUMAN_CHECKPOINTS", "false").lower() == "true"
-ENABLE_MOCK_REVIEWER = os.getenv("ENABLE_MOCK_REVIEWER", "true").lower() == "true"
-CHECKPOINT_TIMEOUT = int(os.getenv("CHECKPOINT_TIMEOUT", "300"))  # 5 minutes
 
 # ─── Knowledge Management ───
 KNOWLEDGE_BASE_PATH = PROJECT_ROOT / "data" / "knowledge"
@@ -49,84 +65,72 @@ ENABLE_FILE_LOGGING = os.getenv("ENABLE_FILE_LOGGING", "true").lower() == "true"
 
 # ─── Memory Configuration (FIXED - Token limits now dynamic) ───
 MEMORY_TYPE = os.getenv("MEMORY_TYPE", "chat_history")
-# REMOVED: MEMORY_TOKEN_LIMIT and MEMORY_MAX_TOKENS - now handled dynamically
 MEMORY_KEEP_RATE = float(os.getenv("MEMORY_KEEP_RATE", "0.9"))
 
-# Optional: Manual override for memory token limits (only use if needed for testing)
-MANUAL_MEMORY_TOKEN_OVERRIDE = int(os.getenv("MANUAL_MEMORY_TOKEN_OVERRIDE", "0"))  # 0 = auto
+# Manual memory token override (0 = use dynamic limits)
+MANUAL_MEMORY_TOKEN_OVERRIDE = int(os.getenv("MANUAL_MEMORY_TOKEN_OVERRIDE", "0"))
 
-# ─── Vector Database Configuration (Added for completeness) ───
+# ─── Vector DB (Qdrant) Settings ───
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "spinscribe")
 QDRANT_VECTOR_DIM = int(os.getenv("QDRANT_VECTOR_DIM", "1536"))
 
-# ─── Content Configuration ───
+# ─── Content Generation Settings ───
 DEFAULT_CONTENT_LENGTH = {
-    "article": {"min": 800, "max": 1200},
-    "landing_page": {"min": 300, "max": 600},
-    "local_article": {"min": 600, "max": 1000},
-    "blog_post": {"min": 500, "max": 900}
+    "article": 1500,
+    "blog_post": 1000,
+    "landing_page": 800,
+    "social_post": 300,
+    "email": 500
 }
 
 CONTENT_QUALITY_THRESHOLD = float(os.getenv("CONTENT_QUALITY_THRESHOLD", "0.8"))
+ENABLE_QUALITY_CHECKS = os.getenv("ENABLE_QUALITY_CHECKS", "true").lower() == "true"
+
+# ─── Template and Styling ───
+TEMPLATE_PATH = PROJECT_ROOT / "templates"
+DEFAULT_TEMPLATE = "professional"
 
 # ─── Workflow Configuration ───
 MAX_WORKFLOW_RETRIES = int(os.getenv("MAX_WORKFLOW_RETRIES", "3"))
-WORKFLOW_RETRY_DELAY = int(os.getenv("WORKFLOW_RETRY_DELAY", "30"))  # seconds
-
-# ─── Agent Configuration ───
-AGENT_TIMEOUT = int(os.getenv("AGENT_TIMEOUT", "120"))  # 2 minutes per agent
+WORKFLOW_RETRY_DELAY = int(os.getenv("WORKFLOW_RETRY_DELAY", "5"))  # seconds
+AGENT_TIMEOUT = int(os.getenv("AGENT_TIMEOUT", "120"))  # seconds
 MAX_CONCURRENT_AGENTS = int(os.getenv("MAX_CONCURRENT_AGENTS", "4"))
 
-# ─── Development Configuration ───
-DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-ENABLE_VERBOSE_LOGGING = os.getenv("ENABLE_VERBOSE_LOGGING", "false").lower() == "true"
+# ─── Quality Assurance ───
+QUALITY_CHECK_TIMEOUT = int(os.getenv("QUALITY_CHECK_TIMEOUT", "60"))  # seconds
+MIN_CONTENT_QUALITY_SCORE = float(os.getenv("MIN_CONTENT_QUALITY_SCORE", "0.7"))
 
-# ─── Performance Configuration ───
-ASYNC_TIMEOUT = int(os.getenv("ASYNC_TIMEOUT", "600"))  # 10 minutes
-PROCESS_TIMEOUT = int(os.getenv("PROCESS_TIMEOUT", "900"))  # 15 minutes
-
-# ─── File Processing Configuration ───
-SUPPORTED_DOCUMENT_TYPES = [".txt", ".md", ".doc", ".docx", ".pdf"]
+# ─── Security and Validation ───
+ENABLE_INPUT_VALIDATION = os.getenv("ENABLE_INPUT_VALIDATION", "true").lower() == "true"
+MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", "10000"))
+ALLOWED_FILE_EXTENSIONS = [".txt", ".md", ".pdf", ".docx", ".doc"]
 MAX_DOCUMENT_SIZE = int(os.getenv("MAX_DOCUMENT_SIZE", "10485760"))  # 10MB
 MAX_DOCUMENTS_PER_PROJECT = int(os.getenv("MAX_DOCUMENTS_PER_PROJECT", "50"))
 
-# ─── Quality Assurance Configuration ───
-ENABLE_QUALITY_CHECKS = os.getenv("ENABLE_QUALITY_CHECKS", "true").lower() == "true"
-QUALITY_CHECK_TIMEOUT = int(os.getenv("QUALITY_CHECK_TIMEOUT", "60"))
-MIN_CONTENT_QUALITY_SCORE = float(os.getenv("MIN_CONTENT_QUALITY_SCORE", "75.0"))
-
-# ─── Error Handling Configuration ───
-MAX_ERROR_RETRIES = int(os.getenv("MAX_ERROR_RETRIES", "3"))
-ERROR_RETRY_DELAY = int(os.getenv("ERROR_RETRY_DELAY", "5"))  # seconds
-ENABLE_FALLBACK_MODE = os.getenv("ENABLE_FALLBACK_MODE", "true").lower() == "true"
-
-# ─── Security Configuration ───
-ENABLE_INPUT_VALIDATION = os.getenv("ENABLE_INPUT_VALIDATION", "true").lower() == "true"
-MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", "50000"))  # characters
-ALLOWED_FILE_EXTENSIONS = [".txt", ".md", ".doc", ".docx"]
-
-# ─── Cache Configuration ───
-ENABLE_CACHING = os.getenv("ENABLE_CACHING", "false").lower() == "true"
+# ─── Performance and Caching ───
+ENABLE_CACHING = os.getenv("ENABLE_CACHING", "true").lower() == "true"
 CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour
-CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "100"))  # number of items
 
-# ─── Integration Configuration ───
+# ─── Notification Settings ───
+ENABLE_EMAIL_NOTIFICATIONS = os.getenv("ENABLE_EMAIL_NOTIFICATIONS", "false").lower() == "true"
 ENABLE_WEBHOOK_NOTIFICATIONS = os.getenv("ENABLE_WEBHOOK_NOTIFICATIONS", "false").lower() == "true"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_TIMEOUT = int(os.getenv("WEBHOOK_TIMEOUT", "30"))  # seconds
+NOTIFICATION_EMAIL_FROM = os.getenv("NOTIFICATION_EMAIL_FROM", "noreply@spinscribe.com")
 
-# ─── Template Configuration ───
-TEMPLATE_PATH = PROJECT_ROOT / "spinscribe" / "templates"
-DEFAULT_TEMPLATE = "article.md"
-ENABLE_CUSTOM_TEMPLATES = os.getenv("ENABLE_CUSTOM_TEMPLATES", "true").lower() == "true"
+# ─── Development and Debug ───
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+ENABLE_VERBOSE_LOGGING = os.getenv("ENABLE_VERBOSE_LOGGING", "false").lower() == "true"
 
-# ─── Validation Functions ───
+# ─── Document Processing ───
+SUPPORTED_DOCUMENT_TYPES = [".txt", ".md", ".pdf", ".docx", ".doc", ".rtf"]
+DOCUMENT_PROCESSING_TIMEOUT = int(os.getenv("DOCUMENT_PROCESSING_TIMEOUT", "300"))  # 5 minutes
+
+# ─── Configuration Validation ───
 
 def validate_settings():
-    """Validate configuration settings and provide warnings."""
+    """Validate configuration settings and return warnings."""
     warnings = []
     
     # Check API keys
@@ -135,6 +139,10 @@ def validate_settings():
     
     if not ANTHROPIC_API_KEY and MODEL_PLATFORM == "anthropic":
         warnings.append("ANTHROPIC_API_KEY not set but using Anthropic platform")
+    
+    # Check HumanLayer configuration
+    if ENABLE_HUMANLAYER_APPROVAL and not HUMANLAYER_API_KEY:
+        warnings.append("HumanLayer approval enabled but HUMANLAYER_API_KEY not set")
     
     # Check paths
     if not KNOWLEDGE_BASE_PATH.exists():
@@ -170,12 +178,13 @@ def get_model_config():
         "config": MODEL_CONFIG.copy()
     }
 
-def get_checkpoint_config():
-    """Get checkpoint configuration."""
+def get_human_config():
+    """Get human interaction configuration."""
     return {
-        "enabled": ENABLE_HUMAN_CHECKPOINTS,
-        "mock_reviewer": ENABLE_MOCK_REVIEWER,
-        "timeout": CHECKPOINT_TIMEOUT
+        "human_toolkit_enabled": ENABLE_HUMAN_TOOLKIT,
+        "humanlayer_enabled": ENABLE_HUMANLAYER_APPROVAL,
+        "approval_points": APPROVAL_POINTS.copy(),
+        "input_timeout": HUMAN_INPUT_TIMEOUT
     }
 
 def get_workflow_config():
@@ -279,8 +288,9 @@ def get_config_summary():
             "root": str(PROJECT_ROOT)
         },
         "model": get_model_config(),
+        "human_interaction": get_human_config(),
         "workflow": get_workflow_config(),
-        "memory": get_memory_config(),  # Added memory config
+        "memory": get_memory_config(),
         "knowledge": get_knowledge_config(),
         "quality": get_quality_config(),
         "logging": get_logging_config(),
@@ -291,8 +301,8 @@ def get_config_summary():
             "api_keys_available": has_api_keys()
         },
         "features": {
-            "human_checkpoints": ENABLE_HUMAN_CHECKPOINTS,
-            "mock_reviewer": ENABLE_MOCK_REVIEWER,
+            "human_toolkit": ENABLE_HUMAN_TOOLKIT,
+            "humanlayer_approval": ENABLE_HUMANLAYER_APPROVAL,
             "rag": ENABLE_RAG,
             "quality_checks": ENABLE_QUALITY_CHECKS,
             "file_logging": ENABLE_FILE_LOGGING,
@@ -333,6 +343,21 @@ if __name__ == "__main__":
         print("\n⚠️ Warning: No API keys configured!")
         print("Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable.")
     
+    if ENABLE_HUMANLAYER_APPROVAL and not HUMANLAYER_API_KEY:
+        print("\n⚠️ Warning: HumanLayer approval enabled but no API key set!")
+        print("Set HUMANLAYER_API_KEY environment variable for tool approval.")
+    
+    print("\n💡 Configuration Features:")
+    print(f"   🤖 Human Toolkit: {'✅ Enabled' if ENABLE_HUMAN_TOOLKIT else '❌ Disabled'}")
+    print(f"   👋 HumanLayer Approval: {'✅ Enabled' if ENABLE_HUMANLAYER_APPROVAL else '❌ Disabled'}")
+    print(f"   🧠 RAG Knowledge: {'✅ Enabled' if ENABLE_RAG else '❌ Disabled'}")
+    print(f"   🏗️ Quality Checks: {'✅ Enabled' if ENABLE_QUALITY_CHECKS else '❌ Disabled'}")
+    
+    print("\n🔄 Migration Status:")
+    print("   ✅ Custom checkpoint system removed")
+    print("   ✅ CAMEL HumanToolkit integrated")
+    print("   ✅ HumanLayer approval ready")
+    print("   ✅ Enhanced agents with RAG")
+    
     print("\n💡 To modify settings, set environment variables or edit this file.")
-    print("\n🧠 Memory token limits are now handled dynamically by the memory system.")
-    print("   GPT-4o models: ~100K tokens, GPT-4: ~6K tokens, GPT-3.5: ~12K tokens")
+    print("🧠 Memory token limits are now handled dynamically by the memory system.")

@@ -2,8 +2,8 @@
 # ─── COMPLETE FIXED FILE: scripts/enhanced_run_workflow.py ───
 
 """
-Enhanced SpinScribe workflow runner with full functionality.
-COMPLETE FIXED VERSION - All imports and functions working.
+Enhanced SpinScribe workflow runner with HumanToolkit integration.
+FIXED VERSION - Updated for HumanToolkit instead of custom checkpoints.
 """
 
 import asyncio
@@ -52,20 +52,20 @@ except ImportError:
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Run SpinScribe enhanced content creation workflow",
+        description="Run SpinScribe enhanced content creation workflow with HumanToolkit",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic article creation
+  # Basic article creation with human interaction
   python enhanced_run_workflow.py --title "AI in Business" --type article
 
-  # With client documents and checkpoints
+  # With client documents and human interaction
   python enhanced_run_workflow.py \\
     --title "Company Overview" \\
     --type landing_page \\
     --project-id acme-corp \\
     --client-docs ./client_docs \\
-    --enable-checkpoints
+    --enable-human-interaction
 
   # Debug mode with extended timeout
   python enhanced_run_workflow.py \\
@@ -74,6 +74,9 @@ Examples:
     --timeout 1200 \\
     --debug \\
     --verbose
+
+Note: Human interaction happens via console. The agents will ask you questions
+directly in the terminal when they need guidance or approval.
         """
     )
     
@@ -86,7 +89,7 @@ Examples:
     
     parser.add_argument(
         "--type",
-        choices=["article", "landing_page", "local_article", "blog_post"],
+        choices=["article", "landing_page", "blog_post", "social_post", "email"],
         default="article",
         help="Type of content to create (default: article)"
     )
@@ -100,7 +103,7 @@ Examples:
     
     parser.add_argument(
         "--client-docs",
-        help="Path to client documents directory for onboarding"
+        help="Path to client documents directory for RAG onboarding"
     )
     
     parser.add_argument(
@@ -109,9 +112,16 @@ Examples:
     )
     
     parser.add_argument(
-        "--enable-checkpoints",
+        "--enable-human-interaction",
         action="store_true",
-        help="Enable human checkpoints during workflow"
+        default=True,
+        help="Enable human interaction via console (default: enabled)"
+    )
+    
+    parser.add_argument(
+        "--disable-human-interaction",
+        action="store_true",
+        help="Disable human interaction (agents run autonomously)"
     )
     
     parser.add_argument(
@@ -240,6 +250,15 @@ def display_config_info():
                 for feature, enabled in features.items():
                     status = '✅' if enabled else '❌'
                     print(f"  {feature}: {status}")
+                
+                # Show human interaction config
+                human_config = config.get('human_interaction', {})
+                if human_config:
+                    print(f"\nHuman Interaction:")
+                    print(f"  HumanToolkit: {'✅' if human_config.get('human_toolkit_enabled') else '❌'}")
+                    print(f"  Mode: {human_config.get('interaction_mode', 'unknown')}")
+                    print(f"  Console Based: {'✅' if human_config.get('console_based') else '❌'}")
+                    
             else:
                 print(f"\nConfiguration: {config['message']}")
                 
@@ -262,10 +281,28 @@ def format_duration(seconds: float) -> str:
         hours = seconds / 3600
         return f"{hours:.1f}h"
 
+def display_human_interaction_info(enable_human_interaction: bool):
+    """Display information about human interaction."""
+    if enable_human_interaction:
+        print("\n🤖 Human Interaction Enabled")
+        print("=" * 40)
+        print("During the workflow, agents may ask you questions like:")
+        print("  Question: Do you approve this style guide? [yes/no]")
+        print("  Your reply: yes")
+        print("")
+        print("  Question: What tone should this content have?")
+        print("  Your reply: professional and friendly")
+        print("")
+        print("Be ready to provide input when prompted!")
+        print("=" * 40)
+    else:
+        print("\n🤖 Human Interaction Disabled")
+        print("Agents will run autonomously without asking for input.")
+
 async def main():
     """Main execution function."""
-    print("🚀 SpinScribe Enhanced Workflow Runner")
-    print("=" * 50)
+    print("🚀 SpinScribe Enhanced Workflow Runner with HumanToolkit")
+    print("=" * 60)
     
     # Parse arguments
     try:
@@ -300,19 +337,25 @@ async def main():
     if args.verbose:
         display_config_info()
     
+    # Determine human interaction setting
+    enable_human_interaction = not args.disable_human_interaction
+    
+    # Display human interaction info
+    display_human_interaction_info(enable_human_interaction)
+    
     # Load first draft if provided
     first_draft = None
     if args.first_draft:
         first_draft = load_first_draft(args.first_draft)
     
-    # Prepare workflow parameters
+    # Prepare workflow parameters (UPDATED - removed enable_checkpoints)
     workflow_params = {
         "title": args.title,
         "content_type": args.type,
         "project_id": args.project_id,
         "client_documents_path": args.client_docs,
-        "first_draft": first_draft,
-        "enable_checkpoints": args.enable_checkpoints
+        "first_draft": first_draft
+        # NOTE: Removed enable_checkpoints - now using HumanToolkit
     }
     
     # Display workflow information
@@ -322,11 +365,15 @@ async def main():
     print(f"   Project ID: {args.project_id}")
     print(f"   Client Documents: {'✅' if args.client_docs else '❌'}")
     print(f"   First Draft: {'✅' if first_draft else '❌'}")
-    print(f"   Checkpoints: {'✅' if args.enable_checkpoints else '❌'}")
+    print(f"   Human Interaction: {'✅' if enable_human_interaction else '❌'}")
+    print(f"   Enhanced Agents: ✅ (with RAG + HumanToolkit)")
     print(f"   Timeout: {format_duration(args.timeout)}")
     
     # Execute workflow
     print(f"\n🔄 Starting enhanced content creation workflow...")
+    if enable_human_interaction:
+        print("💬 Be ready to respond to agent questions during execution!")
+    
     start_time = time.time()
     
     try:
@@ -348,6 +395,8 @@ async def main():
             print(f"   Content Type: {result.get('content_type', 'unknown')}")
             print(f"   Project ID: {result.get('project_id', 'unknown')}")
             print(f"   Enhanced: {'✅' if result.get('enhanced', False) else '❌'}")
+            print(f"   RAG Used: {'✅' if result.get('knowledge_used', False) else '❌'}")
+            print(f"   Human Interaction: {'✅' if result.get('human_interaction', False) else '❌'}")
             
             if 'word_count' in result:
                 print(f"   Word Count: {result['word_count']}")

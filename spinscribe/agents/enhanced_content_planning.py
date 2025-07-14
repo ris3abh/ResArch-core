@@ -1,16 +1,20 @@
-# ─── COMPLETE FIXED FILE: spinscribe/agents/enhanced_content_planning.py ───
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILE: spinscribe/agents/enhanced_content_planning.py
+# STATUS: UPDATE (FIXED - HumanToolkit only, no HumanLayer dependency)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 """
-Enhanced Content Planning Agent with RAG and tool integration.
-COMPLETE FIXED VERSION with proper implementation and fallbacks.
+Enhanced Content Planning Agent with RAG and CAMEL's native HumanToolkit integration.
+FIXED VERSION - Using only CAMEL's built-in human interaction capabilities.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.messages import BaseMessage
 from camel.types import RoleType
+from camel.toolkits import HumanToolkit
 
 try:
     from spinscribe.memory.memory_setup import get_memory
@@ -33,19 +37,30 @@ except ImportError:
         
         def search_knowledge(self, query: str) -> str:
             return f"Knowledge search for '{query}' - fallback response"
+        
+        def get_brand_guidelines(self) -> str:
+            return "Brand guidelines - fallback response"
+        
+        def get_content_strategy(self, content_type: str) -> str:
+            return f"Content strategy for {content_type} - fallback response"
 
 logger = logging.getLogger(__name__)
 
 class EnhancedContentPlanningAgent:
     """
-    Enhanced Content Planning Agent with RAG integration and strategic planning capabilities.
+    Enhanced Content Planning Agent with RAG integration and HumanToolkit.
+    Combines strategic planning with knowledge base access and console-based human interaction.
     """
     
     def __init__(self, project_id: str = None):
         self.project_id = project_id or "default"
         self.tools = []
         
-        # Initialize knowledge toolkit
+        # Initialize CAMEL's built-in HumanToolkit (always available)
+        human_toolkit = HumanToolkit()
+        self.tools.extend(human_toolkit.get_tools())
+        
+        # Initialize knowledge toolkit (existing RAG functionality)
         try:
             self.knowledge_toolkit = KnowledgeAccessToolkit(project_id=self.project_id)
             self.tools.extend(getattr(self.knowledge_toolkit, 'tools', []))
@@ -54,7 +69,7 @@ class EnhancedContentPlanningAgent:
             logger.warning(f"⚠️ Knowledge toolkit initialization failed: {e}")
             self.knowledge_toolkit = None
         
-        # Create base agent
+        # Create base agent with all tools
         try:
             model = ModelFactory.create(
                 model_platform=MODEL_PLATFORM,
@@ -67,20 +82,37 @@ class EnhancedContentPlanningAgent:
                 role_type=RoleType.USER,
                 meta_dict=None,
                 content=(
-                    "You are an expert content strategist and planning specialist. "
-                    "Your role is to create comprehensive content outlines and strategies "
-                    "based on brand guidelines, audience analysis, and business objectives. "
-                    "You excel at structuring content for maximum impact and engagement."
+                    "You are an expert Content Planning Agent specialized in strategic content planning "
+                    "with access to client knowledge and human interaction capabilities. "
+                    "Your role is to create comprehensive content outlines and strategies based on "
+                    "brand guidelines, audience analysis, and business objectives.\n\n"
+                    "CAPABILITIES:\n"
+                    "- RAG access to brand guidelines and content strategy documents\n"
+                    "- Human interaction for strategy feedback and approval via console\n"
+                    "- Strategic content planning and outline creation\n"
+                    "- SEO and engagement optimization\n"
+                    "- Target audience analysis and alignment\n\n"
+                    "RESPONSIBILITIES:\n"
+                    "1. Create structured outlines and content strategies\n"
+                    "2. Base outlines on project requirements and client guidelines\n"
+                    "3. Break down content requests into organized frameworks\n"
+                    "4. Use brand guidelines and audience information effectively\n"
+                    "5. Reference content strategy documents from knowledge base\n"
+                    "6. Create outlines that align with marketing objectives\n\n"
+                    "HUMAN INTERACTION: You can ask humans for feedback on content strategy, "
+                    "request clarification on requirements, and seek approval for outlines "
+                    "using your available tools. Human input happens via console interaction."
                 )
             )
             
             self.agent = ChatAgent(
                 system_message=system_message,
                 model=model,
-                memory=get_memory()
+                memory=get_memory(),
+                tools=self.tools
             )
             
-            logger.info("✅ Enhanced Content Planning Agent initialized")
+            logger.info("✅ Enhanced Content Planning Agent initialized with HumanToolkit + RAG")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize agent: {e}")
@@ -89,7 +121,7 @@ class EnhancedContentPlanningAgent:
     def create_enhanced_outline(self, content_brief: str, content_type: str = "article", 
                               style_guide: str = None) -> Dict[str, Any]:
         """
-        Create enhanced content outline with strategic planning.
+        Create enhanced content outline with strategic planning and human interaction.
         
         Args:
             content_brief: Description of content requirements
@@ -104,246 +136,309 @@ class EnhancedContentPlanningAgent:
             additional_context = ""
             if self.knowledge_toolkit:
                 try:
-                    brand_context = self.knowledge_toolkit.search_knowledge(
+                    brand_context = self.knowledge_toolkit.get_brand_guidelines()
+                    content_strategy = self.knowledge_toolkit.get_content_strategy(content_type)
+                    knowledge_search = self.knowledge_toolkit.search_knowledge(
                         f"content strategy guidelines {content_type} for {self.project_id}"
                     )
-                    additional_context = f"\n\nBrand Context:\n{brand_context}"
+                    additional_context = f"\n\nBRAND GUIDELINES:\n{brand_context}\n\nCONTENT STRATEGY:\n{content_strategy}\n\nKNOWLEDGE CONTEXT:\n{knowledge_search}"
                 except Exception as e:
                     logger.warning(f"⚠️ Knowledge search failed: {e}")
             
             planning_prompt = f"""
-            Create a comprehensive content outline for the following:
+            Create a comprehensive content outline for the following requirements:
             
             CONTENT BRIEF: {content_brief}
             CONTENT TYPE: {content_type}
             PROJECT: {self.project_id}
             
-            {'STYLE GUIDE:' + style_guide if style_guide else ''}
+            {'STYLE GUIDE:\n' + style_guide if style_guide else ''}
             {additional_context}
             
             Please provide a detailed content outline including:
             
             1. EXECUTIVE SUMMARY
-               - Content objective and purpose
-               - Target audience analysis
-               - Key messaging strategy
+               - Content objective and primary purpose
+               - Target audience analysis and personas
+               - Key messaging strategy and value proposition
+               - Success metrics and performance indicators
             
             2. CONTENT STRUCTURE
-               - Detailed section breakdown
-               - Key points for each section
-               - Logical flow and progression
+               - Detailed section breakdown with main headings
+               - Key points and supporting details for each section
+               - Logical flow and content progression
+               - Estimated word count per section
             
             3. ENGAGEMENT STRATEGY
-               - Hook and opening strategy
-               - Engagement techniques throughout
-               - Call-to-action placement
+               - Hook and opening strategy to capture attention
+               - Engagement techniques throughout the content
+               - Interactive elements and visual content opportunities
+               - Call-to-action placement and optimization
             
             4. SEO & OPTIMIZATION
-               - Primary keywords and themes
+               - Primary and secondary keywords integration
                - Content optimization recommendations
-               - User experience considerations
+               - User experience and readability considerations
+               - Meta descriptions and title suggestions
             
             5. BRAND ALIGNMENT
-               - Brand voice integration
-               - Consistency checkpoints
-               - Quality assurance notes
+               - Brand voice integration points
+               - Consistency checkpoints throughout content
+               - Quality assurance notes and review criteria
+               - Brand differentiation opportunities
             
-            Make this outline actionable and comprehensive for content creation.
+            6. CONTENT CALENDAR INTEGRATION
+               - Timeline and production schedule
+               - Resource requirements and dependencies
+               - Distribution and promotion strategy
+               - Performance tracking recommendations
+            
+            If you need clarification on any requirements or strategic direction, 
+            please ask me directly using your human interaction tools.
             """
             
             if self.agent:
-                response = self.agent.step(BaseMessage(
-                    role_name="User",
-                    role_type=RoleType.USER,
-                    meta_dict=None,
-                    content=planning_prompt
-                ))
+                response = self.agent.step(planning_prompt)
+                
+                # Extract response content
+                outline_result = response.msgs[0].content if response.msgs else "Outline creation failed"
+                
+                # Check for tool usage
+                tools_used = len(response.info.get('tool_calls', []))
                 
                 return {
                     "success": True,
-                    "outline_content": response.content,
-                    "content_strategy": self._extract_strategy(response.content),
-                    "tools_used": len(self.tools),
+                    "outline": outline_result,
+                    "content_type": content_type,
+                    "tools_used": tools_used,
                     "project_id": self.project_id,
-                    "content_type": content_type
+                    "knowledge_enhanced": self.knowledge_toolkit is not None,
+                    "human_interaction": tools_used > 0,
+                    "brief_analyzed": len(content_brief)
                 }
             else:
-                # Fallback outline
                 return {
-                    "success": True,
-                    "outline_content": self._generate_fallback_outline(content_brief, content_type),
-                    "content_strategy": "professional-structured-engaging",
-                    "tools_used": 0,
-                    "project_id": self.project_id,
-                    "content_type": content_type,
-                    "fallback": True
+                    "success": False,
+                    "error": "Agent not properly initialized"
                 }
                 
         except Exception as e:
-            logger.error(f"❌ Content planning failed: {e}")
+            logger.error(f"❌ Enhanced outline creation failed: {e}")
             return {
                 "success": False,
-                "error": str(e),
-                "project_id": self.project_id,
-                "content_type": content_type
+                "error": str(e)
             }
     
-    def _extract_strategy(self, outline: str) -> str:
-        """Extract strategy keywords from the outline."""
-        strategies = []
-        outline_lower = outline.lower()
-        
-        if "professional" in outline_lower:
-            strategies.append("professional")
-        if "engaging" in outline_lower or "engagement" in outline_lower:
-            strategies.append("engaging")
-        if "structured" in outline_lower or "structure" in outline_lower:
-            strategies.append("structured")
-        if "technical" in outline_lower:
-            strategies.append("technical")
-        if "creative" in outline_lower:
-            strategies.append("creative")
-        
-        return "-".join(strategies) if strategies else "comprehensive"
-    
-    def _generate_fallback_outline(self, brief: str, content_type: str) -> str:
-        """Generate a basic fallback outline when agent is unavailable."""
-        return f"""
-        CONTENT OUTLINE (Fallback Mode)
-        
-        PROJECT: {self.project_id}
-        CONTENT TYPE: {content_type.title()}
-        BRIEF: {brief}
-        
-        1. EXECUTIVE SUMMARY
-           - Objective: Address the content brief requirements
-           - Target Audience: Business professionals and decision makers
-           - Key Message: Professional, solution-focused content
-        
-        2. CONTENT STRUCTURE
-           - Opening Hook: Compelling introduction that addresses audience needs
-           - Main Content Sections:
-             * Problem identification and context
-             * Solution presentation and benefits
-             * Implementation approach and process
-             * Results and value proposition
-           - Conclusion: Strong closing with clear next steps
-        
-        3. ENGAGEMENT STRATEGY
-           - Use concrete examples and case studies
-           - Include actionable insights and recommendations
-           - Maintain professional yet approachable tone
-           - Strategic call-to-action placement
-        
-        4. SEO & OPTIMIZATION
-           - Focus on relevant industry keywords
-           - Optimize for readability and user experience
-           - Include meta descriptions and headers
-           - Mobile-friendly formatting
-        
-        5. BRAND ALIGNMENT
-           - Maintain consistent brand voice
-           - Align with company values and messaging
-           - Quality assurance checkpoints
-           - Professional presentation standards
-        
-        Generated using fallback mode for project: {self.project_id}
+    def create_content_strategy(self, business_objectives: str, target_audience: str, 
+                              content_goals: List[str] = None) -> Dict[str, Any]:
         """
-    
-    def plan_content_strategy(self, objectives: str, audience: str = None) -> Dict[str, Any]:
-        """
-        Plan comprehensive content strategy.
+        Create comprehensive content strategy with human collaboration.
         
         Args:
-            objectives: Business or content objectives
-            audience: Target audience description
+            business_objectives: Overall business goals and objectives
+            target_audience: Detailed target audience description
+            content_goals: Specific content marketing goals
             
         Returns:
-            Strategic content planning results
+            Detailed content strategy with implementation plan
         """
         try:
+            # Prepare content goals context
+            goals_context = ""
+            if content_goals:
+                goals_context = "\n\nCONTENT GOALS:\n" + "\n".join([
+                    f"- {goal}" for goal in content_goals
+                ])
+            
+            # Use knowledge toolkit for strategic context
+            strategic_context = ""
+            if self.knowledge_toolkit:
+                try:
+                    brand_strategy = self.knowledge_toolkit.search_knowledge(
+                        f"brand strategy marketing goals {self.project_id}"
+                    )
+                    strategic_context = f"\n\nSTRATEGIC CONTEXT:\n{brand_strategy}"
+                except Exception as e:
+                    logger.warning(f"⚠️ Strategic context search failed: {e}")
+            
             strategy_prompt = f"""
-            Develop a comprehensive content strategy for:
+            Develop a comprehensive content strategy based on these parameters:
             
-            OBJECTIVES: {objectives}
-            AUDIENCE: {audience or 'Professional business audience'}
-            PROJECT: {self.project_id}
+            BUSINESS OBJECTIVES:
+            {business_objectives}
             
-            Please provide:
-            1. Content themes and topics
-            2. Messaging framework
-            3. Content distribution strategy
-            4. Success metrics and KPIs
-            5. Timeline and milestones
+            TARGET AUDIENCE:
+            {target_audience}
+            {goals_context}
+            {strategic_context}
+            
+            Create a detailed content strategy including:
+            
+            1. STRATEGIC FOUNDATION
+               - Content mission and vision alignment
+               - Key messaging framework
+               - Brand positioning in content
+               - Competitive differentiation strategy
+            
+            2. AUDIENCE STRATEGY
+               - Detailed audience personas and segments
+               - Content preferences and consumption patterns
+               - Journey mapping and touchpoint optimization
+               - Engagement and interaction strategies
+            
+            3. CONTENT FRAMEWORK
+               - Content pillars and topic categories
+               - Content types and format recommendations
+               - Distribution channel strategy
+               - Content calendar framework
+            
+            4. IMPLEMENTATION PLAN
+               - Content production workflow
+               - Resource allocation and team structure
+               - Quality assurance processes
+               - Performance measurement framework
+            
+            5. OPTIMIZATION STRATEGY
+               - SEO and discoverability approach
+               - Conversion optimization tactics
+               - Engagement enhancement techniques
+               - Brand consistency maintenance
+            
+            6. SUCCESS METRICS
+               - KPI definitions and tracking methods
+               - Performance benchmarks and goals
+               - ROI measurement framework
+               - Continuous improvement processes
+            
+            Please ask me for feedback on this strategy if you need clarification 
+            on any strategic direction or requirements.
             """
             
             if self.agent:
-                response = self.agent.step(BaseMessage(
-                    role_name="User",
-                    role_type=RoleType.USER,
-                    meta_dict=None,
-                    content=strategy_prompt
-                ))
+                response = self.agent.step(strategy_prompt)
+                
+                strategy_result = response.msgs[0].content if response.msgs else "Strategy creation failed"
+                tools_used = len(response.info.get('tool_calls', []))
                 
                 return {
                     "success": True,
-                    "strategy": response.content,
-                    "project_id": self.project_id
+                    "strategy": strategy_result,
+                    "tools_used": tools_used,
+                    "project_id": self.project_id,
+                    "human_interaction": tools_used > 0,
+                    "knowledge_enhanced": self.knowledge_toolkit is not None
                 }
             else:
                 return {
-                    "success": True,
-                    "strategy": self._generate_fallback_strategy(objectives),
-                    "project_id": self.project_id,
-                    "fallback": True
+                    "success": False,
+                    "error": "Agent not properly initialized"
                 }
                 
         except Exception as e:
-            logger.error(f"❌ Strategy planning failed: {e}")
+            logger.error(f"❌ Content strategy creation failed: {e}")
             return {
                 "success": False,
-                "error": str(e),
-                "project_id": self.project_id
+                "error": str(e)
             }
     
-    def _generate_fallback_strategy(self, objectives: str) -> str:
-        """Generate fallback strategy when agent unavailable."""
-        return f"""
-        CONTENT STRATEGY (Fallback Mode)
-        
-        OBJECTIVES: {objectives}
-        PROJECT: {self.project_id}
-        
-        1. CONTENT THEMES
-           - Professional expertise and thought leadership
-           - Industry insights and best practices
-           - Solution-focused messaging
-           - Client success stories
-        
-        2. MESSAGING FRAMEWORK
-           - Clear value proposition
-           - Professional credibility
-           - Customer-centric approach
-           - Results-driven content
-        
-        3. DISTRIBUTION STRATEGY
-           - Multi-channel content distribution
-           - Professional networking platforms
-           - Industry publications and blogs
-           - Direct client communications
-        
-        4. SUCCESS METRICS
-           - Engagement rates and interactions
-           - Lead generation and conversions
-           - Brand awareness and recognition
-           - Client feedback and satisfaction
-        
-        5. IMPLEMENTATION TIMELINE
-           - Phase 1: Content creation and review (Week 1-2)
-           - Phase 2: Distribution and promotion (Week 3-4)
-           - Phase 3: Performance analysis (Week 5-6)
-           - Phase 4: Optimization and iteration (Ongoing)
+    def analyze_content_requirements(self, project_brief: str, stakeholder_input: str = None) -> Dict[str, Any]:
         """
+        Analyze content requirements with human stakeholder input.
+        
+        Args:
+            project_brief: Detailed project requirements and brief
+            stakeholder_input: Optional stakeholder feedback and requirements
+            
+        Returns:
+            Comprehensive requirements analysis
+        """
+        try:
+            # Prepare stakeholder context
+            stakeholder_context = ""
+            if stakeholder_input:
+                stakeholder_context = f"\n\nSTAKEHOLDER INPUT:\n{stakeholder_input}"
+            
+            # Use knowledge toolkit for project context
+            project_context = ""
+            if self.knowledge_toolkit:
+                try:
+                    project_info = self.knowledge_toolkit.search_knowledge(
+                        f"project requirements specifications {self.project_id}"
+                    )
+                    project_context = f"\n\nPROJECT CONTEXT:\n{project_info}"
+                except Exception as e:
+                    logger.warning(f"⚠️ Project context search failed: {e}")
+            
+            requirements_prompt = f"""
+            Analyze the content requirements based on this project brief:
+            
+            PROJECT BRIEF:
+            {project_brief}
+            {stakeholder_context}
+            {project_context}
+            
+            Provide comprehensive requirements analysis including:
+            
+            1. SCOPE ANALYSIS
+               - Content deliverables identification
+               - Project boundaries and limitations
+               - Resource requirements assessment
+               - Timeline and milestone planning
+            
+            2. STAKEHOLDER NEEDS
+               - Primary and secondary stakeholder requirements
+               - Success criteria and expectations
+               - Approval processes and decision makers
+               - Communication preferences and protocols
+            
+            3. CONTENT SPECIFICATIONS
+               - Format and style requirements
+               - Technical specifications and constraints
+               - Brand compliance requirements
+               - Quality standards and criteria
+            
+            4. STRATEGIC ALIGNMENT
+               - Business objective alignment
+               - Marketing goal integration
+               - Brand strategy consistency
+               - Competitive positioning requirements
+            
+            5. IMPLEMENTATION CONSIDERATIONS
+               - Production workflow requirements
+               - Review and approval processes
+               - Distribution and publishing needs
+               - Performance tracking requirements
+            
+            Please ask me for clarification on any unclear requirements 
+            using your human interaction tools.
+            """
+            
+            if self.agent:
+                response = self.agent.step(requirements_prompt)
+                
+                analysis_result = response.msgs[0].content if response.msgs else "Requirements analysis failed"
+                tools_used = len(response.info.get('tool_calls', []))
+                
+                return {
+                    "success": True,
+                    "requirements_analysis": analysis_result,
+                    "tools_used": tools_used,
+                    "project_id": self.project_id,
+                    "stakeholder_input_provided": stakeholder_input is not None,
+                    "human_interaction": tools_used > 0
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Agent not properly initialized"
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Requirements analysis failed: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     def step(self, message):
         """Compatibility method for CAMEL framework."""
@@ -366,7 +461,7 @@ class EnhancedContentPlanningAgent:
 
 def create_enhanced_content_planning_agent(project_id: str = None) -> EnhancedContentPlanningAgent:
     """
-    Create enhanced content planning agent with full tool integration.
+    Create enhanced content planning agent with RAG and HumanToolkit integration.
     
     Args:
         project_id: Project identifier for knowledge isolation
@@ -383,7 +478,7 @@ def create_enhanced_content_planning_agent(project_id: str = None) -> EnhancedCo
         raise
 
 
-def test_enhanced_planning_agent_with_tools(project_id: str = "test-camel-fix") -> dict:
+def test_enhanced_planning_agent_with_tools(project_id: str = "test-content-planning") -> dict:
     """Test the enhanced content planning agent with tools."""
     try:
         print(f"🧪 Testing Enhanced Content Planning Agent for project: {project_id}")
@@ -402,7 +497,9 @@ def test_enhanced_planning_agent_with_tools(project_id: str = "test-camel-fix") 
         print(f"Success: {result.get('success', False)}")
         if result.get('success'):
             print(f"Tools Used: {result.get('tools_used', 0)}")
-            print(f"Content Strategy: {result.get('content_strategy', 'N/A')}")
+            print(f"Content Type: {result.get('content_type', 'N/A')}")
+            print(f"Knowledge Enhanced: {result.get('knowledge_enhanced', False)}")
+            print(f"Human Interaction: {result.get('human_interaction', False)}")
             print("✅ Content outline created with tool integration")
         else:
             print(f"Error: {result.get('error', 'Unknown error')}")

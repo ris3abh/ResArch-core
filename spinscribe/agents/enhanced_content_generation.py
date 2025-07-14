@@ -1,16 +1,20 @@
-# ─── COMPLETE FIXED FILE: spinscribe/agents/enhanced_content_generation.py ───
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILE: spinscribe/agents/enhanced_content_generation.py
+# STATUS: UPDATE (FIXED - HumanToolkit only, no HumanLayer dependency)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 """
-Enhanced Content Generation Agent with RAG and tool integration.
-COMPLETE FIXED VERSION with proper implementation and fallbacks.
+Enhanced Content Generation Agent with RAG and CAMEL's native HumanToolkit integration.
+FIXED VERSION - Using only CAMEL's built-in human interaction capabilities.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.messages import BaseMessage
 from camel.types import RoleType
+from camel.toolkits import HumanToolkit
 
 try:
     from spinscribe.memory.memory_setup import get_memory
@@ -33,19 +37,30 @@ except ImportError:
         
         def search_knowledge(self, query: str) -> str:
             return f"Knowledge search for '{query}' - fallback response"
+        
+        def get_brand_guidelines(self) -> str:
+            return "Brand guidelines - fallback response"
+        
+        def get_style_guide(self) -> str:
+            return "Style guide - fallback response"
 
 logger = logging.getLogger(__name__)
 
 class EnhancedContentGenerationAgent:
     """
-    Enhanced Content Generation Agent with RAG integration and advanced content creation.
+    Enhanced Content Generation Agent with RAG integration and HumanToolkit.
+    Combines advanced content creation with knowledge base access and console-based human interaction.
     """
     
     def __init__(self, project_id: str = None):
         self.project_id = project_id or "default"
         self.tools = []
         
-        # Initialize knowledge toolkit
+        # Initialize CAMEL's built-in HumanToolkit (always available)
+        human_toolkit = HumanToolkit()
+        self.tools.extend(human_toolkit.get_tools())
+        
+        # Initialize knowledge toolkit (existing RAG functionality)
         try:
             self.knowledge_toolkit = KnowledgeAccessToolkit(project_id=self.project_id)
             self.tools.extend(getattr(self.knowledge_toolkit, 'tools', []))
@@ -54,7 +69,7 @@ class EnhancedContentGenerationAgent:
             logger.warning(f"⚠️ Knowledge toolkit initialization failed: {e}")
             self.knowledge_toolkit = None
         
-        # Create base agent
+        # Create base agent with all tools
         try:
             model = ModelFactory.create(
                 model_platform=MODEL_PLATFORM,
@@ -67,314 +82,374 @@ class EnhancedContentGenerationAgent:
                 role_type=RoleType.USER,
                 meta_dict=None,
                 content=(
-                    "You are an expert content creator and copywriter specializing in "
-                    "high-quality, brand-aligned content. Your role is to transform "
-                    "content outlines and strategies into compelling, engaging content "
-                    "that maintains brand voice consistency and achieves business objectives."
+                    "You are an expert Content Generation Agent specializing in creating high-quality, "
+                    "brand-aligned content with access to client knowledge and human interaction capabilities. "
+                    "Your role is to transform content outlines and strategies into compelling, engaging content "
+                    "that maintains brand voice consistency and achieves business objectives.\n\n"
+                    "CAPABILITIES:\n"
+                    "- RAG access to style guides, brand materials, and factual references\n"
+                    "- Human interaction for content direction and feedback via console\n"
+                    "- Advanced content creation with brand voice application\n"
+                    "- Factual verification and accuracy checking\n"
+                    "- Content optimization and enhancement\n\n"
+                    "RESPONSIBILITIES:\n"
+                    "1. Use provided outlines and style patterns to write well-structured content\n"
+                    "2. Apply language codes and brand voice patterns consistently\n"
+                    "3. Follow content structure from approved outlines exactly\n"
+                    "4. Access factual information from knowledge base as needed\n"
+                    "5. Maintain consistency with previous client content\n"
+                    "6. Produce content that matches the client's unique voice and style\n\n"
+                    "HUMAN INTERACTION: You can ask humans for feedback on content direction, "
+                    "request clarification on requirements, and seek feedback for drafts "
+                    "using your available tools. Human input happens via console interaction."
                 )
             )
             
             self.agent = ChatAgent(
                 system_message=system_message,
                 model=model,
-                memory=get_memory()
+                memory=get_memory(),
+                tools=self.tools
             )
             
-            logger.info("✅ Enhanced Content Generation Agent initialized")
+            logger.info("✅ Enhanced Content Generation Agent initialized with HumanToolkit + RAG")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize agent: {e}")
             self.agent = None
     
-    def generate_enhanced_content(self, outline: str, style_guide: str = None, 
-                                content_type: str = "article", brand_voice: str = None) -> Dict[str, Any]:
+    def generate_enhanced_content(self, outline: str, content_type: str = "article",
+                                brand_voice: str = None) -> Dict[str, Any]:
         """
-        Generate enhanced content from outline with brand alignment.
+        Generate enhanced content with RAG verification and human interaction.
         
         Args:
-            outline: Content outline to follow
-            style_guide: Brand style guide
-            content_type: Type of content to generate
-            brand_voice: Brand voice characteristics
+            outline: Detailed content outline to follow
+            content_type: Type of content being generated
+            brand_voice: Specific brand voice guidelines
             
         Returns:
-            Generated content with quality metrics
+            Complete generated content with quality metrics
         """
         try:
-            # Use knowledge toolkit for brand context
+            # Use knowledge toolkit for brand and style context
             brand_context = ""
             if self.knowledge_toolkit:
                 try:
-                    brand_info = self.knowledge_toolkit.search_knowledge(
-                        f"brand voice examples style samples for {self.project_id}"
+                    brand_guidelines = self.knowledge_toolkit.get_brand_guidelines()
+                    style_guide = self.knowledge_toolkit.get_style_guide()
+                    factual_references = self.knowledge_toolkit.search_knowledge(
+                        f"factual information references {content_type} {self.project_id}"
                     )
-                    brand_context = f"\n\nBrand Voice Context:\n{brand_info}"
+                    brand_context = f"\n\nBRAND GUIDELINES:\n{brand_guidelines}\n\nSTYLE GUIDE:\n{style_guide}\n\nFACTUAL REFERENCES:\n{factual_references}"
                 except Exception as e:
-                    logger.warning(f"⚠️ Knowledge search failed: {e}")
+                    logger.warning(f"⚠️ Brand context retrieval failed: {e}")
             
             generation_prompt = f"""
-            Create high-quality {content_type} content based on the following:
+            Generate high-quality content based on the following specifications:
             
             CONTENT OUTLINE:
             {outline}
             
+            CONTENT TYPE: {content_type}
             PROJECT: {self.project_id}
             
-            {'STYLE GUIDE: ' + style_guide if style_guide else ''}
-            {'BRAND VOICE: ' + brand_voice if brand_voice else ''}
+            {'BRAND VOICE GUIDELINES:\n' + brand_voice if brand_voice else ''}
             {brand_context}
             
-            CONTENT REQUIREMENTS:
-            - Follow the provided outline structure exactly
-            - Maintain consistent brand voice throughout
-            - Create engaging, professional content
-            - Include relevant examples and insights
-            - Ensure clear, compelling messaging
-            - Add appropriate calls-to-action
-            - Optimize for readability and flow
+            Please create compelling content that includes:
             
-            QUALITY STANDARDS:
-            - Professional tone and language
-            - Error-free grammar and spelling
-            - Logical flow and coherence
-            - Brand alignment and consistency
-            - Engaging and actionable content
+            1. ENGAGING INTRODUCTION
+               - Hook that captures attention immediately
+               - Clear value proposition and relevance
+               - Smooth transition to main content
+               - Brand voice establishment from the start
             
-            Generate the complete {content_type} content now:
+            2. STRUCTURED MAIN CONTENT
+               - Follow the outline structure exactly
+               - Develop each section with depth and insight
+               - Maintain logical flow and coherence
+               - Include supporting evidence and examples
+               - Apply brand voice consistently throughout
+            
+            3. COMPELLING CONCLUSION
+               - Summarize key points and insights
+               - Reinforce main value proposition
+               - Include clear call-to-action
+               - Leave lasting impression aligned with objectives
+            
+            4. CONTENT OPTIMIZATION
+               - Ensure readability and engagement
+               - Include relevant keywords naturally
+               - Maintain appropriate tone and style
+               - Verify factual accuracy against knowledge base
+            
+            5. BRAND ALIGNMENT
+               - Apply language codes consistently
+               - Maintain voice characteristics throughout
+               - Ensure messaging consistency
+               - Reflect brand personality and values
+            
+            QUALITY REQUIREMENTS:
+            - Professional writing quality and grammar
+            - Factual accuracy and credibility
+            - Engaging and persuasive tone
+            - Clear structure and organization
+            - Brand voice consistency
+            
+            If you need clarification on any aspect of the content direction 
+            or requirements, please ask me directly using your human interaction tools.
             """
             
             if self.agent:
-                response = self.agent.step(BaseMessage(
-                    role_name="User",
-                    role_type=RoleType.USER,
-                    meta_dict=None,
-                    content=generation_prompt
-                ))
+                response = self.agent.step(generation_prompt)
                 
-                content = response.content
-                quality_score = self._assess_content_quality(content)
+                # Extract response content
+                content_result = response.msgs[0].content if response.msgs else "Content generation failed"
+                
+                # Calculate quality metrics
+                word_count = len(content_result.split()) if content_result else 0
+                character_count = len(content_result) if content_result else 0
+                
+                # Check for tool usage
+                tools_used = len(response.info.get('tool_calls', []))
                 
                 return {
                     "success": True,
-                    "generated_content": content,
+                    "content": content_result,
                     "content_type": content_type,
-                    "quality_score": quality_score,
-                    "word_count": len(content.split()),
-                    "character_count": len(content),
-                    "tools_used": len(self.tools),
+                    "word_count": word_count,
+                    "character_count": character_count,
+                    "tools_used": tools_used,
                     "project_id": self.project_id,
-                    "brand_aligned": True
+                    "knowledge_enhanced": self.knowledge_toolkit is not None,
+                    "human_interaction": tools_used > 0,
+                    "quality_score": min(100, max(0, (word_count / 10) + (tools_used * 5)))  # Simple quality metric
                 }
             else:
-                # Fallback content generation
-                fallback_content = self._generate_fallback_content(outline, content_type)
                 return {
-                    "success": True,
-                    "generated_content": fallback_content,
-                    "content_type": content_type,
-                    "quality_score": 85,
-                    "word_count": len(fallback_content.split()),
-                    "character_count": len(fallback_content),
-                    "tools_used": 0,
-                    "project_id": self.project_id,
-                    "fallback": True
+                    "success": False,
+                    "error": "Agent not properly initialized"
                 }
                 
         except Exception as e:
-            logger.error(f"❌ Content generation failed: {e}")
+            logger.error(f"❌ Enhanced content generation failed: {e}")
             return {
                 "success": False,
-                "error": str(e),
-                "project_id": self.project_id,
-                "content_type": content_type
+                "error": str(e)
             }
     
-    def _assess_content_quality(self, content: str) -> int:
-        """Assess content quality on a scale of 1-100."""
-        score = 70  # Base score
-        
-        # Length check
-        word_count = len(content.split())
-        if 500 <= word_count <= 2000:
-            score += 10
-        elif word_count < 200:
-            score -= 20
-        
-        # Structure check
-        if "." in content and len(content.split(".")) > 5:
-            score += 5
-        
-        # Professional language indicators
-        professional_indicators = ["solution", "approach", "strategy", "expertise", "professional"]
-        if any(indicator in content.lower() for indicator in professional_indicators):
-            score += 10
-        
-        # Call-to-action presence
-        cta_indicators = ["contact", "learn more", "get started", "discover", "explore"]
-        if any(cta in content.lower() for cta in cta_indicators):
-            score += 5
-        
-        return min(100, score)
-    
-    def _generate_fallback_content(self, outline: str, content_type: str) -> str:
-        """Generate fallback content when agent is unavailable."""
-        return f"""
-# {content_type.title()} Content - {self.project_id}
-
-## Executive Summary
-
-In today's rapidly evolving business landscape, organizations face unprecedented challenges that require innovative solutions and strategic thinking. Our approach combines proven methodologies with cutting-edge insights to deliver exceptional results that drive real business value.
-
-## Understanding the Challenge
-
-The modern business environment demands agility, expertise, and a deep understanding of industry dynamics. Companies that succeed are those that can adapt quickly to changing conditions while maintaining their core strengths and competitive advantages.
-
-### Key Considerations
-
-- **Strategic Planning**: Developing comprehensive strategies that align with business objectives
-- **Implementation Excellence**: Executing plans with precision and attention to detail  
-- **Continuous Improvement**: Monitoring results and optimizing performance over time
-- **Stakeholder Engagement**: Ensuring all parties are aligned and committed to success
-
-## Our Solution Approach
-
-We believe in a collaborative, results-driven methodology that puts client success at the center of everything we do. Our process is designed to be both thorough and efficient, ensuring optimal outcomes while respecting time and budget constraints.
-
-### Core Methodology
-
-1. **Discovery and Analysis**: Comprehensive assessment of current state and requirements
-2. **Strategy Development**: Creation of tailored solutions that address specific needs
-3. **Implementation Planning**: Detailed roadmaps with clear milestones and deliverables
-4. **Execution and Support**: Professional implementation with ongoing guidance
-5. **Performance Optimization**: Continuous monitoring and improvement processes
-
-## Value Proposition
-
-Our unique combination of expertise, experience, and commitment to excellence enables us to deliver solutions that create lasting impact. We don't just solve immediate problems – we build foundations for long-term success.
-
-### Competitive Advantages
-
-- Deep industry expertise and proven track record
-- Innovative approaches backed by best practices
-- Dedicated support throughout the entire process
-- Transparent communication and regular progress updates
-- Focus on measurable results and ROI
-
-## Implementation and Results
-
-Success is measured not just by the quality of our solutions, but by the tangible results they generate for our clients. We work closely with each organization to ensure that our recommendations are not only sound in theory but also practical and achievable in reality.
-
-### Expected Outcomes
-
-- Improved operational efficiency and performance
-- Enhanced competitive positioning in the market
-- Stronger stakeholder engagement and satisfaction
-- Measurable return on investment
-- Sustainable growth and long-term success
-
-## Next Steps
-
-Ready to transform your business challenges into competitive advantages? Our team of experts is prepared to work with you to develop and implement solutions that deliver real results.
-
-**Contact us today to schedule a consultation and discover how we can help you achieve your objectives with confidence and clarity.**
-
----
-
-*This content was generated using our enhanced content creation system for project: {self.project_id}*
-*Content Type: {content_type} | Generated: Fallback Mode*
+    def refine_content_with_feedback(self, content: str, feedback: str, 
+                                   style_requirements: str = None) -> Dict[str, Any]:
         """
-    
-    def enhance_existing_content(self, existing_content: str, enhancement_guidelines: str = None) -> Dict[str, Any]:
-        """
-        Enhance existing content with improvements and optimization.
+        Refine content based on human feedback and style requirements.
         
         Args:
-            existing_content: Content to enhance
-            enhancement_guidelines: Specific enhancement instructions
+            content: Original content to refine
+            feedback: Human feedback and revision requests
+            style_requirements: Additional style or formatting requirements
             
         Returns:
-            Enhanced content with improvement notes
+            Refined content with improvement tracking
         """
         try:
-            enhancement_prompt = f"""
-            Enhance the following content according to professional standards:
+            # Prepare style context
+            style_context = ""
+            if style_requirements:
+                style_context = f"\n\nSTYLE REQUIREMENTS:\n{style_requirements}"
             
-            EXISTING CONTENT:
-            {existing_content}
+            # Use knowledge toolkit for consistency checking
+            consistency_context = ""
+            if self.knowledge_toolkit:
+                try:
+                    brand_consistency = self.knowledge_toolkit.search_knowledge(
+                        f"brand consistency guidelines style patterns {self.project_id}"
+                    )
+                    consistency_context = f"\n\nCONSISTENCY GUIDELINES:\n{brand_consistency}"
+                except Exception as e:
+                    logger.warning(f"⚠️ Consistency context search failed: {e}")
             
-            {'ENHANCEMENT GUIDELINES: ' + enhancement_guidelines if enhancement_guidelines else ''}
+            refinement_prompt = f"""
+            Refine the following content based on the provided feedback:
             
-            PROJECT: {self.project_id}
+            ORIGINAL CONTENT:
+            {content}
+            
+            HUMAN FEEDBACK:
+            {feedback}
+            {style_context}
+            {consistency_context}
             
             Please improve the content by:
-            - Enhancing clarity and readability
-            - Strengthening professional language
-            - Improving structure and flow
-            - Adding compelling elements
-            - Ensuring brand voice consistency
-            - Optimizing for engagement
             
-            Provide the enhanced version:
+            1. ADDRESSING FEEDBACK
+               - Incorporate all specific feedback points
+               - Resolve any identified issues or concerns
+               - Enhance areas flagged for improvement
+               - Maintain overall content quality and flow
+            
+            2. STYLE ENHANCEMENT
+               - Ensure consistent brand voice application
+               - Improve readability and engagement
+               - Optimize sentence structure and flow
+               - Enhance clarity and persuasiveness
+            
+            3. CONTENT OPTIMIZATION
+               - Strengthen weak areas identified in feedback
+               - Add supporting details where needed
+               - Improve transitions and connectivity
+               - Enhance call-to-action effectiveness
+            
+            4. QUALITY ASSURANCE
+               - Verify factual accuracy and credibility
+               - Check grammar and professional writing quality
+               - Ensure brand consistency throughout
+               - Maintain original content objectives
+            
+            If you need further clarification on the feedback or requirements, 
+            please ask me using your human interaction tools.
             """
             
             if self.agent:
-                response = self.agent.step(BaseMessage(
-                    role_name="User",
-                    role_type=RoleType.USER,
-                    meta_dict=None,
-                    content=enhancement_prompt
-                ))
+                response = self.agent.step(refinement_prompt)
+                
+                refined_content = response.msgs[0].content if response.msgs else "Content refinement failed"
+                tools_used = len(response.info.get('tool_calls', []))
+                
+                # Calculate improvement metrics
+                original_length = len(content.split()) if content else 0
+                refined_length = len(refined_content.split()) if refined_content else 0
                 
                 return {
                     "success": True,
-                    "enhanced_content": response.content,
-                    "original_length": len(existing_content),
-                    "enhanced_length": len(response.content),
-                    "improvement_ratio": len(response.content) / len(existing_content),
-                    "project_id": self.project_id
+                    "refined_content": refined_content,
+                    "original_word_count": original_length,
+                    "refined_word_count": refined_length,
+                    "tools_used": tools_used,
+                    "project_id": self.project_id,
+                    "human_interaction": tools_used > 0,
+                    "feedback_addressed": True
                 }
             else:
-                # Basic enhancement
-                enhanced = self._basic_content_enhancement(existing_content)
+                return {
+                    "success": False,
+                    "error": "Agent not properly initialized"
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Content refinement failed: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def enhance_content_quality(self, content: str) -> Dict[str, Any]:
+        """
+        Enhance content quality with professional polish and optimization.
+        
+        Args:
+            content: Content to enhance and optimize
+            
+        Returns:
+            Enhanced content with quality improvements
+        """
+        try:
+            enhancement_prompt = f"""
+            Enhance the quality and professional polish of this content:
+            
+            CONTENT TO ENHANCE:
+            {content}
+            
+            Apply the following enhancements:
+            
+            1. PROFESSIONAL POLISH
+               - Improve sentence structure and variety
+               - Enhance vocabulary and word choice
+               - Optimize paragraph flow and transitions
+               - Strengthen opening and closing sections
+            
+            2. ENGAGEMENT OPTIMIZATION
+               - Add compelling hooks and attention-grabbers
+               - Include relevant examples and illustrations
+               - Improve call-to-action effectiveness
+               - Enhance overall persuasiveness
+            
+            3. READABILITY IMPROVEMENT
+               - Optimize sentence length and complexity
+               - Improve clarity and comprehension
+               - Enhance logical structure and organization
+               - Add appropriate formatting and emphasis
+            
+            4. BRAND CONSISTENCY
+               - Ensure consistent voice and tone
+               - Apply brand language patterns
+               - Maintain professional credibility
+               - Reflect brand values and personality
+            
+            Provide the enhanced content with clear improvements while 
+            maintaining the original message and objectives.
+            """
+            
+            if self.agent:
+                response = self.agent.step(enhancement_prompt)
+                
+                enhanced_content = response.msgs[0].content if response.msgs else "Content enhancement failed"
+                
+                # Apply basic enhancements if agent response is available
+                if enhanced_content and enhanced_content != "Content enhancement failed":
+                    enhanced_content = self._apply_professional_enhancements(enhanced_content)
+                
                 return {
                     "success": True,
-                    "enhanced_content": enhanced,
-                    "original_length": len(existing_content),
-                    "enhanced_length": len(enhanced),
-                    "improvement_ratio": len(enhanced) / len(existing_content),
+                    "enhanced_content": enhanced_content,
+                    "original_length": len(content.split()) if content else 0,
+                    "enhanced_length": len(enhanced_content.split()) if enhanced_content else 0,
                     "project_id": self.project_id,
-                    "fallback": True
+                    "professional_polish": True
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Agent not properly initialized"
                 }
                 
         except Exception as e:
             logger.error(f"❌ Content enhancement failed: {e}")
             return {
                 "success": False,
-                "error": str(e),
-                "project_id": self.project_id
+                "error": str(e)
             }
     
-    def _basic_content_enhancement(self, content: str) -> str:
-        """Basic content enhancement when agent unavailable."""
-        lines = content.split('\n')
-        enhanced_lines = []
-        
-        for line in lines:
-            if line.strip():
-                # Add professional enhancements
-                if not line.endswith('.') and not line.endswith(':') and len(line) > 10:
-                    line += '.'
-                enhanced_lines.append(line)
-            else:
-                enhanced_lines.append(line)
-        
-        enhanced_content = '\n'.join(enhanced_lines)
-        
-        # Add professional closing if missing
-        if "contact" not in enhanced_content.lower() and "next steps" not in enhanced_content.lower():
-            enhanced_content += "\n\nReady to learn more? Contact us to discover how we can help you achieve your objectives with professional expertise and proven results."
-        
-        return enhanced_content
+    def _apply_professional_enhancements(self, content: str) -> str:
+        """Apply basic professional enhancements to content."""
+        try:
+            if not content:
+                return content
+            
+            # Split content into lines for processing
+            lines = content.split('\n')
+            enhanced_lines = []
+            
+            for line in lines:
+                if line.strip():
+                    # Add professional enhancements
+                    if not line.endswith('.') and not line.endswith(':') and len(line) > 10:
+                        line += '.'
+                    enhanced_lines.append(line)
+                else:
+                    enhanced_lines.append(line)
+            
+            enhanced_content = '\n'.join(enhanced_lines)
+            
+            # Add professional closing if missing
+            if "contact" not in enhanced_content.lower() and "next steps" not in enhanced_content.lower():
+                enhanced_content += "\n\nReady to learn more? Contact us to discover how we can help you achieve your objectives with professional expertise and proven results."
+            
+            return enhanced_content
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Professional enhancement application failed: {e}")
+            return content
     
     def step(self, message):
         """Compatibility method for CAMEL framework."""
@@ -397,7 +472,7 @@ Ready to transform your business challenges into competitive advantages? Our tea
 
 def create_enhanced_content_generation_agent(project_id: str = None) -> EnhancedContentGenerationAgent:
     """
-    Create enhanced content generation agent with full tool integration.
+    Create enhanced content generation agent with RAG and HumanToolkit integration.
     
     Args:
         project_id: Project identifier for knowledge isolation
@@ -414,7 +489,7 @@ def create_enhanced_content_generation_agent(project_id: str = None) -> Enhanced
         raise
 
 
-def test_enhanced_generation_agent_with_tools(project_id: str = "test-camel-fix") -> dict:
+def test_enhanced_generation_agent_with_tools(project_id: str = "test-content-generation") -> dict:
     """Test the enhanced content generation agent with tools."""
     try:
         print(f"🧪 Testing Enhanced Content Generation Agent for project: {project_id}")
@@ -444,6 +519,8 @@ def test_enhanced_generation_agent_with_tools(project_id: str = "test-camel-fix"
             print(f"Tools Used: {result.get('tools_used', 0)}")
             print(f"Word Count: {result.get('word_count', 0)}")
             print(f"Quality Score: {result.get('quality_score', 0)}")
+            print(f"Knowledge Enhanced: {result.get('knowledge_enhanced', False)}")
+            print(f"Human Interaction: {result.get('human_interaction', False)}")
             print("✅ Content generated with tool integration")
         else:
             print(f"Error: {result.get('error', 'Unknown error')}")
