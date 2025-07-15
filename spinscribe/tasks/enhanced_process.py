@@ -153,17 +153,25 @@ CONTENT REQUIREMENTS:
 7. Include introduction, body sections, and strong conclusion
 8. Optimize for readability and engagement
 
-{f'''HUMAN INTERACTION PROTOCOL:
-The Content Creator has access to human interaction tools and should:
-- Ask for approval on content strategy and outline before writing
-- Seek guidance on tone, style, and target audience preferences
-- Request feedback on key sections during development
-- Get clarification on technical depth and complexity level
-- Obtain final approval before completing the content
-- Use specific questions like: "Do you approve this outline? [yes/no]"
-- Ask clarifying questions: "What tone should this content have? (professional/casual/technical)"
-- Confirm direction: "Should I include more detailed examples?"
-- Seek feedback: "How does this section sound to you?"''' if enable_human_interaction else ''}
+{f'''MANDATORY HUMAN INTERACTION PROTOCOL:
+The Content Creator MUST use human interaction tools for EVERY major step and MUST:
+- Ask for approval on content strategy and outline before writing ANY content (REQUIRED)
+- Seek guidance on tone, style, and target audience preferences BEFORE starting (REQUIRED)
+- Request feedback on key sections during development (REQUIRED)
+- Get clarification on technical depth and complexity level (REQUIRED)
+- Obtain final approval before completing the content (REQUIRED)
+
+CRITICAL REQUIREMENT: You MUST call ask_human_via_console() before proceeding with substantial work.
+
+VALIDATION: Every major response must include at least one human interaction tool call.
+
+MANDATORY questions you MUST ask:
+- "Do you approve this outline? [yes/no]" (REQUIRED before writing)
+- "What tone should this content have? (professional/casual/technical)" (REQUIRED)
+- "Should I include more detailed examples?" (ASK during development)
+- "How does this section sound to you?" (ASK for feedback)
+
+FAILURE TO ASK FOR HUMAN INPUT VIOLATES YOUR ROLE REQUIREMENTS."''' if enable_human_interaction else ''}
 
 COLLABORATION INSTRUCTIONS:
 - Content Strategist: Guide the overall strategy, structure, and approach

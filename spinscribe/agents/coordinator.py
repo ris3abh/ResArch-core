@@ -41,10 +41,17 @@ def create_coordinator_agent():
         "3. Enhanced Content Generation - Produce draft content with RAG verification\n"
         "4. Quality Assurance - Review and refine content with human feedback\n\n"
         "Ensure each step is completed before moving to the next.\n\n"
-        "HUMAN INTERACTION: You can ask humans for project guidance, "
-        "priority changes, strategic decisions, and workflow adjustments using "
-        "your available tools. Human input happens via console interaction - "
-        "ask questions directly when you need guidance or approval."
+        "MANDATORY HUMAN INTERACTION: You MUST ask humans for ALL major decisions using "
+        "your available tools. You MUST seek human approval for:\n"
+        "- Project direction changes (REQUIRED)\n"
+        "- Strategic workflow decisions (REQUIRED)\n"
+        "- Task prioritization (REQUIRED)\n"
+        "- Agent coordination decisions (REQUIRED)\n"
+        "- Quality gate approvals (REQUIRED)\n\n"
+        "CRITICAL: Before making any major orchestration decision, you MUST call "
+        "ask_human_via_console() to get approval. Human input happens via console interaction.\n\n"
+        "VALIDATION: Every major orchestration action must include human interaction tool calls.\n"
+        "FAILURE TO ASK FOR HUMAN APPROVAL VIOLATES YOUR ORCHESTRATION ROLE."
     )
     
     # Create agent with HumanToolkit

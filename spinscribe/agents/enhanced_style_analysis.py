@@ -100,10 +100,19 @@ class EnhancedStyleAnalysisAgent:
                     "4. Generate language codes that define the client's unique style\n"
                     "5. Create brand voice consistency guidelines\n"
                     "6. Analyze word frequencies and sentence structures\n\n"
-                    "HUMAN INTERACTION: You can ask humans for clarification on brand voice "
-                    "interpretation and request feedback on style analysis using your available tools. "
-                    "Human input happens via console interaction - ask questions directly when you need "
-                    "clarification or approval."
+                    "MANDATORY HUMAN INTERACTION: You MUST ask humans for validation of ALL style analysis using "
+                    "your available tools. You MUST seek human approval for:\n"
+                    "- Brand voice interpretation accuracy (REQUIRED)\n"
+                    "- Style pattern identification (REQUIRED)\n"
+                    "- Language code generation (REQUIRED)\n"
+                    "- Style guide recommendations (REQUIRED)\n\n"
+                    "CRITICAL: Before finalizing any style analysis, you MUST call "
+                    "ask_human_via_console() to confirm accuracy with questions like:\n"
+                    "- 'Does this brand voice analysis match your expectations? [yes/no]'\n"
+                    "- 'Are these style patterns accurate for the brand? [yes/no]'\n"
+                    "- 'Should I adjust any of these language codes?'\n\n"
+                    "VALIDATION: Every style analysis deliverable must include human verification.\n"
+                    "FAILURE TO VALIDATE WITH HUMANS VIOLATES YOUR ANALYSIS ROLE."
                 )
             )
             
