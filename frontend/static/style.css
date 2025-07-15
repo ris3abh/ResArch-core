@@ -1,0 +1,69 @@
+body {
+  margin: 0;
+  font-family: 'Segoe UI', sans-serif;
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: 220px;
+  background: linear-gradient(180deg, #ff6b00, #6a0dad);
+  color: white;
+  padding: 1rem;
+  box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+}
+
+.sidebar h1 {
+  font-size: 1.3rem;
+  margin-bottom: 1.5rem;
+}
+
+.sidebar ul {
+  list-style: none;
+  padding: 0;
+}
+
+.sidebar ul li a {
+  color: white;
+  text-decoration: none;
+  display: block;
+  padding: 0.5rem 0;
+  font-weight: bold;
+}
+
+.sidebar ul li a:hover {
+  text-decoration: underline;
+}
+
+.main {
+  flex: 1;
+  padding: 2rem;
+  background-color: #f9f9f9;
+  overflow-y: auto;
+}
+
+.chat-bubble {
+  max-width: 75%;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  border-radius: 10px;
+  line-height: 1.5;
+}
+
+.agent {
+  background-color: #ffe6cc;
+  border-left: 4px solid #ff6b00;
+}
+
+.human {
+  background-color: #e5ddff;
+  border-left: 4px solid #6a0dad;
+}
+
+.checkpoint-card {
+  background: white;
+  border: 2px dashed #ccc;
+  padding: 1rem;
+  margin: 1rem 0;
+  border-radius: 10px;
+}
