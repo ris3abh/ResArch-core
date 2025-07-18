@@ -1,9 +1,0 @@
-{% extends 'base.html' %}
-{% block content %}
-  <h2>New Chat for Project {{ project_id }}</h2>
-  <form method="post" enctype="multipart/form-data">
-    <label>Title: <input type="text" name="title" required></label><br><br>
-    <label>Draft (optional): <input type="file" name="draft"></label><br><br>
-    <button type="submit">Start Chat</button>
-  </form>
-{% endblock %}
