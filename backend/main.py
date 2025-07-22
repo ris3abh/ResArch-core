@@ -1,420 +1,1030 @@
-# backend/main.py
+# File: backend/main.py
 """
-FastAPI Backend for Spinscribe Web Application
+Complete FastAPI Backend for Spinscribe Web Application
 Integrates with existing CAMEL infrastructure using Service Wrapper Pattern
 """
 
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-import asyncio
+import os
+import sys
 import logging
+import asyncio
+import uuid
 import json
+from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from fastapi import (
+    FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, 
+    UploadFile, File, Form, BackgroundTasks
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 from pydantic import BaseModel
 
-# Database and infrastructure
-from sqlalchemy.ext.asyncio import AsyncSession
-from backend.database.database import get_db
-from backend.database.models import WorkflowExecution, ChatInstance, User, Project
-
-# Service imports - using existing Spinscribe modules
-from backend.services.camel_workflow_service import (
-    CAMELWorkflowService, 
-    CheckpointManager,
-    WorkflowCreateRequest,
-    WorkflowEventBridge,
-    create_workflow_service,
-    create_checkpoint_manager
+# Database imports
+from backend.database.database import get_db, engine, Base
+from backend.database.models import (
+    User, Project, Document, ChatInstance, ChatMessage, 
+    WorkflowExecution, WorkflowCheckpoint, ContentDraft, KnowledgeItem
 )
 
-# WebSocket management
+# Try to import Spinscribe modules
+SPINSCRIBE_AVAILABLE = False
+try:
+    from spinscribe.enhanced_process import run_enhanced_content_task
+    from spinscribe.workforce.enhanced_builder import create_enhanced_workforce
+    from spinscribe.knowledge.document_processor import DocumentProcessor
+    from spinscribe.knowledge.knowledge_manager import KnowledgeManager
+    SPINSCRIBE_AVAILABLE = True
+    print("✅ Spinscribe modules imported successfully")
+except ImportError as e:
+    print(f"⚠️ Could not import Spinscribe modules: {e}")
+    print("Running in API-only mode without Spinscribe functionality")
+
+# WebSocket manager
 from backend.services.websocket_manager import WebSocketManager
 
+# Configuration
+from backend.config.settings import settings
+
+# Setup logging
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Global service instances
-workflow_service: CAMELWorkflowService = None
-checkpoint_manager: CheckpointManager = None
-websocket_manager: WebSocketManager = None
+# Global instances
+websocket_manager = WebSocketManager()
+document_processor = None
+knowledge_manager = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    global workflow_service, checkpoint_manager, websocket_manager
+    global document_processor, knowledge_manager
     
-    logger.info("🚀 Starting Spinscribe Backend")
-    
-    # Initialize services
-    workflow_service = create_workflow_service()
-    checkpoint_manager = create_checkpoint_manager(workflow_service)
-    websocket_manager = WebSocketManager()
-    
-    logger.info("✅ Services initialized")
-    yield
-    
-    logger.info("🛑 Shutting down Spinscribe Backend")
+    try:
+        # Create database tables
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created")
+        
+        # Initialize Spinscribe services if available
+        if SPINSCRIBE_AVAILABLE:
+            try:
+                document_processor = DocumentProcessor()
+                knowledge_manager = KnowledgeManager()
+                logger.info("✅ Spinscribe services initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize Spinscribe services: {e}")
+        
+        # Create upload directory
+        upload_dir = Path(settings.UPLOAD_DIR)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Upload directory ready: {upload_dir}")
+        
+        logger.info("🚀 Backend services started successfully")
+        yield
+        
+    except Exception as e:
+        logger.error(f"❌ Startup error: {e}")
+        raise
+    finally:
+        logger.info("🔄 Shutting down backend services")
 
+# Create FastAPI app
 app = FastAPI(
     title="Spinscribe API",
-    description="Multi-Agent Content Creation System",
+    description="Multi-Agent Content Creation Platform",
     version="1.0.0",
     lifespan=lifespan
 )
 
-# CORS middleware
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # React dev servers
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Pydantic Models
-class WorkflowCreateRequestModel(BaseModel):
-    project_id: str
-    title: str
-    content_type: str
-    task_description: str
-    workflow_type: str = "enhanced"
-    enable_checkpoints: bool = True
-    client_documents_path: Optional[str] = None
-    first_draft: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+# Serve static files
+if Path("uploads").exists():
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-class CheckpointApprovalModel(BaseModel):
-    decision: str  # 'approved' or 'rejected'
-    feedback: Optional[str] = None
-    user_id: str
+# Pydantic models
+class ProjectCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    client_name: Optional[str] = None
 
-class WorkflowStatusResponse(BaseModel):
-    workflow_id: str
+class ProjectResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    client_name: Optional[str]
     status: str
-    progress: float
-    current_stage: str
-    started_at: str
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class ChatCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    chat_type: str = "standard"
+
+class MessageCreate(BaseModel):
+    content: str
+    message_type: str = "text"
+
+class WorkflowCreate(BaseModel):
     title: str
     content_type: str
-    checkpoints_enabled: bool
-    recent_events: List[Dict[str, Any]]
+    project_id: str
+    enable_checkpoints: bool = True
+    enable_human_interaction: bool = True
+    timeout_seconds: int = 600
 
-# Authentication dependency (simplified for demo)
-async def get_current_user(db: AsyncSession = Depends(get_db)) -> User:
-    """Get current authenticated user. Simplified for demo."""
-    # In production, implement proper JWT authentication
-    # For now, return a mock user
-    return User(id="demo_user", email="demo@spinscribe.com", first_name="Demo", last_name="User")
-
-# ================================
-# WORKFLOW MANAGEMENT ENDPOINTS
-# ================================
-
-@app.post("/api/v1/workflows", response_model=Dict[str, str])
-async def create_workflow(
-    request: WorkflowCreateRequestModel,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Create and start a new workflow.
-    Uses existing CAMEL infrastructure with zero changes to agent communication.
-    """
-    try:
-        # Convert to internal request model
-        workflow_request = WorkflowCreateRequest(
-            project_id=request.project_id,
-            title=request.title,
-            content_type=request.content_type,
-            task_description=request.task_description,
-            workflow_type=request.workflow_type,
-            enable_checkpoints=request.enable_checkpoints,
-            client_documents_path=request.client_documents_path,
-            first_draft=request.first_draft,
-            metadata=request.metadata
-        )
-        
-        # Start workflow using existing CAMEL system
-        workflow_id = await workflow_service.start_workflow(workflow_request)
-        
-        # Store workflow in database
-        db_workflow = WorkflowExecution(
-            workflow_id=workflow_id,
-            project_id=request.project_id,
-            user_id=current_user.id,
-            title=request.title,
-            content_type=request.content_type,
-            workflow_type=request.workflow_type,
-            status="running",
-            current_stage="initialization",
-            enable_checkpoints=request.enable_checkpoints,
-            started_at=datetime.utcnow()
-        )
-        
-        db.add(db_workflow)
-        await db.commit()
-        
-        # Setup WebSocket monitoring
-        bridge = WorkflowEventBridge(websocket_manager)
-        await bridge.monitor_camel_workflow(workflow_id, workflow_service)
-        
-        return {"workflow_id": workflow_id, "status": "started"}
-        
-    except Exception as e:
-        logger.error(f"Failed to create workflow: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/workflows/{workflow_id}", response_model=WorkflowStatusResponse)
-async def get_workflow_status(
-    workflow_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Get workflow status and progress."""
-    try:
-        status = await workflow_service.get_workflow_status(workflow_id)
-        if not status:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-            
-        return WorkflowStatusResponse(**status)
-        
-    except Exception as e:
-        logger.error(f"Failed to get workflow status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/workflows/{workflow_id}/pause")
-async def pause_workflow(
-    workflow_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Pause a running workflow."""
-    try:
-        success = await workflow_service.pause_workflow(workflow_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Workflow not found or cannot be paused")
-            
-        return {"status": "paused"}
-        
-    except Exception as e:
-        logger.error(f"Failed to pause workflow: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/workflows/{workflow_id}/cancel")
-async def cancel_workflow(
-    workflow_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Cancel a running workflow."""
-    try:
-        success = await workflow_service.cancel_workflow(workflow_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-            
-        return {"status": "cancelled"}
-        
-    except Exception as e:
-        logger.error(f"Failed to cancel workflow: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/workflows/{workflow_id}/logs")
-async def get_workflow_logs(
-    workflow_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Get detailed workflow execution logs."""
-    try:
-        logs = await workflow_service.get_workflow_logs(workflow_id)
-        return {"logs": logs}
-        
-    except Exception as e:
-        logger.error(f"Failed to get workflow logs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/workflows")
-async def list_workflows(
-    project_id: Optional[str] = None,
-    current_user: User = Depends(get_current_user)
-):
-    """List workflows, optionally filtered by project."""
-    try:
-        workflows = await workflow_service.list_workflows(project_id)
-        return {"workflows": workflows}
-        
-    except Exception as e:
-        logger.error(f"Failed to list workflows: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ================================
-# CHECKPOINT MANAGEMENT ENDPOINTS
-# ================================
-
-@app.get("/api/v1/workflows/{workflow_id}/checkpoints")
-async def list_workflow_checkpoints(
-    workflow_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """List checkpoints for a specific workflow."""
-    try:
-        checkpoints = await checkpoint_manager.list_pending_checkpoints(workflow_id)
-        return {"checkpoints": checkpoints}
-        
-    except Exception as e:
-        logger.error(f"Failed to list checkpoints: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/checkpoints/{checkpoint_id}")
-async def get_checkpoint_details(
-    checkpoint_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Get detailed checkpoint information."""
-    try:
-        checkpoint = await checkpoint_manager.get_checkpoint(checkpoint_id)
-        if not checkpoint:
-            raise HTTPException(status_code=404, detail="Checkpoint not found")
-            
-        return checkpoint
-        
-    except Exception as e:
-        logger.error(f"Failed to get checkpoint: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/checkpoints/{checkpoint_id}/approve")
-async def approve_checkpoint(
-    checkpoint_id: str,
-    approval: CheckpointApprovalModel,
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Approve or reject a checkpoint.
-    Feeds back into CAMEL's HumanLayer system.
-    """
-    try:
-        success = await checkpoint_manager.approve_checkpoint(
-            checkpoint_id=checkpoint_id,
-            user_id=current_user.id,
-            decision=approval.decision,
-            feedback=approval.feedback
-        )
-        
-        if not success:
-            raise HTTPException(status_code=404, detail="Checkpoint not found")
-            
-        return {"status": "approved" if approval.decision.lower() == "approved" else "rejected"}
-        
-    except Exception as e:
-        logger.error(f"Failed to approve checkpoint: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ================================
-# PROJECT MANAGEMENT ENDPOINTS
-# ================================
-
-@app.get("/api/v1/projects")
-async def list_projects(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """List user projects."""
-    try:
-        # Query projects from database
-        # Implementation depends on your specific database setup
-        return {"projects": []}  # Placeholder
-        
-    except Exception as e:
-        logger.error(f"Failed to list projects: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/projects")
-async def create_project(
-    project_data: Dict[str, Any],
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """Create a new project."""
-    try:
-        # Create project in database
-        # Implementation depends on your specific database setup
-        return {"project_id": "new_project_id"}  # Placeholder
-        
-    except Exception as e:
-        logger.error(f"Failed to create project: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ================================
-# WEBSOCKET ENDPOINTS
-# ================================
-
-@app.websocket("/api/v1/workflows/{workflow_id}/live")
-async def workflow_websocket(websocket: WebSocket, workflow_id: str):
-    """
-    WebSocket endpoint for real-time workflow updates.
-    Provides live progress and event updates.
-    """
-    await websocket.accept()
+class WorkflowResponse(BaseModel):
+    id: str
+    workflow_id: str
+    title: str
+    status: str
+    progress_percentage: float
+    current_stage: Optional[str]
+    created_at: datetime
     
-    try:
-        # Add client to WebSocket manager
-        await websocket_manager.add_client(workflow_id, websocket)
-        
-        # Send initial status
-        status = await workflow_service.get_workflow_status(workflow_id)
-        if status:
-            await websocket.send_json({
-                "type": "initial_status",
-                "data": status
-            })
-        
-        # Keep connection alive and handle incoming messages
-        while True:
-            try:
-                data = await websocket.receive_json()
-                # Handle client messages if needed
-                logger.info(f"Received WebSocket message: {data}")
-                
-            except WebSocketDisconnect:
-                break
-                
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-    finally:
-        # Remove client from manager
-        await websocket_manager.remove_client(workflow_id, websocket)
+    class Config:
+        from_attributes = True
 
-# ================================
-# HEALTH CHECK ENDPOINTS
-# ================================
+# Authentication (simplified for development)
+async def get_current_user(db: AsyncSession = Depends(get_db)) -> User:
+    """Get current authenticated user - simplified version for development."""
+    result = await db.execute(select(User).limit(1))
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        # Create a default user for development
+        user = User(
+            id=str(uuid.uuid4()),
+            email="dev@spinutech.com",
+            first_name="Development",
+            last_name="User"
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        logger.info("Created default development user")
+    
+    return user
 
+# Health check
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "services": {
-            "workflow_service": "active" if workflow_service else "inactive",
-            "checkpoint_manager": "active" if checkpoint_manager else "inactive",
-            "websocket_manager": "active" if websocket_manager else "inactive"
+        "timestamp": datetime.now().isoformat(),
+        "spinscribe_available": SPINSCRIBE_AVAILABLE,
+        "version": "1.0.0"
+    }
+
+# System status
+@app.get("/api/v1/system/status")
+async def system_status():
+    """Get system status and statistics."""
+    return {
+        "status": "operational",
+        "spinscribe_available": SPINSCRIBE_AVAILABLE,
+        "websocket_connections": websocket_manager.get_stats(),
+        "timestamp": datetime.now().isoformat()
+    }
+
+# Project Management
+@app.get("/api/v1/projects", response_model=List[ProjectResponse])
+async def list_projects(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """List user projects."""
+    result = await db.execute(
+        select(Project).where(Project.created_by == current_user.id)
+        .order_by(Project.created_at.desc())
+    )
+    projects = result.scalars().all()
+    return projects
+
+@app.post("/api/v1/projects", response_model=ProjectResponse)
+async def create_project(
+    project_data: ProjectCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Create new project."""
+    project = Project(
+        id=str(uuid.uuid4()),
+        name=project_data.name,
+        description=project_data.description,
+        client_name=project_data.client_name,
+        created_by=current_user.id
+    )
+    
+    db.add(project)
+    await db.commit()
+    await db.refresh(project)
+    
+    logger.info(f"Created project: {project.name} (ID: {project.id})")
+    return project
+
+@app.get("/api/v1/projects/{project_id}", response_model=ProjectResponse)
+async def get_project(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get project details."""
+    result = await db.execute(
+        select(Project).where(
+            Project.id == project_id,
+            Project.created_by == current_user.id
+        )
+    )
+    project = result.scalar_one_or_none()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    return project
+
+@app.put("/api/v1/projects/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    project_id: str,
+    project_data: ProjectCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Update project."""
+    result = await db.execute(
+        select(Project).where(
+            Project.id == project_id,
+            Project.created_by == current_user.id
+        )
+    )
+    project = result.scalar_one_or_none()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    project.name = project_data.name
+    project.description = project_data.description
+    project.client_name = project_data.client_name
+    project.updated_at = datetime.now()
+    
+    await db.commit()
+    await db.refresh(project)
+    
+    return project
+
+# Document Management
+@app.post("/api/v1/projects/{project_id}/documents")
+async def upload_document(
+    project_id: str,
+    file: UploadFile = File(...),
+    document_type: str = Form("general"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """Upload document to project."""
+    # Verify project exists and user has access
+    result = await db.execute(
+        select(Project).where(
+            Project.id == project_id,
+            Project.created_by == current_user.id
+        )
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Validate file
+    if file.size > settings.MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large")
+    
+    # Save file
+    upload_dir = Path(settings.UPLOAD_DIR) / project_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_id = str(uuid.uuid4())
+    file_extension = Path(file.filename).suffix if file.filename else ""
+    file_path = upload_dir / f"{file_id}{file_extension}"
+    
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+    
+    # Create document record
+    document = Document(
+        id=file_id,
+        project_id=project_id,
+        filename=f"{file_id}{file_extension}",
+        original_filename=file.filename or "unknown",
+        file_size=len(content),
+        file_type=file.content_type or "application/octet-stream",
+        file_path=str(file_path),
+        document_type=document_type,
+        uploaded_by=current_user.id,
+        processing_status="pending"
+    )
+    
+    db.add(document)
+    await db.commit()
+    await db.refresh(document)
+    
+    # Process document with Spinscribe in background
+    if SPINSCRIBE_AVAILABLE and document_processor:
+        background_tasks.add_task(process_document_background, document.id, file_path, project_id, db)
+    
+    logger.info(f"Uploaded document: {file.filename} to project {project_id}")
+    
+    return {
+        "document_id": document.id,
+        "filename": document.original_filename,
+        "status": document.processing_status,
+        "file_size": document.file_size,
+        "document_type": document.document_type
+    }
+
+async def process_document_background(document_id: str, file_path: Path, project_id: str, db: AsyncSession):
+    """Background task to process document with Spinscribe."""
+    try:
+        # Get fresh database session for background task
+        async with AsyncSession(engine) as session:
+            result = await session.execute(select(Document).where(Document.id == document_id))
+            document = result.scalar_one_or_none()
+            
+            if not document:
+                return
+            
+            document.processing_status = "processing"
+            await session.commit()
+            
+            # Process with Spinscribe
+            if document_processor:
+                await document_processor.process_document_async(file_path, project_id, document_id)
+                document.processing_status = "completed"
+                document.processed_at = datetime.now()
+            else:
+                document.processing_status = "failed"
+            
+            await session.commit()
+            
+    except Exception as e:
+        logger.error(f"Document processing failed for {document_id}: {e}")
+        async with AsyncSession(engine) as session:
+            result = await session.execute(select(Document).where(Document.id == document_id))
+            document = result.scalar_one_or_none()
+            if document:
+                document.processing_status = "failed"
+                await session.commit()
+
+@app.get("/api/v1/projects/{project_id}/documents")
+async def list_documents(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """List project documents."""
+    # Verify project access
+    result = await db.execute(
+        select(Project).where(
+            Project.id == project_id,
+            Project.created_by == current_user.id
+        )
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Get documents
+    result = await db.execute(
+        select(Document).where(Document.project_id == project_id)
+        .order_by(Document.created_at.desc())
+    )
+    documents = result.scalars().all()
+    
+    return [
+        {
+            "id": doc.id,
+            "filename": doc.original_filename,
+            "file_type": doc.file_type,
+            "file_size": doc.file_size,
+            "document_type": doc.document_type,
+            "processing_status": doc.processing_status,
+            "created_at": doc.created_at,
+            "processed_at": doc.processed_at
+        }
+        for doc in documents
+    ]
+
+# Chat Management
+@app.post("/api/v1/projects/{project_id}/chats")
+async def create_chat(
+    project_id: str,
+    chat_data: ChatCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Create new chat instance."""
+    # Verify project access
+    result = await db.execute(
+        select(Project).where(
+            Project.id == project_id,
+            Project.created_by == current_user.id
+        )
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    chat = ChatInstance(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        name=chat_data.name,
+        description=chat_data.description,
+        chat_type=chat_data.chat_type,
+        created_by=current_user.id
+    )
+    
+    db.add(chat)
+    await db.commit()
+    await db.refresh(chat)
+    
+    logger.info(f"Created chat: {chat.name} in project {project_id}")
+    
+    return {
+        "id": chat.id,
+        "name": chat.name,
+        "description": chat.description,
+        "chat_type": chat.chat_type,
+        "is_active": chat.is_active,
+        "created_at": chat.created_at
+    }
+
+@app.get("/api/v1/projects/{project_id}/chats")
+async def list_chats(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """List project chats."""
+    result = await db.execute(
+        select(ChatInstance).where(
+            ChatInstance.project_id == project_id,
+            ChatInstance.created_by == current_user.id
+        ).order_by(ChatInstance.created_at.desc())
+    )
+    chats = result.scalars().all()
+    
+    return [
+        {
+            "id": chat.id,
+            "name": chat.name,
+            "description": chat.description,
+            "chat_type": chat.chat_type,
+            "is_active": chat.is_active,
+            "created_at": chat.created_at,
+            "last_activity": chat.last_activity
+        }
+        for chat in chats
+    ]
+
+@app.post("/api/v1/chats/{chat_id}/messages")
+async def send_message(
+    chat_id: str,
+    message_data: MessageCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Send message to chat."""
+    # Verify chat access
+    result = await db.execute(
+        select(ChatInstance).where(ChatInstance.id == chat_id)
+    )
+    chat = result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    
+    message = ChatMessage(
+        id=str(uuid.uuid4()),
+        chat_instance_id=chat_id,
+        sender_id=current_user.id,
+        sender_type="user",
+        message_content=message_data.content,
+        message_type=message_data.message_type
+    )
+    
+    db.add(message)
+    
+    # Update chat last activity
+    chat.last_activity = datetime.now()
+    
+    await db.commit()
+    await db.refresh(message)
+    
+    # Broadcast to WebSocket clients
+    await websocket_manager.broadcast_to_chat(chat_id, {
+        "type": "new_message",
+        "message": {
+            "id": message.id,
+            "content": message.message_content,
+            "sender_type": message.sender_type,
+            "sender_id": message.sender_id,
+            "created_at": message.created_at.isoformat()
+        }
+    })
+    
+    return {
+        "message_id": message.id,
+        "status": "sent",
+        "created_at": message.created_at
+    }
+
+@app.get("/api/v1/chats/{chat_id}/messages")
+async def get_messages(
+    chat_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get chat messages."""
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.chat_instance_id == chat_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    messages = result.scalars().all()
+    
+    return [
+        {
+            "id": msg.id,
+            "content": msg.message_content,
+            "sender_type": msg.sender_type,
+            "sender_id": msg.sender_id,
+            "agent_type": msg.agent_type,
+            "message_type": msg.message_type,
+            "created_at": msg.created_at,
+            "metadata": msg.metadata
+        }
+        for msg in reversed(messages)
+    ]
+
+# Workflow Management
+@app.post("/api/v1/workflows", response_model=WorkflowResponse)
+async def create_workflow(
+    workflow_data: WorkflowCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """Create and start new workflow."""
+    if not SPINSCRIBE_AVAILABLE:
+        raise HTTPException(
+            status_code=503, 
+            detail="Spinscribe services not available"
+        )
+    
+    # Verify project access
+    result = await db.execute(
+        select(Project).where(
+            Project.id == workflow_data.project_id,
+            Project.created_by == current_user.id
+        )
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    workflow_id = f"workflow_{int(datetime.now().timestamp())}_{workflow_data.project_id}"
+    
+    workflow = WorkflowExecution(
+        id=str(uuid.uuid4()),
+        workflow_id=workflow_id,
+        project_id=workflow_data.project_id,
+        user_id=current_user.id,
+        title=workflow_data.title,
+        content_type=workflow_data.content_type,
+        workflow_type="enhanced",
+        status="pending",
+        current_stage="initialization",
+        timeout_seconds=workflow_data.timeout_seconds,
+        enable_human_interaction=workflow_data.enable_human_interaction,
+        enable_checkpoints=workflow_data.enable_checkpoints
+    )
+    
+    db.add(workflow)
+    await db.commit()
+    await db.refresh(workflow)
+    
+    # Start workflow in background
+    background_tasks.add_task(
+        run_workflow_background, workflow_id, workflow_data, current_user.id
+    )
+    
+    logger.info(f"Created workflow: {workflow.title} (ID: {workflow_id})")
+    
+    return WorkflowResponse(
+        id=workflow.id,
+        workflow_id=workflow.workflow_id,
+        title=workflow.title,
+        status=workflow.status,
+        progress_percentage=workflow.progress_percentage,
+        current_stage=workflow.current_stage,
+        created_at=workflow.created_at
+    )
+
+async def run_workflow_background(workflow_id: str, workflow_data: WorkflowCreate, user_id: str):
+    """Run Spinscribe workflow in background."""
+    async with AsyncSession(engine) as db:
+        try:
+            # Update status to running
+            result = await db.execute(
+                select(WorkflowExecution).where(WorkflowExecution.workflow_id == workflow_id)
+            )
+            workflow = result.scalar_one_or_none()
+            if not workflow:
+                return
+            
+            workflow.status = "running"
+            workflow.started_at = datetime.now()
+            workflow.current_stage = "starting"
+            await db.commit()
+            
+            # Notify via WebSocket
+            await websocket_manager.notify_workflow_progress(
+                workflow_id, 10.0, "starting", {"message": "Workflow started"}
+            )
+            
+            # Run the enhanced content task
+            result = await run_enhanced_content_task(
+                title=workflow_data.title,
+                content_type=workflow_data.content_type,
+                project_id=workflow_data.project_id,
+                timeout_seconds=workflow_data.timeout_seconds,
+                enable_human_interaction=workflow_data.enable_human_interaction,
+                enable_checkpoints=workflow_data.enable_checkpoints
+            )
+            
+            # Update workflow with results
+            workflow.status = result.get('status', 'completed')
+            workflow.final_content = result.get('final_content')
+            workflow.progress_percentage = 100.0
+            workflow.completed_at = datetime.now()
+            workflow.current_stage = "completed"
+            
+            if 'error' in result:
+                workflow.error_details = {"error": result['error']}
+                workflow.status = "failed"
+            
+            await db.commit()
+            
+            # Notify completion
+            if workflow.status == "completed":
+                await websocket_manager.notify_workflow_complete(workflow_id, result)
+            else:
+                await websocket_manager.notify_workflow_error(
+                    workflow_id, result.get('error', 'Unknown error')
+                )
+            
+            logger.info(f"Workflow {workflow_id} completed with status: {workflow.status}")
+            
+        except Exception as e:
+            logger.error(f"Workflow {workflow_id} failed: {e}")
+            
+            # Update workflow status
+            result = await db.execute(
+                select(WorkflowExecution).where(WorkflowExecution.workflow_id == workflow_id)
+            )
+            workflow = result.scalar_one_or_none()
+            if workflow:
+                workflow.status = "failed"
+                workflow.error_details = {"error": str(e)}
+                workflow.current_stage = "failed"
+                await db.commit()
+                
+                await websocket_manager.notify_workflow_error(workflow_id, str(e))
+
+@app.get("/api/v1/workflows/{workflow_id}")
+async def get_workflow_status(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get workflow status."""
+    result = await db.execute(
+        select(WorkflowExecution).where(
+            WorkflowExecution.workflow_id == workflow_id,
+            WorkflowExecution.user_id == current_user.id
+        )
+    )
+    workflow = result.scalar_one_or_none()
+    
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    return {
+        "workflow_id": workflow.workflow_id,
+        "title": workflow.title,
+        "status": workflow.status,
+        "progress_percentage": workflow.progress_percentage,
+        "current_stage": workflow.current_stage,
+        "started_at": workflow.started_at,
+        "completed_at": workflow.completed_at,
+        "final_content": workflow.final_content,
+        "error_details": workflow.error_details,
+        "enable_checkpoints": workflow.enable_checkpoints,
+        "enable_human_interaction": workflow.enable_human_interaction
+    }
+
+@app.get("/api/v1/workflows")
+async def list_workflows(
+    project_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """List user workflows."""
+    query = select(WorkflowExecution).where(WorkflowExecution.user_id == current_user.id)
+    
+    if project_id:
+        query = query.where(WorkflowExecution.project_id == project_id)
+    
+    result = await db.execute(query.order_by(WorkflowExecution.created_at.desc()))
+    workflows = result.scalars().all()
+    
+    return [
+        {
+            "workflow_id": wf.workflow_id,
+            "title": wf.title,
+            "content_type": wf.content_type,
+            "status": wf.status,
+            "progress_percentage": wf.progress_percentage,
+            "current_stage": wf.current_stage,
+            "created_at": wf.created_at,
+            "started_at": wf.started_at,
+            "completed_at": wf.completed_at
+        }
+        for wf in workflows
+    ]
+
+@app.post("/api/v1/workflows/{workflow_id}/cancel")
+async def cancel_workflow(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Cancel running workflow."""
+    result = await db.execute(
+        select(WorkflowExecution).where(
+            WorkflowExecution.workflow_id == workflow_id,
+            WorkflowExecution.user_id == current_user.id
+        )
+    )
+    workflow = result.scalar_one_or_none()
+    
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    
+    if workflow.status not in ["pending", "running"]:
+        raise HTTPException(status_code=400, detail="Workflow cannot be cancelled")
+    
+    workflow.status = "cancelled"
+    workflow.completed_at = datetime.now()
+    workflow.current_stage = "cancelled"
+    
+    await db.commit()
+    
+    await websocket_manager.broadcast_to_workflow(workflow_id, {
+        "type": "workflow_cancelled",
+        "message": "Workflow has been cancelled"
+    })
+    
+    return {"message": "Workflow cancelled", "status": "cancelled"}
+
+# Content Drafts
+@app.get("/api/v1/projects/{project_id}/drafts")
+async def list_content_drafts(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """List content drafts for project."""
+    result = await db.execute(
+        select(ContentDraft).where(
+            ContentDraft.project_id == project_id,
+            ContentDraft.created_by == current_user.id
+        ).order_by(ContentDraft.created_at.desc())
+    )
+    drafts = result.scalars().all()
+    
+    return [
+        {
+            "id": draft.id,
+            "title": draft.title,
+            "content_type": draft.content_type,
+            "status": draft.status,
+            "draft_version": draft.draft_version,
+            "word_count": draft.word_count,
+            "created_at": draft.created_at,
+            "updated_at": draft.updated_at
+        }
+        for draft in drafts
+    ]
+
+@app.get("/api/v1/drafts/{draft_id}")
+async def get_content_draft(
+    draft_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get content draft details."""
+    result = await db.execute(
+        select(ContentDraft).where(
+            ContentDraft.id == draft_id,
+            ContentDraft.created_by == current_user.id
+        )
+    )
+    draft = result.scalar_one_or_none()
+    
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    
+    return {
+        "id": draft.id,
+        "title": draft.title,
+        "content_type": draft.content_type,
+        "draft_content": draft.draft_content,
+        "status": draft.status,
+        "draft_version": draft.draft_version,
+        "metadata": draft.metadata,
+        "word_count": draft.word_count,
+        "character_count": draft.character_count,
+        "created_at": draft.created_at,
+        "updated_at": draft.updated_at
+    }
+
+# WebSocket endpoints
+@app.websocket("/api/v1/ws/chat/{chat_id}")
+async def websocket_chat(websocket: WebSocket, chat_id: str):
+    """WebSocket endpoint for real-time chat updates."""
+    await websocket_manager.connect(websocket, chat_id, "chat")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                message_data = json.loads(data)
+                await websocket_manager.handle_message(websocket, message_data)
+            except json.JSONDecodeError:
+                await websocket_manager.connection_manager.send_personal_message({
+                    "type": "error",
+                    "message": "Invalid JSON format"
+                }, websocket)
+    except WebSocketDisconnect:
+        websocket_manager.disconnect(websocket)
+
+@app.websocket("/api/v1/ws/workflow/{workflow_id}")
+async def websocket_workflow(websocket: WebSocket, workflow_id: str):
+    """WebSocket endpoint for workflow progress updates."""
+    await websocket_manager.connect(websocket, workflow_id, "workflow")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                message_data = json.loads(data)
+                await websocket_manager.handle_message(websocket, message_data)
+            except json.JSONDecodeError:
+                await websocket_manager.connection_manager.send_personal_message({
+                    "type": "error",
+                    "message": "Invalid JSON format"
+                }, websocket)
+    except WebSocketDisconnect:
+        websocket_manager.disconnect(websocket)
+
+# Statistics and Analytics
+@app.get("/api/v1/analytics/overview")
+async def get_analytics_overview(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get analytics overview for user."""
+    # Get counts
+    projects_count = await db.scalar(
+        select(func.count(Project.id)).where(Project.created_by == current_user.id)
+    )
+    
+    workflows_count = await db.scalar(
+        select(func.count(WorkflowExecution.id)).where(WorkflowExecution.user_id == current_user.id)
+    )
+    
+    documents_count = await db.scalar(
+        select(func.count(Document.id))
+        .join(Project, Document.project_id == Project.id)
+        .where(Project.created_by == current_user.id)
+    )
+    
+    chats_count = await db.scalar(
+        select(func.count(ChatInstance.id))
+        .join(Project, ChatInstance.project_id == Project.id)
+        .where(Project.created_by == current_user.id)
+    )
+    
+    # Get recent workflows
+    recent_workflows = await db.execute(
+        select(WorkflowExecution)
+        .where(WorkflowExecution.user_id == current_user.id)
+        .order_by(WorkflowExecution.created_at.desc())
+        .limit(5)
+    )
+    
+    return {
+        "totals": {
+            "projects": projects_count or 0,
+            "workflows": workflows_count or 0,
+            "documents": documents_count or 0,
+            "chats": chats_count or 0
+        },
+        "recent_workflows": [
+            {
+                "workflow_id": wf.workflow_id,
+                "title": wf.title,
+                "status": wf.status,
+                "created_at": wf.created_at
+            }
+            for wf in recent_workflows.scalars()
+        ],
+        "system_status": {
+            "spinscribe_available": SPINSCRIBE_AVAILABLE,
+            "websocket_connections": websocket_manager.get_stats()
         }
     }
 
-@app.get("/api/v1/system/status")
-async def system_status():
-    """Get system status and metrics."""
-    try:
-        active_workflows = len(workflow_service.active_workflows) if workflow_service else 0
-        pending_checkpoints = len(checkpoint_manager.pending_checkpoints) if checkpoint_manager else 0
+# Error handlers
+@app.exception_handler(404)
+async def not_found_handler(request, exc):
+    return {"error": "Not found", "detail": "The requested resource was not found"}
+
+@app.exception_handler(500)
+async def internal_error_handler(request, exc):
+    logger.error(f"Internal server error: {exc}")
+    return {"error": "Internal server error", "detail": "An unexpected error occurred"}
+
+# Development endpoints (remove in production)
+if settings.DEBUG:
+    @app.get("/api/v1/dev/reset-db")
+    async def reset_database():
+        """Reset database for development."""
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+        return {"message": "Database reset successfully"}
+    
+    @app.get("/api/v1/dev/sample-data")
+    async def create_sample_data(db: AsyncSession = Depends(get_db)):
+        """Create sample data for development."""
+        # Create sample user
+        user = User(
+            id="sample-user",
+            email="sample@spinutech.com",
+            first_name="Sample",
+            last_name="User"
+        )
+        db.add(user)
         
-        return {
-            "active_workflows": active_workflows,
-            "pending_checkpoints": pending_checkpoints,
-            "websocket_connections": websocket_manager.get_connection_count() if websocket_manager else 0,
-            "uptime": "N/A"  # Implement uptime tracking
-        }
+        # Create sample project
+        project = Project(
+            id="sample-project",
+            name="Sample Project",
+            description="A sample project for testing",
+            client_name="Sample Client",
+            created_by="sample-user"
+        )
+        db.add(project)
         
-    except Exception as e:
-        logger.error(f"Failed to get system status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        await db.commit()
+        return {"message": "Sample data created successfully"}
 
 if __name__ == "__main__":
     import uvicorn
@@ -422,6 +1032,6 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
-        log_level="info"
+        reload=settings.DEBUG,
+        log_level=settings.LOG_LEVEL.lower()
     )

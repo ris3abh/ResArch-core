@@ -1,398 +1,780 @@
-# backend/services/websocket_manager.py
+# File: backend/services/websocket_manager.py
 """
-WebSocket Manager for real-time workflow updates
+WebSocket manager for real-time updates in Spinscribe
+Handles live chat, workflow progress, and system notifications
 """
 
-import logging
 import json
-from typing import Dict, List, Set, Any
-from fastapi import WebSocket
+import logging
 import asyncio
+from typing import Dict, List, Set, Optional
+from fastapi import WebSocket, WebSocketDisconnect
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-class WebSocketManager:
-    """Manages WebSocket connections for real-time updates."""
+class ConnectionManager:
+    """Manages WebSocket connections for different contexts."""
     
     def __init__(self):
-        # workflow_id -> list of websocket connections
-        self.workflow_connections: Dict[str, List[WebSocket]] = {}
-        # websocket -> workflow_id mapping for cleanup
-        self.connection_workflow_map: Dict[WebSocket, str] = {}
+        # Active connections by type
+        self.chat_connections: Dict[str, Set[WebSocket]] = {}
+        self.workflow_connections: Dict[str, Set[WebSocket]] = {}
+        self.user_connections: Dict[str, Set[WebSocket]] = {}
+        self.global_connections: Set[WebSocket] = set()
         
-    async def add_client(self, workflow_id: str, websocket: WebSocket):
-        """Add a client WebSocket connection for a workflow."""
-        if workflow_id not in self.workflow_connections:
-            self.workflow_connections[workflow_id] = []
+        # Connection metadata
+        self.connection_info: Dict[WebSocket, Dict] = {}
+    
+    async def connect(self, websocket: WebSocket, connection_type: str, resource_id: Optional[str] = None, user_id: Optional[str] = None):
+        """Connect a WebSocket client."""
+        await websocket.accept()
+        
+        # Store connection info
+        self.connection_info[websocket] = {
+            "type": connection_type,
+            "resource_id": resource_id,
+            "user_id": user_id,
+            "connected_at": datetime.now()
+        }
+        
+        # Add to appropriate connection pools
+        if connection_type == "chat" and resource_id:
+            if resource_id not in self.chat_connections:
+                self.chat_connections[resource_id] = set()
+            self.chat_connections[resource_id].add(websocket)
             
-        self.workflow_connections[workflow_id].append(websocket)
-        self.connection_workflow_map[websocket] = workflow_id
-        
-        logger.info(f"✅ WebSocket client added for workflow {workflow_id}")
-        
-    async def remove_client(self, workflow_id: str, websocket: WebSocket):
-        """Remove a client WebSocket connection."""
-        if workflow_id in self.workflow_connections:
-            if websocket in self.workflow_connections[workflow_id]:
-                self.workflow_connections[workflow_id].remove(websocket)
-                
-            # Clean up empty workflow connection lists
-            if not self.workflow_connections[workflow_id]:
-                del self.workflow_connections[workflow_id]
-                
-        if websocket in self.connection_workflow_map:
-            del self.connection_workflow_map[websocket]
+        elif connection_type == "workflow" and resource_id:
+            if resource_id not in self.workflow_connections:
+                self.workflow_connections[resource_id] = set()
+            self.workflow_connections[resource_id].add(websocket)
             
-        logger.info(f"🔌 WebSocket client removed for workflow {workflow_id}")
+        elif connection_type == "user" and user_id:
+            if user_id not in self.user_connections:
+                self.user_connections[user_id] = set()
+            self.user_connections[user_id].add(websocket)
+            
+        else:
+            self.global_connections.add(websocket)
         
-    async def send_to_workflow(self, workflow_id: str, message: Dict[str, Any]):
-        """Send a message to all clients connected to a specific workflow."""
+        logger.info(f"WebSocket connected: {connection_type} - {resource_id or user_id or 'global'}")
+    
+    def disconnect(self, websocket: WebSocket):
+        """Disconnect a WebSocket client."""
+        if websocket not in self.connection_info:
+            return
+        
+        info = self.connection_info[websocket]
+        connection_type = info["type"]
+        resource_id = info["resource_id"]
+        user_id = info["user_id"]
+        
+        # Remove from appropriate pools
+        if connection_type == "chat" and resource_id:
+            if resource_id in self.chat_connections:
+                self.chat_connections[resource_id].discard(websocket)
+                if not self.chat_connections[resource_id]:
+                    del self.chat_connections[resource_id]
+                    
+        elif connection_type == "workflow" and resource_id:
+            if resource_id in self.workflow_connections:
+                self.workflow_connections[resource_id].discard(websocket)
+                if not self.workflow_connections[resource_id]:
+                    del self.workflow_connections[resource_id]
+                    
+        elif connection_type == "user" and user_id:
+            if user_id in self.user_connections:
+                self.user_connections[user_id].discard(websocket)
+                if not self.user_connections[user_id]:
+                    del self.user_connections[user_id]
+        
+        self.global_connections.discard(websocket)
+        
+        # Clean up metadata
+        del self.connection_info[websocket]
+        
+        logger.info(f"WebSocket disconnected: {connection_type} - {resource_id or user_id or 'global'}")
+    
+    async def send_personal_message(self, message: dict, websocket: WebSocket):
+        """Send message to specific websocket."""
+        try:
+            await websocket.send_text(json.dumps(message))
+        except Exception as e:
+            logger.error(f"Error sending personal message: {e}")
+            self.disconnect(websocket)
+    
+    async def broadcast_to_chat(self, chat_id: str, message: dict):
+        """Broadcast message to all clients in a chat."""
+        if chat_id not in self.chat_connections:
+            return
+        
+        message_data = {
+            "timestamp": datetime.now().isoformat(),
+            "chat_id": chat_id,
+            **message
+        }
+        
+        disconnected = set()
+        for websocket in self.chat_connections[chat_id]:
+            try:
+                await websocket.send_text(json.dumps(message_data))
+            except Exception as e:
+                logger.error(f"Error broadcasting to chat {chat_id}: {e}")
+                disconnected.add(websocket)
+        
+        # Clean up disconnected clients
+        for websocket in disconnected:
+            self.disconnect(websocket)
+    
+    async def broadcast_to_workflow(self, workflow_id: str, message: dict):
+        """Broadcast workflow updates to all listening clients."""
         if workflow_id not in self.workflow_connections:
             return
-            
-        # Get list of connections (copy to avoid modification during iteration)
-        connections = list(self.workflow_connections[workflow_id])
         
-        # Send to all connections
-        for websocket in connections:
+        message_data = {
+            "timestamp": datetime.now().isoformat(),
+            "workflow_id": workflow_id,
+            **message
+        }
+        
+        disconnected = set()
+        for websocket in self.workflow_connections[workflow_id]:
             try:
-                await websocket.send_json(message)
+                await websocket.send_text(json.dumps(message_data))
             except Exception as e:
-                logger.error(f"Failed to send WebSocket message: {e}")
-                # Remove failed connection
-                await self.remove_client(workflow_id, websocket)
-                
-    async def broadcast_to_all(self, message: Dict[str, Any]):
-        """Broadcast a message to all connected clients."""
-        for workflow_id in list(self.workflow_connections.keys()):
-            await self.send_to_workflow(workflow_id, message)
-            
-    def get_connection_count(self) -> int:
-        """Get total number of active connections."""
-        return sum(len(connections) for connections in self.workflow_connections.values())
+                logger.error(f"Error broadcasting to workflow {workflow_id}: {e}")
+                disconnected.add(websocket)
         
-    def get_workflow_connection_count(self, workflow_id: str) -> int:
-        """Get number of connections for a specific workflow."""
-        return len(self.workflow_connections.get(workflow_id, []))
+        # Clean up disconnected clients
+        for websocket in disconnected:
+            self.disconnect(websocket)
+    
+    async def broadcast_to_user(self, user_id: str, message: dict):
+        """Send message to all connections for a specific user."""
+        if user_id not in self.user_connections:
+            return
+        
+        message_data = {
+            "timestamp": datetime.now().isoformat(),
+            "user_id": user_id,
+            **message
+        }
+        
+        disconnected = set()
+        for websocket in self.user_connections[user_id]:
+            try:
+                await websocket.send_text(json.dumps(message_data))
+            except Exception as e:
+                logger.error(f"Error broadcasting to user {user_id}: {e}")
+                disconnected.add(websocket)
+        
+        # Clean up disconnected clients
+        for websocket in disconnected:
+            self.disconnect(websocket)
+    
+    async def broadcast_global(self, message: dict):
+        """Broadcast message to all connected clients."""
+        message_data = {
+            "timestamp": datetime.now().isoformat(),
+            "type": "global",
+            **message
+        }
+        
+        disconnected = set()
+        for websocket in self.global_connections:
+            try:
+                await websocket.send_text(json.dumps(message_data))
+            except Exception as e:
+                logger.error(f"Error in global broadcast: {e}")
+                disconnected.add(websocket)
+        
+        # Clean up disconnected clients
+        for websocket in disconnected:
+            self.disconnect(websocket)
+    
+    def get_connection_stats(self) -> dict:
+        """Get statistics about current connections."""
+        return {
+            "total_connections": len(self.connection_info),
+            "chat_rooms": len(self.chat_connections),
+            "active_workflows": len(self.workflow_connections),
+            "connected_users": len(self.user_connections),
+            "global_connections": len(self.global_connections),
+            "connections_by_type": {
+                "chat": sum(len(connections) for connections in self.chat_connections.values()),
+                "workflow": sum(len(connections) for connections in self.workflow_connections.values()),
+                "user": sum(len(connections) for connections in self.user_connections.values()),
+                "global": len(self.global_connections)
+            }
+        }
 
-# backend/database/models.py
-"""
-Enhanced database models for Spinscribe web application
-Extends existing schema with web-specific features
-"""
 
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text, JSON, ForeignKey, Float, Index
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
-from datetime import datetime
+class WebSocketManager:
+    """Main WebSocket manager for Spinscribe application."""
+    
+    def __init__(self):
+        self.connection_manager = ConnectionManager()
+        self.message_handlers = {}
+        self.setup_message_handlers()
+    
+    def setup_message_handlers(self):
+        """Setup handlers for different message types."""
+        self.message_handlers = {
+            "ping": self.handle_ping,
+            "join_chat": self.handle_join_chat,
+            "leave_chat": self.handle_leave_chat,
+            "user_typing": self.handle_user_typing,
+            "workflow_subscribe": self.handle_workflow_subscribe,
+            "workflow_unsubscribe": self.handle_workflow_unsubscribe,
+        }
+    
+    async def connect(self, websocket: WebSocket, resource_id: str, connection_type: str = "chat", user_id: Optional[str] = None):
+        """Connect a WebSocket client."""
+        await self.connection_manager.connect(websocket, connection_type, resource_id, user_id)
+        
+        # Send welcome message
+        await self.connection_manager.send_personal_message({
+            "type": "connection_established",
+            "connection_type": connection_type,
+            "resource_id": resource_id,
+            "message": f"Connected to {connection_type}: {resource_id}"
+        }, websocket)
+    
+    def disconnect(self, websocket: WebSocket):
+        """Disconnect a WebSocket client."""
+        self.connection_manager.disconnect(websocket)
+    
+    async def handle_message(self, websocket: WebSocket, message_data: dict):
+        """Handle incoming WebSocket message."""
+        message_type = message_data.get("type")
+        
+        if message_type in self.message_handlers:
+            await self.message_handlers[message_type](websocket, message_data)
+        else:
+            logger.warning(f"Unknown message type: {message_type}")
+    
+    async def handle_ping(self, websocket: WebSocket, message_data: dict):
+        """Handle ping messages."""
+        await self.connection_manager.send_personal_message({
+            "type": "pong",
+            "timestamp": datetime.now().isoformat()
+        }, websocket)
+    
+    async def handle_join_chat(self, websocket: WebSocket, message_data: dict):
+        """Handle join chat requests."""
+        chat_id = message_data.get("chat_id")
+        if chat_id:
+            # Update connection to be associated with this chat
+            info = self.connection_manager.connection_info.get(websocket, {})
+            info["resource_id"] = chat_id
+            
+            await self.broadcast_to_chat(chat_id, {
+                "type": "user_joined",
+                "user_id": info.get("user_id"),
+                "message": "User joined the chat"
+            })
+    
+    async def handle_leave_chat(self, websocket: WebSocket, message_data: dict):
+        """Handle leave chat requests."""
+        chat_id = message_data.get("chat_id")
+        if chat_id:
+            info = self.connection_manager.connection_info.get(websocket, {})
+            
+            await self.broadcast_to_chat(chat_id, {
+                "type": "user_left",
+                "user_id": info.get("user_id"),
+                "message": "User left the chat"
+            })
+    
+    async def handle_user_typing(self, websocket: WebSocket, message_data: dict):
+        """Handle user typing indicators."""
+        chat_id = message_data.get("chat_id")
+        is_typing = message_data.get("is_typing", False)
+        
+        if chat_id:
+            info = self.connection_manager.connection_info.get(websocket, {})
+            
+            await self.broadcast_to_chat(chat_id, {
+                "type": "user_typing",
+                "user_id": info.get("user_id"),
+                "is_typing": is_typing
+            })
+    
+    async def handle_workflow_subscribe(self, websocket: WebSocket, message_data: dict):
+        """Handle workflow subscription requests."""
+        workflow_id = message_data.get("workflow_id")
+        if workflow_id:
+            # Update connection to listen to workflow updates
+            info = self.connection_manager.connection_info.get(websocket, {})
+            info["resource_id"] = workflow_id
+            info["type"] = "workflow"
+            
+            await self.connection_manager.send_personal_message({
+                "type": "workflow_subscribed",
+                "workflow_id": workflow_id,
+                "message": f"Subscribed to workflow updates: {workflow_id}"
+            }, websocket)
+    
+    async def handle_workflow_unsubscribe(self, websocket: WebSocket, message_data: dict):
+        """Handle workflow unsubscription requests."""
+        await self.connection_manager.send_personal_message({
+            "type": "workflow_unsubscribed",
+            "message": "Unsubscribed from workflow updates"
+        }, websocket)
+    
+    # Public interface methods
+    async def broadcast_to_chat(self, chat_id: str, message: dict):
+        """Broadcast message to chat."""
+        await self.connection_manager.broadcast_to_chat(chat_id, message)
+    
+    async def broadcast_to_workflow(self, workflow_id: str, message: dict):
+        """Broadcast workflow update."""
+        await self.connection_manager.broadcast_to_workflow(workflow_id, message)
+    
+    async def broadcast_to_user(self, user_id: str, message: dict):
+        """Send message to user."""
+        await self.connection_manager.broadcast_to_user(user_id, message)
+    
+    async def broadcast_global(self, message: dict):
+        """Broadcast global message."""
+        await self.connection_manager.broadcast_global(message)
+    
+    # Spinscribe-specific helpers
+    async def notify_workflow_progress(self, workflow_id: str, progress: float, stage: str, details: Optional[dict] = None):
+        """Send workflow progress update."""
+        await self.broadcast_to_workflow(workflow_id, {
+            "type": "workflow_progress",
+            "progress": progress,
+            "stage": stage,
+            "details": details or {}
+        })
+    
+    async def notify_workflow_checkpoint(self, workflow_id: str, checkpoint_data: dict):
+        """Send workflow checkpoint notification."""
+        await self.broadcast_to_workflow(workflow_id, {
+            "type": "workflow_checkpoint",
+            "checkpoint": checkpoint_data
+        })
+    
+    async def notify_workflow_complete(self, workflow_id: str, result: dict):
+        """Send workflow completion notification."""
+        await self.broadcast_to_workflow(workflow_id, {
+            "type": "workflow_complete",
+            "result": result
+        })
+    
+    async def notify_workflow_error(self, workflow_id: str, error: str, details: Optional[dict] = None):
+        """Send workflow error notification."""
+        await self.broadcast_to_workflow(workflow_id, {
+            "type": "workflow_error",
+            "error": error,
+            "details": details or {}
+        })
+    
+    async def notify_agent_message(self, chat_id: str, agent_type: str, message: str, metadata: Optional[dict] = None):
+        """Send agent message to chat."""
+        await self.broadcast_to_chat(chat_id, {
+            "type": "agent_message",
+            "agent_type": agent_type,
+            "message": message,
+            "metadata": metadata or {}
+        })
+    
+    async def notify_system_status(self, status: str, message: str):
+        """Send system status update to all clients."""
+        await self.broadcast_global({
+            "type": "system_status",
+            "status": status,
+            "message": message
+        })
+    
+    def get_stats(self) -> dict:
+        """Get WebSocket connection statistics."""
+        return self.connection_manager.get_connection_stats()
 
-Base = declarative_base()
 
-class User(Base):
-    """User model - existing enhanced"""
-    __tablename__ = "users"
-    
-    id = Column(String, primary_key=True)
-    email = Column(String, unique=True, nullable=False, index=True)
-    password_hash = Column(String, nullable=False)
-    first_name = Column(String, nullable=False)
-    last_name = Column(String, nullable=False)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Relationships
-    projects = relationship("Project", back_populates="owner")
-    workflows = relationship("WorkflowExecution", back_populates="user")
-    chat_instances = relationship("ChatInstance", back_populates="creator")
+# Global instance
+websocket_manager = WebSocketManager()
 
-class Project(Base):
-    """Project model - existing enhanced"""
-    __tablename__ = "projects"
+class ConnectionManager:
+    """Manages WebSocket connections for different contexts."""
     
-    id = Column(String, primary_key=True)
-    name = Column(String(200), nullable=False)
-    description = Column(Text)
-    client_name = Column(String(200))
-    project_type = Column(String(50), default='personal')  # 'personal' or 'shared'
-    status = Column(String(50), default='active')
-    created_by = Column(String, ForeignKey('users.id'), nullable=False)
-    project_metadata = Column(JSON, default={})
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    def __init__(self):
+        # Active connections by type
+        self.chat_connections: Dict[str, Set[WebSocket]] = {}
+        self.workflow_connections: Dict[str, Set[WebSocket]] = {}
+        self.user_connections: Dict[str, Set[WebSocket]] = {}
+        self.global_connections: Set[WebSocket] = set()
+        
+        # Connection metadata
+        self.connection_info: Dict[WebSocket, Dict] = {}
     
-    # Relationships
-    owner = relationship("User", back_populates="projects")
-    documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")
-    workflows = relationship("WorkflowExecution", back_populates="project")
-    chat_instances = relationship("ChatInstance", back_populates="project")
-    content_drafts = relationship("ContentDraft", back_populates="project")
+    async def connect(self, websocket: WebSocket, connection_type: str, resource_id: str = None, user_id: str = None):
+        """Connect a WebSocket client."""
+        await websocket.accept()
+        
+        # Store connection info
+        self.connection_info[websocket] = {
+            "type": connection_type,
+            "resource_id": resource_id,
+            "user_id": user_id,
+            "connected_at": datetime.now()
+        }
+        
+        # Add to appropriate connection pools
+        if connection_type == "chat" and resource_id:
+            if resource_id not in self.chat_connections:
+                self.chat_connections[resource_id] = set()
+            self.chat_connections[resource_id].add(websocket)
+            
+        elif connection_type == "workflow" and resource_id:
+            if resource_id not in self.workflow_connections:
+                self.workflow_connections[resource_id] = set()
+            self.workflow_connections[resource_id].add(websocket)
+            
+        elif connection_type == "user" and user_id:
+            if user_id not in self.user_connections:
+                self.user_connections[user_id] = set()
+            self.user_connections[user_id].add(websocket)
+            
+        else:
+            self.global_connections.add(websocket)
+        
+        logger.info(f"WebSocket connected: {connection_type} - {resource_id or user_id or 'global'}")
     
-    # Indexes
-    __table_args__ = (
-        Index('idx_projects_created_by', 'created_by'),
-        Index('idx_projects_status', 'status'),
-    )
-
-class Document(Base):
-    """Document model - enhanced for RAG"""
-    __tablename__ = "documents"
+    def disconnect(self, websocket: WebSocket):
+        """Disconnect a WebSocket client."""
+        if websocket not in self.connection_info:
+            return
+        
+        info = self.connection_info[websocket]
+        connection_type = info["type"]
+        resource_id = info["resource_id"]
+        user_id = info["user_id"]
+        
+        # Remove from appropriate pools
+        if connection_type == "chat" and resource_id:
+            if resource_id in self.chat_connections:
+                self.chat_connections[resource_id].discard(websocket)
+                if not self.chat_connections[resource_id]:
+                    del self.chat_connections[resource_id]
+                    
+        elif connection_type == "workflow" and resource_id:
+            if resource_id in self.workflow_connections:
+                self.workflow_connections[resource_id].discard(websocket)
+                if not self.workflow_connections[resource_id]:
+                    del self.workflow_connections[resource_id]
+                    
+        elif connection_type == "user" and user_id:
+            if user_id in self.user_connections:
+                self.user_connections[user_id].discard(websocket)
+                if not self.user_connections[user_id]:
+                    del self.user_connections[user_id]
+        
+        self.global_connections.discard(websocket)
+        
+        # Clean up metadata
+        del self.connection_info[websocket]
+        
+        logger.info(f"WebSocket disconnected: {connection_type} - {resource_id or user_id or 'global'}")
     
-    id = Column(String, primary_key=True)
-    project_id = Column(String, ForeignKey('projects.id', ondelete='CASCADE'), nullable=False)
-    filename = Column(String(255), nullable=False)
-    original_filename = Column(String(255), nullable=False)
-    file_size = Column(Integer, nullable=False)
-    file_type = Column(String(100), nullable=False)
-    file_path = Column(String(500), nullable=False)
-    document_type = Column(String(100))  # 'brand_guidelines', 'style_guide', 'sample_content'
-    content_hash = Column(String(64))
-    processing_status = Column(String(50), default='pending')
-    vector_embeddings_id = Column(String)  # Reference to vector store
-    uploaded_by = Column(String, ForeignKey('users.id'), nullable=False)
-    document_metadata = Column(JSON, default={})
-    tags = Column(JSON, default=[])
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Relationships
-    project = relationship("Project", back_populates="documents")
-    uploader = relationship("User")
-    knowledge_items = relationship("KnowledgeItem", back_populates="document", cascade="all, delete-orphan")
-    
-    # Indexes
-    __table_args__ = (
-        Index('idx_documents_project', 'project_id'),
-        Index('idx_documents_type', 'document_type'),
-        Index('idx_documents_status', 'processing_status'),
-    )
-
-class ChatInstance(Base):
-    """Chat instance model - new for web interface"""
-    __tablename__ = "chat_instances"
-    
-    id = Column(String, primary_key=True)
-    project_id = Column(String, ForeignKey('projects.id', ondelete='CASCADE'), nullable=False)
-    name = Column(String(200), nullable=False)
-    description = Column(Text)
-    chat_type = Column(String(50), default='standard')  # 'standard', 'workflow', 'brainstorm'
-    is_active = Column(Boolean, default=True)
-    created_by = Column(String, ForeignKey('users.id'), nullable=False)
-    agent_config = Column(JSON, default={})
-    workflow_id = Column(String)  # Link to workflow if applicable
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Relationships
-    project = relationship("Project", back_populates="chat_instances")
-    creator = relationship("User", back_populates="chat_instances")
-    messages = relationship("ChatMessage", back_populates="chat_instance", cascade="all, delete-orphan")
-    
-    # Indexes
-    __table_args__ = (
-        Index('idx_chat_instances_project', 'project_id'),
-        Index('idx_chat_instances_creator', 'created_by'),
-    )
-
-class ChatMessage(Base):
-    """Chat message model - new for web interface"""
-    __tablename__ = "chat_messages"
-    
-    id = Column(String, primary_key=True)
-    chat_instance_id = Column(String, ForeignKey('chat_instances.id', ondelete='CASCADE'), nullable=False)
-    sender_id = Column(String, ForeignKey('users.id'))
-    sender_type = Column(String(50), nullable=False)  # 'user', 'agent', 'system'
-    agent_type = Column(String(100))  # 'coordinator', 'style_analysis', 'content_planning', etc.
-    message_content = Column(Text, nullable=False)
-    message_type = Column(String(50), default='text')  # 'text', 'checkpoint', 'file', 'action'
-    metadata = Column(JSON, default={})
-    parent_message_id = Column(String, ForeignKey('chat_messages.id'))
-    is_edited = Column(Boolean, default=False)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Relationships
-    chat_instance = relationship("ChatInstance", back_populates="messages")
-    sender = relationship("User")
-    parent_message = relationship("ChatMessage", remote_side=[id])
-    
-    # Indexes
-    __table_args__ = (
-        Index('idx_chat_messages_instance', 'chat_instance_id'),
-        Index('idx_chat_messages_sender', 'sender_id'),
-        Index('idx_chat_messages_created', 'created_at'),
-    )
-
-class WorkflowExecution(Base):
-    """Workflow execution model - enhanced existing"""
-    __tablename__ = "workflow_executions"
-    
-    id = Column(String, primary_key=True)
-    workflow_id = Column(String, unique=True, nullable=False, index=True)
-    project_id = Column(String, ForeignKey('projects.id', ondelete='CASCADE'), nullable=False)
-    user_id = Column(String, ForeignKey('users.id'), nullable=False)
-    chat_instance_id = Column(String, ForeignKey('chat_instances.id'))
-    title = Column(String(500), nullable=False)
-    content_type = Column(String(50), nullable=False)
-    workflow_type = Column(String(50), default='enhanced')
-    status = Column(String(50), default='pending')
-    current_stage = Column(String(100))
-    progress_percentage = Column(Float, default=0.0)
-    started_at = Column(DateTime)
-    completed_at = Column(DateTime)
-    estimated_completion = Column(DateTime)
-    timeout_seconds = Column(Integer, default=600)
-    enable_human_interaction = Column(Boolean, default=True)
-    enable_checkpoints = Column(Boolean, default=True)
-    first_draft = Column(Text)
-    final_content = Column(Text)
-    agent_config = Column(JSON, default={})
-    execution_log = Column(JSON, default=[])
-    error_details = Column(JSON)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Relationships
-    project = relationship("Project", back_populates="workflows")
-    user = relationship("User", back_populates="workflows")
-    chat_instance = relationship("ChatInstance")
-    checkpoints = relationship("WorkflowCheckpoint", back_populates="workflow", cascade="all, delete-orphan")
-    
-    # Indexes
-    __table_args__ = (
-        Index('idx_workflow_project', 'project_id'),
-        Index('idx_workflow_user', 'user_id'),
-        Index('idx_workflow_status', 'status'),
-    )
-
-class WorkflowCheckpoint(Base):
-    """Workflow checkpoint model - new for human-in-the-loop"""
-    __tablename__ = "workflow_checkpoints"
-    
-    id = Column(String, primary_key=True)
-    workflow_id = Column(String, ForeignKey('workflow_executions.workflow_id'), nullable=False)
-    checkpoint_type = Column(String(50), nullable=False)  # 'strategy_approval', 'content_review', 'final_approval'
-    stage = Column(String(100), nullable=False)
-    title = Column(String(200), nullable=False)
-    description = Column(Text)
-    status = Column(String(50), default='pending')  # 'pending', 'approved', 'rejected', 'skipped'
-    priority = Column(String(20), default='medium')  # 'low', 'medium', 'high', 'critical'
-    requires_approval = Column(Boolean, default=True)
-    approved_by = Column(String, ForeignKey('users.id'))
-    approval_notes = Column(Text)
-    checkpoint_data = Column(JSON, default={})
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Relationships
-    workflow = relationship("WorkflowExecution", back_populates="checkpoints")
-    approver = relationship("User")
-    
-    # Indexes
-    __table_args__ = (
-        Index('idx_checkpoints_workflow', 'workflow_id'),
-        Index('idx_checkpoints_status', 'status'),
-    )
-
-class ContentDraft(Base):
-    """Content draft model - new for version management"""
-    __tablename__ = "content_drafts"
-    
-    id = Column(String, primary_key=True)
-    project_id = Column(String, ForeignKey('projects.id', ondelete='CASCADE'), nullable=False)
-    chat_instance_id = Column(String, ForeignKey('chat_instances.id'))
-    workflow_id = Column(String)  # Link to workflow execution
-    title = Column(String(500), nullable=False)
-    content_type = Column(String(50), nullable=False)  # 'article', 'blog_post', 'landing_page', etc.
-    draft_content = Column(Text)
-    draft_version = Column(Integer, default=1)
-    status = Column(String(50), default='draft')  # 'draft', 'review', 'approved', 'published'
-    created_by = Column(String, ForeignKey('users.id'), nullable=False)
-    metadata = Column(JSON, default={})
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Relationships
-    project = relationship("Project", back_populates="content_drafts")
-    chat_instance = relationship("ChatInstance")
-    creator = relationship("User")
-    
-    # Indexes
-    __table_args__ = (
-        Index('idx_content_drafts_project', 'project_id'),
-        Index('idx_content_drafts_status', 'status'),
-    )
-
-class KnowledgeItem(Base):
-    """Knowledge base item model - new for RAG integration"""
-    __tablename__ = "knowledge_items"
-    
-    id = Column(String, primary_key=True)
-    project_id = Column(String, ForeignKey('projects.id', ondelete='CASCADE'), nullable=False)
-    document_id = Column(String, ForeignKey('documents.id', ondelete='CASCADE'), nullable=False)
-    content_chunk = Column(Text, nullable=False)
-    chunk_index = Column(Integer, nullable=False)
-    # Note: Vector embeddings stored in separate vector database (Qdrant)
-    embedding_vector_id = Column(String)  # Reference to vector store
-    metadata = Column(JSON, default={})
-    created_at = Column(DateTime, server_default=func.now())
-    
-    # Relationships
-    project = relationship("Project")
-    document = relationship("Document", back_populates="knowledge_items")
-    
-    # Indexes
-    __table_args__ = (
-        Index('idx_knowledge_items_project', 'project_id'),
-        Index('idx_knowledge_items_document', 'document_id'),
-    )
-
-# backend/database/database.py
-"""
-Database configuration and session management
-"""
-
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-import os
-
-# Database configuration
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql+asyncpg://postgres:password@localhost:5432/spinscribe"
-)
-
-# Create async engine
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=True,  # Set to False in production
-    future=True
-)
-
-# Create async session factory
-AsyncSessionLocal = sessionmaker(
-    engine, 
-    class_=AsyncSession, 
-    expire_on_commit=False
-)
-
-async def get_db() -> AsyncSession:
-    """Dependency to get database session."""
-    async with AsyncSessionLocal() as session:
+    async def send_personal_message(self, message: dict, websocket: WebSocket):
+        """Send message to specific websocket."""
         try:
-            yield session
-        finally:
-            await session.close()
+            await websocket.send_text(json.dumps(message))
+        except Exception as e:
+            logger.error(f"Error sending personal message: {e}")
+            self.disconnect(websocket)
+    
+    async def broadcast_to_chat(self, chat_id: str, message: dict):
+        """Broadcast message to all clients in a chat."""
+        if chat_id not in self.chat_connections:
+            return
+        
+        message_data = {
+            "timestamp": datetime.now().isoformat(),
+            "chat_id": chat_id,
+            **message
+        }
+        
+        disconnected = set()
+        for websocket in self.chat_connections[chat_id]:
+            try:
+                await websocket.send_text(json.dumps(message_data))
+            except Exception as e:
+                logger.error(f"Error broadcasting to chat {chat_id}: {e}")
+                disconnected.add(websocket)
+        
+        # Clean up disconnected clients
+        for websocket in disconnected:
+            self.disconnect(websocket)
+    
+    async def broadcast_to_workflow(self, workflow_id: str, message: dict):
+        """Broadcast workflow updates to all listening clients."""
+        if workflow_id not in self.workflow_connections:
+            return
+        
+        message_data = {
+            "timestamp": datetime.now().isoformat(),
+            "workflow_id": workflow_id,
+            **message
+        }
+        
+        disconnected = set()
+        for websocket in self.workflow_connections[workflow_id]:
+            try:
+                await websocket.send_text(json.dumps(message_data))
+            except Exception as e:
+                logger.error(f"Error broadcasting to workflow {workflow_id}: {e}")
+                disconnected.add(websocket)
+        
+        # Clean up disconnected clients
+        for websocket in disconnected:
+            self.disconnect(websocket)
+    
+    async def broadcast_to_user(self, user_id: str, message: dict):
+        """Send message to all connections for a specific user."""
+        if user_id not in self.user_connections:
+            return
+        
+        message_data = {
+            "timestamp": datetime.now().isoformat(),
+            "user_id": user_id,
+            **message
+        }
+        
+        disconnected = set()
+        for websocket in self.user_connections[user_id]:
+            try:
+                await websocket.send_text(json.dumps(message_data))
+            except Exception as e:
+                logger.error(f"Error broadcasting to user {user_id}: {e}")
+                disconnected.add(websocket)
+        
+        # Clean up disconnected clients
+        for websocket in disconnected:
+            self.disconnect(websocket)
+    
+    async def broadcast_global(self, message: dict):
+        """Broadcast message to all connected clients."""
+        message_data = {
+            "timestamp": datetime.now().isoformat(),
+            "type": "global",
+            **message
+        }
+        
+        disconnected = set()
+        for websocket in self.global_connections:
+            try:
+                await websocket.send_text(json.dumps(message_data))
+            except Exception as e:
+                logger.error(f"Error in global broadcast: {e}")
+                disconnected.add(websocket)
+        
+        # Clean up disconnected clients
+        for websocket in disconnected:
+            self.disconnect(websocket)
+    
+    def get_connection_stats(self) -> dict:
+        """Get statistics about current connections."""
+        return {
+            "total_connections": len(self.connection_info),
+            "chat_rooms": len(self.chat_connections),
+            "active_workflows": len(self.workflow_connections),
+            "connected_users": len(self.user_connections),
+            "global_connections": len(self.global_connections),
+            "connections_by_type": {
+                "chat": sum(len(connections) for connections in self.chat_connections.values()),
+                "workflow": sum(len(connections) for connections in self.workflow_connections.values()),
+                "user": sum(len(connections) for connections in self.user_connections.values()),
+                "global": len(self.global_connections)
+            }
+        }
 
-async def create_tables():
-    """Create all database tables."""
-    from backend.database.models import Base
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
-async def drop_tables():
-    """Drop all database tables."""
-    from backend.database.models import Base
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+class WebSocketManager:
+    """Main WebSocket manager for Spinscribe application."""
+    
+    def __init__(self):
+        self.connection_manager = ConnectionManager()
+        self.message_handlers = {}
+        self.setup_message_handlers()
+    
+    def setup_message_handlers(self):
+        """Setup handlers for different message types."""
+        self.message_handlers = {
+            "ping": self.handle_ping,
+            "join_chat": self.handle_join_chat,
+            "leave_chat": self.handle_leave_chat,
+            "user_typing": self.handle_user_typing,
+            "workflow_subscribe": self.handle_workflow_subscribe,
+            "workflow_unsubscribe": self.handle_workflow_unsubscribe,
+        }
+    
+    async def connect(self, websocket: WebSocket, resource_id: str, connection_type: str = "chat", user_id: str = None):
+        """Connect a WebSocket client."""
+        await self.connection_manager.connect(websocket, connection_type, resource_id, user_id)
+        
+        # Send welcome message
+        await self.connection_manager.send_personal_message({
+            "type": "connection_established",
+            "connection_type": connection_type,
+            "resource_id": resource_id,
+            "message": f"Connected to {connection_type}: {resource_id}"
+        }, websocket)
+    
+    def disconnect(self, websocket: WebSocket, resource_id: str = None):
+        """Disconnect a WebSocket client."""
+        self.connection_manager.disconnect(websocket)
+    
+    async def handle_message(self, websocket: WebSocket, message_data: dict):
+        """Handle incoming WebSocket message."""
+        message_type = message_data.get("type")
+        
+        if message_type in self.message_handlers:
+            await self.message_handlers[message_type](websocket, message_data)
+        else:
+            logger.warning(f"Unknown message type: {message_type}")
+    
+    async def handle_ping(self, websocket: WebSocket, message_data: dict):
+        """Handle ping messages."""
+        await self.connection_manager.send_personal_message({
+            "type": "pong",
+            "timestamp": datetime.now().isoformat()
+        }, websocket)
+    
+    async def handle_join_chat(self, websocket: WebSocket, message_data: dict):
+        """Handle join chat requests."""
+        chat_id = message_data.get("chat_id")
+        if chat_id:
+            # Update connection to be associated with this chat
+            info = self.connection_manager.connection_info.get(websocket, {})
+            info["resource_id"] = chat_id
+            
+            await self.broadcast_to_chat(chat_id, {
+                "type": "user_joined",
+                "user_id": info.get("user_id"),
+                "message": "User joined the chat"
+            })
+    
+    async def handle_leave_chat(self, websocket: WebSocket, message_data: dict):
+        """Handle leave chat requests."""
+        chat_id = message_data.get("chat_id")
+        if chat_id:
+            info = self.connection_manager.connection_info.get(websocket, {})
+            
+            await self.broadcast_to_chat(chat_id, {
+                "type": "user_left",
+                "user_id": info.get("user_id"),
+                "message": "User left the chat"
+            })
+    
+    async def handle_user_typing(self, websocket: WebSocket, message_data: dict):
+        """Handle user typing indicators."""
+        chat_id = message_data.get("chat_id")
+        is_typing = message_data.get("is_typing", False)
+        
+        if chat_id:
+            info = self.connection_manager.connection_info.get(websocket, {})
+            
+            await self.broadcast_to_chat(chat_id, {
+                "type": "user_typing",
+                "user_id": info.get("user_id"),
+                "is_typing": is_typing
+            })
+    
+    async def handle_workflow_subscribe(self, websocket: WebSocket, message_data: dict):
+        """Handle workflow subscription requests."""
+        workflow_id = message_data.get("workflow_id")
+        if workflow_id:
+            # Update connection to listen to workflow updates
+            info = self.connection_manager.connection_info.get(websocket, {})
+            info["resource_id"] = workflow_id
+            info["type"] = "workflow"
+            
+            await self.connection_manager.send_personal_message({
+                "type": "workflow_subscribed",
+                "workflow_id": workflow_id,
+                "message": f"Subscribed to workflow updates: {workflow_id}"
+            }, websocket)
+    
+    async def handle_workflow_unsubscribe(self, websocket: WebSocket, message_data: dict):
+        """Handle workflow unsubscription requests."""
+        await self.connection_manager.send_personal_message({
+            "type": "workflow_unsubscribed",
+            "message": "Unsubscribed from workflow updates"
+        }, websocket)
+    
+    # Public interface methods
+    async def broadcast_to_chat(self, chat_id: str, message: dict):
+        """Broadcast message to chat."""
+        await self.connection_manager.broadcast_to_chat(chat_id, message)
+    
+    async def broadcast_to_workflow(self, workflow_id: str, message: dict):
+        """Broadcast workflow update."""
+        await self.connection_manager.broadcast_to_workflow(workflow_id, message)
+    
+    async def broadcast_to_user(self, user_id: str, message: dict):
+        """Send message to user."""
+        await self.connection_manager.broadcast_to_user(user_id, message)
+    
+    async def broadcast_global(self, message: dict):
+        """Broadcast global message."""
+        await self.connection_manager.broadcast_global(message)
+    
+    # Spinscribe-specific helpers
+    async def notify_workflow_progress(self, workflow_id: str, progress: float, stage: str, details: dict = None):
+        """Send workflow progress update."""
+        await self.broadcast_to_workflow(workflow_id, {
+            "type": "workflow_progress",
+            "progress": progress,
+            "stage": stage,
+            "details": details or {}
+        })
+    
+    async def notify_workflow_checkpoint(self, workflow_id: str, checkpoint_data: dict):
+        """Send workflow checkpoint notification."""
+        await self.broadcast_to_workflow(workflow_id, {
+            "type": "workflow_checkpoint",
+            "checkpoint": checkpoint_data
+        })
+    
+    async def notify_workflow_complete(self, workflow_id: str, result: dict):
+        """Send workflow completion notification."""
+        await self.broadcast_to_workflow(workflow_id, {
+            "type": "workflow_complete",
+            "result": result
+        })
+    
+    async def notify_workflow_error(self, workflow_id: str, error: str, details: dict = None):
+        """Send workflow error notification."""
+        await self.broadcast_to_workflow(workflow_id, {
+            "type": "workflow_error",
+            "error": error,
+            "details": details or {}
+        })
+    
+    async def notify_agent_message(self, chat_id: str, agent_type: str, message: str, metadata: dict = None):
+        """Send agent message to chat."""
+        await self.broadcast_to_chat(chat_id, {
+            "type": "agent_message",
+            "agent_type": agent_type,
+            "message": message,
+            "metadata": metadata or {}
+        })
+    
+    async def notify_system_status(self, status: str, message: str):
+        """Send system status update to all clients."""
+        await self.broadcast_global({
+            "type": "system_status",
+            "status": status,
+            "message": message
+        })
+    
+    def get_stats(self) -> dict:
+        """Get WebSocket connection statistics."""
+        return self.connection_manager.get_connection_stats()
+
+
+# Global instance
+websocket_manager = WebSocketManager()
