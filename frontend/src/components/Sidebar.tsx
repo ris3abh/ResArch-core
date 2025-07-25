@@ -1,5 +1,6 @@
+// src/components/Sidebar.tsx
 import React from 'react';
-import { Users, LogOut, Settings, Home } from 'lucide-react';
+import { Home, Settings, LogOut } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate, useLocation } from 'react-router-dom';
 
@@ -9,8 +10,7 @@ export default function Sidebar() {
   const location = useLocation();
 
   const menuItems = [
-    { icon: Home, label: 'Dashboard', path: '/clients' },
-    { icon: Users, label: 'Clients', path: '/clients' },
+    { icon: Home, label: 'Dashboard', path: '/dashboard' },
   ];
 
   return (
@@ -31,7 +31,8 @@ export default function Sidebar() {
         <div className="space-y-2">
           {menuItems.map((item) => {
             const Icon = item.icon;
-            const isActive = location.pathname === item.path;
+            const isActive = location.pathname === item.path || 
+                           (item.path === '/dashboard' && location.pathname === '/');
             
             return (
               <button
@@ -39,7 +40,7 @@ export default function Sidebar() {
                 onClick={() => navigate(item.path)}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 ${
                   isActive 
-                    ? 'bg-gradient-to-r from-orange-500/20 to-violet-600/20 text-orange-500 border border-orange-500/30' 
+                    ? 'bg-gradient-to-r from-orange-500/20 to-violet-600/20 text-orange-500 border border-orange-500/30'
                     : 'text-gray-300 hover:text-white hover:bg-gray-700'
                 }`}
               >
@@ -55,11 +56,13 @@ export default function Sidebar() {
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-violet-600 rounded-lg flex items-center justify-center">
             <span className="text-sm font-bold text-white">
-              {user?.name?.charAt(0).toUpperCase()}
+              {user?.first_name?.charAt(0).toUpperCase() || user?.email?.charAt(0).toUpperCase()}
             </span>
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-white truncate">{user?.name}</p>
+            <p className="text-sm font-medium text-white truncate">
+              {user?.first_name ? `${user.first_name} ${user.last_name}` : user?.email}
+            </p>
             <p className="text-xs text-gray-300 truncate">{user?.email}</p>
           </div>
         </div>
