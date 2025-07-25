@@ -205,6 +205,14 @@ tmp/
 *.tmp
 *.temp
 
+# Frontend dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+
 # Configuration files with sensitive data
 .env.local
 .env.production
