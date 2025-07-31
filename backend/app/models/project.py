@@ -1,9 +1,10 @@
 from sqlalchemy import Column, String, Text, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
-from .base import BaseModel
+from app.models.base import BaseModel
 
 class Project(BaseModel):
+    """Project model for organizing content creation work."""
     __tablename__ = "projects"
     
     name = Column(String(200), nullable=False)
@@ -13,4 +14,5 @@ class Project(BaseModel):
     
     # Relationships
     owner = relationship("User", back_populates="projects")
-    documents = relationship("Document", back_populates="project", lazy="select", cascade="all, delete-orphan")
+    documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")
+    chats = relationship("ChatInstance", back_populates="project", cascade="all, delete-orphan")
