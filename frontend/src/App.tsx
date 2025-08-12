@@ -4,8 +4,10 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import AuthModal from './components/AuthModal';
 import Dashboard from './components/Dashboard';
 import ProjectWorkspace from './components/ProjectWorkspace';
-import Chat from './components/Chat';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+
+// Import the workflow interface
+import SpinscribeWorkflowInterface from './components/workflow/SpinscribeWorkflowInterface';
 
 function AppRoutes() {
   const { user, isLoading } = useAuth();
@@ -30,12 +32,18 @@ function AppRoutes() {
 
   return (
     <Routes>
+      {/* Main Dashboard */}
       <Route path="/dashboard" element={<Dashboard />} />
+      
+      {/* Project Management */}
       <Route path="/project/:projectId" element={<ProjectWorkspace />} />
-      <Route path="/project/:projectId/chat/:chatId" element={<Chat />} />
+      
+      {/* Workflow Routes */}
+      <Route path="/workflow/:projectId" element={<SpinscribeWorkflowInterface />} />
+      <Route path="/workflow/:projectId/:chatId" element={<SpinscribeWorkflowInterface />} />
+      
+      {/* Default redirect */}
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
-      {/* Legacy routes for compatibility */}
-      <Route path="/clients" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   );
 }

@@ -1,5 +1,6 @@
+# backend/app/api/v1/api.py
 from fastapi import APIRouter
-from .endpoints import health, auth, projects, documents, chats, workflows
+from .endpoints import health, auth, projects, documents, chats, workflows, websocket
 
 api_router = APIRouter()
 
@@ -9,7 +10,7 @@ api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(projects.router, prefix="/projects", tags=["projects"])
 api_router.include_router(documents.router, prefix="/documents", tags=["documents"])
 api_router.include_router(chats.router, prefix="/chats", tags=["chats"])
-
-# TODO: Add these later
 api_router.include_router(workflows.router, prefix="/workflows", tags=["workflows"])
-# api_router.include_router(checkpoints.router, prefix="/checkpoints", tags=["checkpoints"])
+
+# WebSocket endpoints
+api_router.include_router(websocket.router, prefix="/ws", tags=["websockets"])
