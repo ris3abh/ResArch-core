@@ -1,4 +1,4 @@
-# backend/app/core/websocket_manager.py
+# backend/app/core/websocket_manager.py (FIXED VERSION)
 import json
 import uuid
 import logging
@@ -65,51 +65,47 @@ class ConnectionManager:
 
     async def disconnect(self, websocket: WebSocket):
         """Remove WebSocket connection."""
-        # Find and remove connection from all pools
-        connection_id = None
-        for cid, metadata in self.connection_metadata.items():
+        connection_to_remove = None
+        
+        # Find and remove from connection metadata
+        for conn_id, metadata in list(self.connection_metadata.items()):
             if metadata["websocket"] == websocket:
-                connection_id = cid
+                connection_to_remove = metadata
+                del self.connection_metadata[conn_id]
                 break
         
-        if connection_id:
-            metadata = self.connection_metadata.pop(connection_id)
-            connection_type = metadata["type"]
-            resource_id = metadata["resource_id"]
-            user_id = metadata["user_id"]
-            
-            # Remove from workflow connections
-            if connection_type == "workflow" and resource_id in self.workflow_connections:
-                try:
-                    self.workflow_connections[resource_id].remove(websocket)
-                    if not self.workflow_connections[resource_id]:
-                        del self.workflow_connections[resource_id]
-                except ValueError:
-                    pass
-            
-            # Remove from chat connections
-            elif connection_type == "chat" and resource_id in self.chat_connections:
-                try:
-                    self.chat_connections[resource_id].remove(websocket)
-                    if not self.chat_connections[resource_id]:
-                        del self.chat_connections[resource_id]
-                except ValueError:
-                    pass
-            
-            # Remove from user connections
-            if user_id in self.user_connections:
-                try:
-                    self.user_connections[user_id].remove(websocket)
-                    if not self.user_connections[user_id]:
-                        del self.user_connections[user_id]
-                except ValueError:
-                    pass
-            
-            logger.info(f"WebSocket disconnected: {connection_type}:{resource_id} for user {user_id}")
+        if not connection_to_remove:
+            return
+        
+        # Remove from specific connection pools
+        connection_type = connection_to_remove["type"]
+        resource_id = connection_to_remove["resource_id"]
+        user_id = connection_to_remove["user_id"]
+        
+        if connection_type == "workflow" and resource_id in self.workflow_connections:
+            if websocket in self.workflow_connections[resource_id]:
+                self.workflow_connections[resource_id].remove(websocket)
+                if not self.workflow_connections[resource_id]:
+                    del self.workflow_connections[resource_id]
+                    
+        elif connection_type == "chat" and resource_id in self.chat_connections:
+            if websocket in self.chat_connections[resource_id]:
+                self.chat_connections[resource_id].remove(websocket)
+                if not self.chat_connections[resource_id]:
+                    del self.chat_connections[resource_id]
+        
+        # Remove from user connections
+        if user_id in self.user_connections:
+            if websocket in self.user_connections[user_id]:
+                self.user_connections[user_id].remove(websocket)
+                if not self.user_connections[user_id]:
+                    del self.user_connections[user_id]
+        
+        logger.info(f"WebSocket disconnected: {connection_type}:{resource_id} for user {user_id}")
 
     async def send_workflow_update(self, workflow_id: str, message: Dict[str, Any]):
         """Send update to all connections watching a specific workflow."""
-        if workflow_id in self.workflow_connections:
+        if workflow_id and workflow_id in self.workflow_connections:
             message_data = {
                 **message,
                 "workflow_id": workflow_id,
@@ -148,6 +144,24 @@ class ConnectionManager:
             # Remove failed connections
             for ws in connections_to_remove:
                 await self.disconnect(ws)
+
+    # ADDED: Broadcast methods that the workflow service expects
+    async def broadcast_workflow_update(self, workflow_id: str, update_data: Dict[str, Any]):
+        """Broadcast workflow progress update - alias for send_workflow_update."""
+        await self.send_workflow_update(workflow_id, update_data)
+
+    async def broadcast_chat_message(self, chat_id: str, message_data: Dict[str, Any]):
+        """Broadcast chat message - alias for send_chat_message."""
+        await self.send_chat_message(chat_id, message_data)
+
+    async def broadcast_checkpoint_required(self, workflow_id: str, checkpoint_data: Dict[str, Any]):
+        """Broadcast that a checkpoint requires human approval."""
+        message = {
+            "type": "checkpoint_required",
+            "checkpoint_data": checkpoint_data,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        await self.send_workflow_update(workflow_id, message)
 
     async def send_checkpoint_notification(self, workflow_id: str, checkpoint_id: str, 
                                          checkpoint_data: Dict[str, Any]):
