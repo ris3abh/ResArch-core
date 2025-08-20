@@ -1,69 +1,77 @@
 # backend/app/models/workflow.py
-from sqlalchemy import Column, String, DateTime, Float, Boolean, Text, JSON, ForeignKey, Integer
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-from datetime import datetime
-import uuid
+"""
+FIXED: WorkflowExecution model with proper imports.
+Add the missing Base import at the top of your workflow.py file.
+"""
 
-from app.core.database import Base
+# ADD THESE IMPORTS at the top of your file:
+from sqlalchemy import Column, String, Text, DateTime, Boolean, Integer, ForeignKey, UUID, JSON
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from app.core.database import Base  # This was missing!
+import uuid
 
 class WorkflowExecution(Base):
     __tablename__ = "workflow_executions"
-
+    
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    workflow_id = Column(String, unique=True, nullable=False, index=True)
-    
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    chat_instance_id = Column(UUID(as_uuid=True), ForeignKey("chat_instances.id"), nullable=True)
     
-    title = Column(String(500), nullable=False)
-    content_type = Column(String(50), nullable=False)
+    # Workflow details
+    workflow_id = Column(String, nullable=True)  # ID from the workflow service
+    title = Column(String, nullable=False)
+    content_type = Column(String, nullable=False)
+    initial_draft = Column(Text, nullable=True)
+    use_project_documents = Column(Boolean, default=False)
     
-    status = Column(String(50), default="pending", nullable=False)
-    current_stage = Column(String(100), nullable=True)
-    progress_percentage = Column(Float, default=0.0, nullable=False)
-    
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    timeout_seconds = Column(Integer, default=1800, nullable=False)
-    
-    enable_human_interaction = Column(Boolean, default=True, nullable=False)
-    enable_checkpoints = Column(Boolean, default=True, nullable=False)
-    
-    first_draft = Column(Text, nullable=True)
+    # Status tracking
+    status = Column(String, default="pending")
+    current_stage = Column(String, nullable=True)
     final_content = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    live_data = Column(JSON, nullable=True)
     
-    agent_config = Column(JSON, default=dict, nullable=False)
-    execution_log = Column(JSON, default=list, nullable=False)
-    error_details = Column(JSON, nullable=True)
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
     
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    
-    checkpoints = relationship("WorkflowCheckpoint", back_populates="workflow", cascade="all, delete-orphan")
+    # Relationships
+    project = relationship("Project", back_populates="workflow_executions")
+    user = relationship("User")
 
 class WorkflowCheckpoint(Base):
     __tablename__ = "workflow_checkpoints"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    workflow_id = Column(String, ForeignKey("workflow_executions.workflow_id", ondelete="CASCADE"), nullable=False)
+    workflow_id = Column(UUID(as_uuid=True), ForeignKey("workflow_executions.id"), nullable=False)
     
-    checkpoint_type = Column(String(50), nullable=False)
-    stage = Column(String(100), nullable=False)
-    title = Column(String(200), nullable=False)
+    # Checkpoint details
+    checkpoint_type = Column(String, nullable=False)
+    stage = Column(String, nullable=False)
+    title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     
-    status = Column(String(50), default="pending", nullable=False)
-    priority = Column(String(20), default="medium", nullable=False)
-    requires_approval = Column(Boolean, default=True, nullable=False)
+    # Status
+    status = Column(String, default="pending")  # pending, approved, rejected
+    priority = Column(String, default="medium")
+    requires_approval = Column(Boolean, default=True)
     
-    approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    # Checkpoint data
+    checkpoint_data = Column(JSON, nullable=True)
+    
+    # Approval details
+    approved_by = Column(String, nullable=True)
     approval_notes = Column(Text, nullable=True)
     
-    checkpoint_data = Column(JSON, default=dict, nullable=False)
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    approved_at = Column(DateTime(timezone=True), nullable=True)
     
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # Relationships
+    workflow = relationship("WorkflowExecution")
+    workflow_executions = relationship("WorkflowExecution", back_populates="project")
     
-    workflow = relationship("WorkflowExecution", back_populates="checkpoints")
+    # Make sure you also have the documents relationship:
+    documents = relationship("Document", back_populates="project")

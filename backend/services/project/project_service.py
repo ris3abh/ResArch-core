@@ -1,3 +1,6 @@
+# backend/services/project/project_service.py
+# Keep your existing working code and just add the missing method
+
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -102,3 +105,48 @@ class ProjectService:
         await db.delete(project)
         await db.commit()
         return True
+    
+    # ADD THIS METHOD - This is what was missing for the workflow integration
+    @staticmethod
+    async def get_project_documents(
+        db: AsyncSession, 
+        project_id: str, 
+        user_id: str
+    ) -> List[Document]:
+        """
+        Get all documents for a project (for workflow integration).
+        Takes string parameters to match the workflow endpoint interface.
+        """
+        try:
+            # Convert string IDs to UUIDs
+            project_uuid = uuid.UUID(project_id)
+            user_uuid = uuid.UUID(user_id)
+            
+            # First verify user has access to the project
+            project_result = await db.execute(
+                select(Project).where(
+                    Project.id == project_uuid,
+                    Project.owner_id == user_uuid
+                )
+            )
+            project = project_result.scalar_one_or_none()
+            
+            if not project:
+                return []
+            
+            # Get all documents for this project
+            documents_result = await db.execute(
+                select(Document)
+                .where(Document.project_id == project_uuid)
+                .order_by(Document.created_at.desc())
+            )
+            documents = documents_result.scalars().all()
+            
+            return documents
+            
+        except ValueError:
+            # Invalid UUID format
+            return []
+        except Exception as e:
+            print(f"Error getting project documents: {e}")
+            return []
