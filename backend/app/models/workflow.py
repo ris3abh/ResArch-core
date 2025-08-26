@@ -1,17 +1,16 @@
 # backend/app/models/workflow.py
 """
-FIXED: WorkflowExecution model with proper imports.
-Add the missing Base import at the top of your workflow.py file.
+Complete workflow models for SpinScribe CAMEL integration.
 """
-
-# ADD THESE IMPORTS at the top of your file:
-from sqlalchemy import Column, String, Text, DateTime, Boolean, Integer, ForeignKey, UUID, JSON
+import uuid
+from sqlalchemy import Column, String, Text, DateTime, Boolean, ForeignKey, JSON, Integer
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from app.core.database import Base  # This was missing!
-import uuid
+from app.core.database import Base
 
 class WorkflowExecution(Base):
+    """Model for tracking workflow executions - NO chat_id field."""
     __tablename__ = "workflow_executions"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -19,59 +18,70 @@ class WorkflowExecution(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     
     # Workflow details
-    workflow_id = Column(String, nullable=True)  # ID from the workflow service
-    title = Column(String, nullable=False)
-    content_type = Column(String, nullable=False)
+    workflow_id = Column(String, nullable=True, unique=True)  # ID from CAMEL workflow service
+    title = Column(String(500), nullable=False)
+    content_type = Column(String(100), nullable=False)
     initial_draft = Column(Text, nullable=True)
     use_project_documents = Column(Boolean, default=False)
     
     # Status tracking
-    status = Column(String, default="pending")
-    current_stage = Column(String, nullable=True)
+    status = Column(String(50), default="pending")  # pending, starting, running, completed, failed, cancelled
+    current_stage = Column(String(100), nullable=True)  # initialization, planning, creation, review, completed
     final_content = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
-    live_data = Column(JSON, nullable=True)
+    live_data = Column(JSON, nullable=True)  # Real-time data from workflow service
+    
+    # Performance metrics
+    progress_percentage = Column(Integer, default=0)  # 0-100
+    estimated_completion = Column(DateTime(timezone=True), nullable=True)
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     project = relationship("Project", back_populates="workflow_executions")
     user = relationship("User")
+    checkpoints = relationship(
+        "WorkflowCheckpoint", 
+        back_populates="workflow", 
+        cascade="all, delete-orphan"
+    )
 
 class WorkflowCheckpoint(Base):
+    """Model for workflow checkpoints that require human approval."""
     __tablename__ = "workflow_checkpoints"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    workflow_id = Column(UUID(as_uuid=True), ForeignKey("workflow_executions.id"), nullable=False)
+    workflow_id = Column(UUID(as_uuid=True), ForeignKey("workflow_executions.id", ondelete="CASCADE"), nullable=False)
     
     # Checkpoint details
-    checkpoint_type = Column(String, nullable=False)
-    stage = Column(String, nullable=False)
-    title = Column(String, nullable=False)
+    checkpoint_type = Column(String(100), nullable=False)  # planning_approval, content_review, final_approval
+    stage = Column(String(100), nullable=False)
+    title = Column(String(200), nullable=False)
     description = Column(Text, nullable=True)
     
     # Status
-    status = Column(String, default="pending")  # pending, approved, rejected
-    priority = Column(String, default="medium")
+    status = Column(String(50), default="pending")  # pending, approved, rejected, skipped
+    priority = Column(String(20), default="medium")  # low, medium, high, critical
     requires_approval = Column(Boolean, default=True)
     
-    # Checkpoint data
+    # Checkpoint content/data
     checkpoint_data = Column(JSON, nullable=True)
+    content_preview = Column(Text, nullable=True)  # Preview of content for approval
     
     # Approval details
-    approved_by = Column(String, nullable=True)
+    approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     approval_notes = Column(Text, nullable=True)
+    feedback_data = Column(JSON, nullable=True)  # Structured feedback
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    approved_at = Column(DateTime(timezone=True), nullable=True)
+    responded_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)  # Auto-approval timeout
     
     # Relationships
-    workflow = relationship("WorkflowExecution")
-    workflow_executions = relationship("WorkflowExecution", back_populates="project")
-    
-    # Make sure you also have the documents relationship:
-    documents = relationship("Document", back_populates="project")
+    workflow = relationship("WorkflowExecution", back_populates="checkpoints")
+    approver = relationship("User")

@@ -1,3 +1,4 @@
+# backend/app/models/project.py
 from sqlalchemy import Column, String, Text, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -16,3 +17,10 @@ class Project(BaseModel):
     owner = relationship("User", back_populates="projects")
     documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")
     chats = relationship("ChatInstance", back_populates="project", cascade="all, delete-orphan")
+    
+    # FIX: Add the missing workflow_executions relationship
+    workflow_executions = relationship(
+        "WorkflowExecution", 
+        back_populates="project", 
+        cascade="all, delete-orphan"
+    )
