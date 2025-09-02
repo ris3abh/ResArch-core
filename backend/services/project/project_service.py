@@ -106,6 +106,8 @@ class ProjectService:
         await db.commit()
         return True
     
+    
+    
     # ADD THIS METHOD - This is what was missing for the workflow integration
     @staticmethod
     async def get_project_documents(
@@ -150,3 +152,5 @@ class ProjectService:
         except Exception as e:
             print(f"Error getting project documents: {e}")
             return []
+        
+    

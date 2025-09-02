@@ -320,7 +320,8 @@ class ApiService {
   }
 
   async getWorkflowStatus(workflowId: string): Promise<WorkflowResponse> {
-    return this.request(`/workflows/${workflowId}`);
+    return this.request(`/workflows/status/${workflowId}`);
+
   }
 
   async listWorkflows(params?: {
