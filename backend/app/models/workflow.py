@@ -1,6 +1,7 @@
 # backend/app/models/workflow.py
 """
 Complete workflow models for SpinScribe CAMEL integration.
+Updated to include chat_id field for agent communication.
 """
 import uuid
 from sqlalchemy import Column, String, Text, DateTime, Boolean, ForeignKey, JSON, Integer
@@ -10,12 +11,15 @@ from sqlalchemy.sql import func
 from app.core.database import Base
 
 class WorkflowExecution(Base):
-    """Model for tracking workflow executions - NO chat_id field."""
+    """Model for tracking workflow executions - WITH chat_id field for agent communication."""
     __tablename__ = "workflow_executions"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    
+    # NEW: Chat integration for agent communication and human checkpoints
+    chat_id = Column(UUID(as_uuid=True), ForeignKey("chat_instances.id"), nullable=True)
     
     # Workflow details
     workflow_id = Column(String, nullable=True, unique=True)  # ID from CAMEL workflow service
@@ -44,6 +48,7 @@ class WorkflowExecution(Base):
     # Relationships
     project = relationship("Project", back_populates="workflow_executions")
     user = relationship("User")
+    chat_instance = relationship("ChatInstance", foreign_keys=[chat_id])  # NEW: Link to chat
     checkpoints = relationship(
         "WorkflowCheckpoint", 
         back_populates="workflow", 

@@ -1,11 +1,16 @@
 # backend/app/schemas/workflow.py
+"""
+Updated workflow schemas to properly handle chat_id integration.
+"""
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pydantic import BaseModel, Field
+import uuid
 
 class WorkflowCreateRequest(BaseModel):
+    """Request schema for starting a workflow with chat integration."""
     project_id: str = Field(..., description="Project ID")
-    chat_id: Optional[str] = Field(None, description="Chat instance ID for updates")
+    chat_id: Optional[str] = Field(None, description="Chat instance ID for agent communication and checkpoints")
     title: str = Field(..., min_length=1, max_length=500, description="Content title")
     content_type: str = Field(..., description="Type of content (article, blog_post, etc.)")
     initial_draft: Optional[str] = Field(None, description="Optional initial draft")
@@ -21,12 +26,14 @@ class WorkflowConfig(BaseModel):
     enable_checkpoints: bool = Field(True, description="Enable human approval checkpoints")
 
 class WorkflowResponse(BaseModel):
+    """Response schema for workflow operations."""
     workflow_id: str
     status: str
     current_stage: Optional[str] = None
     progress: Optional[float] = Field(None, ge=0.0, le=100.0)
     message: Optional[str] = None
     project_id: str
+    chat_id: Optional[str] = None  # NEW: Include chat_id in responses
     title: str
     content_type: str
     final_content: Optional[str] = None
@@ -38,6 +45,7 @@ class WorkflowResponse(BaseModel):
         from_attributes = True
 
 class CheckpointResponse(BaseModel):
+    """Response schema for workflow checkpoints."""
     id: str
     workflow_id: str
     checkpoint_type: str
@@ -48,6 +56,7 @@ class CheckpointResponse(BaseModel):
     priority: Optional[str] = "medium"
     requires_approval: bool = True
     checkpoint_data: Dict[str, Any]
+    content_preview: Optional[str] = None
     created_at: datetime
     approved_by: Optional[str] = None
     approval_notes: Optional[str] = None
@@ -56,11 +65,13 @@ class CheckpointResponse(BaseModel):
         from_attributes = True
 
 class CheckpointApproval(BaseModel):
+    """Schema for checkpoint approval/rejection."""
     feedback: Optional[str] = Field(None, max_length=2000, description="Optional feedback")
 
 class WorkflowStatusUpdate(BaseModel):
-    """For WebSocket status updates."""
+    """Schema for WebSocket status updates."""
     workflow_id: str
+    chat_id: Optional[str] = None  # NEW: Include chat for targeted updates
     status: str
     current_stage: str
     progress: float
@@ -69,8 +80,31 @@ class WorkflowStatusUpdate(BaseModel):
     timestamp: datetime
 
 class WorkflowListResponse(BaseModel):
-    """For listing workflows."""
+    """Schema for listing workflows."""
     workflows: List[WorkflowResponse]
     total: int
-    page: int
-    per_page: int
+    limit: int
+    offset: int
+
+class AgentCommunication(BaseModel):
+    """Schema for agent communication messages in chat."""
+    workflow_id: str
+    agent_type: str  # coordinator, style_analysis, content_planning, quality_assurance
+    stage: str
+    message_type: str = Field(..., description="agent_started, agent_thinking, agent_completed, checkpoint_required")
+    content: str
+    metadata: Dict[str, Any] = {}
+    timestamp: datetime
+
+class WorkflowChatMessage(BaseModel):
+    """Schema for workflow-related chat messages."""
+    chat_id: str
+    workflow_id: str
+    sender_type: str = "agent"  # agent, system, user
+    agent_type: Optional[str] = None
+    message_content: str
+    message_type: str = "agent_update"  # text, agent_update, checkpoint, system
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    class Config:
+        from_attributes = True

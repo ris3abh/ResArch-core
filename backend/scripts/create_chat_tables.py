@@ -1,6 +1,6 @@
 # backend/scripts/create_chat_tables.py
 """
-Database migration script to create chat-related tables.
+Database script to create all tables including updated workflow_executions with chat_id.
 Run this after updating your models.
 """
 
@@ -15,10 +15,9 @@ from app.models.project import Project
 from app.models.document import Document
 from app.models.chat import ChatInstance, ChatMessage
 from app.models.workflow import WorkflowExecution, WorkflowCheckpoint
-from app.models.draft import ContentDraft
 
 async def create_tables():
-    """Create all database tables."""
+    """Create all database tables with the updated schema."""
     
     # Create async engine
     engine = create_async_engine(
@@ -27,144 +26,113 @@ async def create_tables():
         future=True
     )
     
-    # Create all tables
-    async with engine.begin() as conn:
-        # Drop tables if they exist (only for development)
-        # await conn.run_sync(Base.metadata.drop_all)
+    try:
+        # Create all tables
+        async with engine.begin() as conn:
+            # For development: Drop tables if they exist (COMMENT OUT IN PRODUCTION)
+            # await conn.run_sync(Base.metadata.drop_all)
+            
+            # Create tables with updated schema
+            await conn.run_sync(Base.metadata.create_all)
         
-        # Create tables
-        await conn.run_sync(Base.metadata.create_all)
-    
-    await engine.dispose()
-    print("✅ Database tables created successfully!")
-
-if __name__ == "__main__":
-    asyncio.run(create_tables())
-
-# backend/scripts/add_sample_data.py
-"""
-Script to add sample chat data for testing.
-"""
-
-import asyncio
-import uuid
-from datetime import datetime
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-
-from app.core.config import settings
-from app.models.user import User
-from app.models.project import Project
-from app.models.chat import ChatInstance, ChatMessage
+        print("✅ Database tables created successfully with chat_id support!")
+        print("\n📋 Tables created:")
+        print("  - users")
+        print("  - projects")  
+        print("  - documents")
+        print("  - chat_instances")
+        print("  - chat_messages")
+        print("  - workflow_executions (WITH chat_id field)")
+        print("  - workflow_checkpoints")
+        
+    except Exception as e:
+        print(f"❌ Failed to create tables: {str(e)}")
+        raise
+    finally:
+        await engine.dispose()
 
 async def add_sample_data():
-    """Add sample chat data for testing."""
+    """Add sample data for testing workflow-chat integration."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.orm import sessionmaker
+    from app.models.user import User
+    from app.models.project import Project
+    from app.models.chat import ChatInstance
+    from app.models.workflow import WorkflowExecution
+    import uuid
     
-    # Create async engine and session
     engine = create_async_engine(settings.DATABASE_URL)
-    AsyncSessionLocal = sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
+    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     
-    async with AsyncSessionLocal() as db:
-        try:
-            # Find first user and project (assuming they exist)
-            from sqlalchemy import select
-            
-            user_result = await db.execute(select(User).limit(1))
-            user = user_result.scalar_one_or_none()
-            
-            if not user:
-                print("❌ No users found. Please create a user first.")
-                return
-            
-            project_result = await db.execute(
-                select(Project).where(Project.owner_id == user.id).limit(1)
+    try:
+        async with async_session() as session:
+            # Create test user
+            user = User(
+                email="test@spinscribe.com",
+                hashed_password="hashed_password_here",
+                first_name="Test",
+                last_name="User",
+                is_active=True
             )
-            project = project_result.scalar_one_or_none()
+            session.add(user)
+            await session.flush()
             
-            if not project:
-                print("❌ No projects found. Please create a project first.")
-                return
+            # Create test project
+            project = Project(
+                name="Test SpinScribe Project",
+                description="Project for testing agent communication",
+                owner_id=user.id
+            )
+            session.add(project)
+            await session.flush()
             
-            # Create sample chat instance
-            chat_instance = ChatInstance(
+            # Create workflow chat instance
+            chat = ChatInstance(
                 project_id=project.id,
-                name="Content Creation Chat",
-                description="Chat for creating marketing content with AI agents",
+                name="SpinScribe Workflow Chat",
+                description="Chat for agent collaboration and human checkpoints",
                 chat_type="workflow",
                 created_by=user.id,
                 agent_config={
-                    "enable_style_analysis": True,
-                    "enable_checkpoints": True,
-                    "content_type": "blog_post"
+                    "enable_agent_messages": True,
+                    "show_agent_thinking": True,
+                    "checkpoint_notifications": True
                 }
             )
+            session.add(chat)
+            await session.flush()
             
-            db.add(chat_instance)
-            await db.flush()  # Get ID without committing
+            # Create workflow execution linked to chat
+            workflow = WorkflowExecution(
+                project_id=project.id,
+                user_id=user.id,
+                chat_id=chat.id,  # This should now work!
+                title="Test Content Creation",
+                content_type="blog_post",
+                use_project_documents=True,
+                status="pending"
+            )
+            session.add(workflow)
             
-            # Create sample messages
-            messages = [
-                ChatMessage(
-                    chat_instance_id=chat_instance.id,
-                    sender_id=user.id,
-                    sender_type="user",
-                    message_content="Hi! I need help creating a blog post about sustainable technology trends.",
-                    message_type="text"
-                ),
-                ChatMessage(
-                    chat_instance_id=chat_instance.id,
-                    sender_type="agent",
-                    agent_type="coordinator",
-                    message_content="Hello! I'll help you create a compelling blog post about sustainable technology trends. Let me analyze your requirements and coordinate with our specialized agents.",
-                    message_type="text",
-                    metadata={
-                        "workflow_stage": "initialization",
-                        "agent_status": "active"
-                    }
-                ),
-                ChatMessage(
-                    chat_instance_id=chat_instance.id,
-                    sender_type="agent", 
-                    agent_type="style_analysis",
-                    message_content="🔍 I'm analyzing your brand voice and style preferences. Based on your previous content, I recommend a professional yet accessible tone for this tech-focused piece.",
-                    message_type="text",
-                    metadata={
-                        "workflow_stage": "style_analysis",
-                        "analysis_complete": True
-                    }
-                ),
-                ChatMessage(
-                    chat_instance_id=chat_instance.id,
-                    sender_type="agent",
-                    agent_type="content_planning", 
-                    message_content="📋 I've created a content outline covering: 1) Current sustainable tech landscape, 2) Emerging innovations, 3) Impact on business, 4) Future predictions. Would you like me to proceed with this structure?",
-                    message_type="checkpoint",
-                    metadata={
-                        "workflow_stage": "content_planning",
-                        "requires_approval": True,
-                        "checkpoint_type": "strategy_approval"
-                    }
-                )
-            ]
+            await session.commit()
             
-            for message in messages:
-                db.add(message)
+            print("✅ Sample data created successfully!")
+            print(f"   User ID: {user.id}")
+            print(f"   Project ID: {project.id}")
+            print(f"   Chat ID: {chat.id}")
+            print(f"   Workflow ID: {workflow.id}")
             
-            await db.commit()
-            
-            print(f"✅ Sample data created successfully!")
-            print(f"   - Chat Instance ID: {chat_instance.id}")
-            print(f"   - Project: {project.name}")
-            print(f"   - User: {user.email}")
-            print(f"   - Messages: {len(messages)}")
-            
-        except Exception as e:
-            await db.rollback()
-            print(f"❌ Error creating sample data: {e}")
-    
-    await engine.dispose()
+    except Exception as e:
+        print(f"❌ Failed to create sample data: {str(e)}")
+        raise
+    finally:
+        await engine.dispose()
 
 if __name__ == "__main__":
-    asyncio.run(add_sample_data())
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "with-sample-data":
+        asyncio.run(create_tables())
+        asyncio.run(add_sample_data())
+    else:
+        asyncio.run(create_tables())

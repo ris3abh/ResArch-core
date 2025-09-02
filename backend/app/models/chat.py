@@ -1,11 +1,14 @@
-# backend/app/models/chat.py (FIXED VERSION)
+# backend/app/models/chat.py
+"""
+Updated chat models with proper workflow relationship.
+"""
 from sqlalchemy import Column, String, Text, Boolean, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.models.base import BaseModel
 
 class ChatInstance(BaseModel):
-    """Chat instance model for project-based conversations."""
+    """Chat instance model for project-based conversations with workflow integration."""
     __tablename__ = "chat_instances"
     
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
@@ -15,24 +18,31 @@ class ChatInstance(BaseModel):
     is_active = Column(Boolean, default=True, nullable=False)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     agent_config = Column(JSONB, default={})
-    workflow_id = Column(String(100))  # Link to CAMEL workflow execution
+    workflow_id = Column(String(100))  # Link to CAMEL workflow execution (legacy field)
     
     # Relationships
     project = relationship("Project", back_populates="chats")
     creator = relationship("User")
     messages = relationship("ChatMessage", back_populates="chat_instance", cascade="all, delete-orphan")
+    
+    # NEW: Relationship to workflow executions that use this chat
+    workflow_executions = relationship(
+        "WorkflowExecution", 
+        foreign_keys="WorkflowExecution.chat_id",
+        back_populates="chat_instance"
+    )
 
 class ChatMessage(BaseModel):
-    """Chat message model for storing conversation history."""
+    """Chat message model for storing conversation history including agent communications."""
     __tablename__ = "chat_messages"
     
     chat_instance_id = Column(UUID(as_uuid=True), ForeignKey("chat_instances.id", ondelete="CASCADE"), nullable=False)
     sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     sender_type = Column(String(50), nullable=False)  # 'user', 'agent', 'system'
-    agent_type = Column(String(100))  # 'coordinator', 'style_analysis', 'content_planning', etc.
+    agent_type = Column(String(100))  # 'coordinator', 'style_analysis', 'content_planning', 'quality_assurance', etc.
     message_content = Column(Text, nullable=False)
-    message_type = Column(String(50), default="text")  # 'text', 'checkpoint', 'file', 'action'
-    message_metadata = Column(JSONB, default={})  # CHANGED: metadata -> message_metadata
+    message_type = Column(String(50), default="text")  # 'text', 'checkpoint', 'file', 'action', 'agent_update'
+    message_metadata = Column(JSONB, default={})  # Store workflow_id, stage, progress, etc.
     parent_message_id = Column(UUID(as_uuid=True), ForeignKey("chat_messages.id"))
     is_edited = Column(Boolean, default=False, nullable=False)
     
