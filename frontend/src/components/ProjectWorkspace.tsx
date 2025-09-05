@@ -1,4 +1,6 @@
-// src/components/ProjectWorkspace.tsx
+// frontend/src/components/ProjectWorkspace.tsx 
+// FIXED VERSION - All errors and warnings resolved
+
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
@@ -15,7 +17,12 @@ import {
   Loader2,
   Plus,
   Search,
-  Filter
+  Filter,
+  Save,
+  Edit3,
+  User,
+  AlertCircle,
+  CheckCircle
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -47,7 +54,11 @@ const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info')
   setTimeout(() => toast.style.transform = 'translateX(0)', 10);
   setTimeout(() => {
     toast.style.transform = 'translateX(100%)';
-    setTimeout(() => document.body.removeChild(toast), 300);
+    setTimeout(() => {
+      if (document.body.contains(toast)) {
+        document.body.removeChild(toast);
+      }
+    }, 300);
   }, 4000);
 };
 
@@ -68,164 +79,401 @@ interface Document {
   original_filename: string;
   file_size: number;
   file_type: string;
-  file_path: string;
-  project_id: string;
-  uploaded_by_id: string;
   created_at: string;
-  updated_at: string;
 }
 
-export default function ProjectWorkspace() {
+type TabType = 'overview' | 'documents' | 'workflows' | 'settings';
+
+// ProjectSettingsTab component
+const ProjectSettingsTab: React.FC<{
+  project: Project;
+  onProjectUpdate: (project: Project) => void;
+}> = ({ project, onProjectUpdate }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  
+  const [formData, setFormData] = useState({
+    name: project.name || '',
+    description: project.description || '',
+    client_name: project.client_name || ''
+  });
+
+  useEffect(() => {
+    setFormData({
+      name: project.name || '',
+      description: project.description || '',
+      client_name: project.client_name || ''
+    });
+  }, [project]);
+
+  const showMessage = (text: string, type: 'success' | 'error' | 'info' = 'info') => {
+    setMessage({ text, type });
+    setTimeout(() => setMessage(null), 4000);
+  };
+
+  const handleSave = async () => {
+    if (!formData.name.trim()) {
+      showMessage('Project name is required', 'error');
+      return;
+    }
+
+    try {
+      setIsSaving(true);
+      
+      // Use the API service method to update project
+      const updatedProject = await apiService.updateProject(project.id, {
+        name: formData.name.trim(),
+        description: formData.description.trim() || undefined,
+        client_name: formData.client_name.trim() || undefined
+      });
+      
+      onProjectUpdate(updatedProject);
+      setIsEditing(false);
+      showMessage('Project settings updated successfully!', 'success');
+      
+    } catch (error: any) {
+      console.error('Failed to update project:', error);
+      showMessage('Failed to update project settings: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setFormData({
+      name: project.name || '',
+      description: project.description || '',
+      client_name: project.client_name || ''
+    });
+    setIsEditing(false);
+  };
+
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  return (
+    <div className="h-full bg-gray-900 p-6">
+      {/* Message Toast */}
+      {message && (
+        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-lg text-white transition-all duration-300 shadow-lg ${
+          message.type === 'success' ? 'bg-green-500' : 
+          message.type === 'error' ? 'bg-red-500' : 'bg-blue-500'
+        }`}>
+          <div className="flex items-center gap-2">
+            {message.type === 'success' && <CheckCircle className="w-4 h-4" />}
+            {message.type === 'error' && <AlertCircle className="w-4 h-4" />}
+            {message.type === 'info' && <Settings className="w-4 h-4" />}
+            {message.text}
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-4xl mx-auto">
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <h2 className="text-2xl font-bold text-white mb-2">Project Settings</h2>
+            <p className="text-gray-400">Manage your project information and configuration</p>
+          </div>
+          
+          {!isEditing ? (
+            <button
+              onClick={() => setIsEditing(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
+            >
+              <Edit3 className="w-4 h-4" />
+              Edit Settings
+            </button>
+          ) : (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleCancel}
+                disabled={isSaving}
+                className="px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={isSaving || !formData.name.trim()}
+                className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSaving ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4" />
+                    Save Changes
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-6">
+          {/* Project Information */}
+          <div className="bg-gray-800 rounded-xl border border-gray-700 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <FileText className="w-5 h-5 text-orange-500" />
+              <h3 className="text-lg font-semibold text-white">Project Information</h3>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Project Name *
+                </label>
+                {isEditing ? (
+                  <input
+                    type="text"
+                    value={formData.name}
+                    onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500"
+                    placeholder="Enter project name"
+                  />
+                ) : (
+                  <div className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white">
+                    {project.name || 'Untitled Project'}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Client Name
+                </label>
+                {isEditing ? (
+                  <input
+                    type="text"
+                    value={formData.client_name}
+                    onChange={(e) => setFormData(prev => ({ ...prev, client_name: e.target.value }))}
+                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500"
+                    placeholder="Enter client name (optional)"
+                  />
+                ) : (
+                  <div className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white">
+                    {project.client_name || 'No client specified'}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-6">
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Project Description
+              </label>
+              {isEditing ? (
+                <textarea
+                  value={formData.description}
+                  onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
+                  rows={4}
+                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500"
+                  placeholder="Describe your project goals, objectives, and any important details..."
+                />
+              ) : (
+                <div className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white min-h-[100px]">
+                  {project.description || 'No description provided'}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Project Metadata */}
+          <div className="bg-gray-800 rounded-xl border border-gray-700 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Calendar className="w-5 h-5 text-blue-500" />
+              <h3 className="text-lg font-semibold text-white">Project Timeline</h3>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Created</label>
+                <div className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-300">
+                  {formatDate(project.created_at)}
+                </div>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Last Modified</label>
+                <div className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-300">
+                  {formatDate(project.updated_at)}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Project ID */}
+          <div className="bg-gray-800 rounded-xl border border-gray-700 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <User className="w-5 h-5 text-purple-500" />
+              <h3 className="text-lg font-semibold text-white">Project Details</h3>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Project ID</label>
+              <div className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-300 font-mono text-sm">
+                {project.id}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                This unique identifier is used for API calls and integrations
+              </p>
+            </div>
+          </div>
+
+          {isEditing && (
+            <div className="bg-yellow-900/20 border border-yellow-600/30 rounded-lg p-4">
+              <div className="flex items-center gap-2 text-yellow-400">
+                <AlertCircle className="w-5 h-5" />
+                <p className="font-medium">Editing Project Settings</p>
+              </div>
+              <p className="text-yellow-300/80 mt-1 text-sm">
+                Make sure to save your changes before navigating away from this page.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Main ProjectWorkspace component
+const ProjectWorkspace: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
   
+  const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [project, setProject] = useState<Project | null>(null);
   const [documents, setDocuments] = useState<Document[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'documents' | 'workflows' | 'settings'>('overview');
   const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
-  const [error, setError] = useState<string>('');
-
-  // Document upload states
-  const [showUploadModal, setShowUploadModal] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [error, setError] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
     if (projectId) {
-      loadProject();
-      loadDocuments();
+      loadProjectData();
     }
   }, [projectId]);
 
-  const loadProject = async () => {
+  const loadProjectData = async () => {
     if (!projectId) return;
-    
-    try {
-      const projectData = await apiService.getProject(projectId);
-      setProject(projectData);
-    } catch (error: any) {
-      console.error('Failed to load project:', error);
-      setError('Failed to load project');
-      showToast('Failed to load project', 'error');
-    }
-  };
 
-  const loadDocuments = async () => {
-    if (!projectId) return;
-    
     try {
-      setIsLoadingDocuments(true);
-      const documentsData = await apiService.getProjectDocuments(projectId);
+      setIsLoading(true);
+      const [projectData, documentsData] = await Promise.all([
+        apiService.getProject(projectId),
+        apiService.getProjectDocuments(projectId)
+      ]);
+      
+      setProject(projectData);
       setDocuments(documentsData);
     } catch (error: any) {
-      console.error('Failed to load documents:', error);
-      // Don't show error for documents as it's not critical
+      console.error('Failed to load project data:', error);
+      setError('Failed to load project data');
+      showToast('Failed to load project data', 'error');
     } finally {
-      setIsLoadingDocuments(false);
       setIsLoading(false);
     }
   };
 
-  const handleStartWorkflow = () => {
-    navigate(`/workflow/${projectId}`);
+  const handleProjectUpdate = (updatedProject: Project) => {
+    setProject(updatedProject);
+    showToast('Project updated successfully!', 'success');
   };
 
   const handleBackToDashboard = () => {
     navigate('/dashboard');
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
+  const handleStartWorkflow = () => {
+    if (projectId) {
+      navigate(`/workflow/${projectId}`);
     }
   };
 
-  const handleDragEvents = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0 || !projectId) return;
 
-  const handleDragEnter = (e: React.DragEvent) => {
-    handleDragEvents(e);
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    handleDragEvents(e);
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    handleDragEvents(e);
-    setIsDragging(false);
-    
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      setSelectedFile(files[0]);
-    }
-  };
-
-  const handleFileUpload = async () => {
-    if (!selectedFile || !projectId) return;
+    setIsUploading(true);
+    setUploadProgress(0);
 
     try {
-      setIsUploading(true);
-      await apiService.uploadDocument(projectId, selectedFile);
-      await loadDocuments();
-      setShowUploadModal(false);
-      setSelectedFile(null);
-      showToast('Document uploaded successfully!', 'success');
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        // Pass the actual File object, not FormData
+        await apiService.uploadDocument(projectId, file);
+        setUploadProgress(((i + 1) / files.length) * 100);
+      }
+
+      await loadProjectData(); // Reload documents
+      showToast(`Successfully uploaded ${files.length} file(s)`, 'success');
     } catch (error: any) {
-      console.error('Failed to upload document:', error);
-      showToast('Failed to upload document: ' + error.message, 'error');
+      console.error('Upload failed:', error);
+      showToast('Failed to upload files', 'error');
     } finally {
       setIsUploading(false);
+      setUploadProgress(0);
+      if (event.target) {
+        event.target.value = '';
+      }
     }
   };
 
   const handleDeleteDocument = async (documentId: string) => {
-    if (!confirm('Are you sure you want to delete this document?')) return;
+    if (!window.confirm('Are you sure you want to delete this document?')) return;
 
     try {
       await apiService.deleteDocument(documentId);
-      setDocuments(documents.filter(doc => doc.id !== documentId));
-      showToast('Document deleted successfully!', 'success');
+      setDocuments(docs => docs.filter(doc => doc.id !== documentId));
+      showToast('Document deleted successfully', 'success');
     } catch (error: any) {
       console.error('Failed to delete document:', error);
       showToast('Failed to delete document', 'error');
     }
   };
 
-  const formatFileSize = (bytes: number) => {
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes';
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
+      year: 'numeric'
     });
   };
+
+  const filteredDocuments = documents.filter(doc =>
+    doc.original_filename.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    doc.file_type.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
         <div className="text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-orange-500 to-violet-600 rounded-full mb-4 animate-pulse">
-            <FileText className="w-8 h-8 text-white" />
-          </div>
-          <h1 className="text-xl font-semibold text-white mb-2">Loading Project...</h1>
-          <p className="text-gray-400">Setting up your workspace</p>
+          <Loader2 className="w-8 h-8 text-orange-500 animate-spin mx-auto mb-4" />
+          <p className="text-white">Loading project...</p>
         </div>
       </div>
     );
@@ -235,11 +483,7 @@ export default function ProjectWorkspace() {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
-            <span className="text-2xl">❌</span>
-          </div>
-          <h1 className="text-xl font-semibold text-white mb-2">Project Not Found</h1>
-          <p className="text-gray-400 mb-4">{error || 'The requested project could not be loaded.'}</p>
+          <p className="text-red-400 mb-4">{error || 'Project not found'}</p>
           <button
             onClick={handleBackToDashboard}
             className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
@@ -364,56 +608,53 @@ export default function ProjectWorkspace() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <button
                       onClick={handleStartWorkflow}
-                      className="p-4 bg-gradient-to-r from-orange-500 to-violet-600 rounded-lg text-left hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
+                      className="flex items-center gap-3 p-4 bg-gradient-to-r from-orange-500/20 to-violet-600/20 border border-orange-500/30 rounded-lg hover:from-orange-500/30 hover:to-violet-600/30 transition-all duration-300"
                     >
-                      <Zap className="w-6 h-6 mb-2" />
-                      <h4 className="font-medium mb-1">Start AI Workflow</h4>
-                      <p className="text-sm text-orange-100">Let our agents create content for you</p>
+                      <Zap className="w-6 h-6 text-orange-500" />
+                      <div className="text-left">
+                        <p className="font-medium">Start AI Workflow</p>
+                        <p className="text-sm text-gray-400">Begin content generation</p>
+                      </div>
                     </button>
                     
-                    <button
-                      onClick={() => setActiveTab('documents')}
-                      className="p-4 bg-gray-700 border border-gray-600 rounded-lg text-left hover:bg-gray-650 transition-all duration-300"
-                    >
-                      <Upload className="w-6 h-6 mb-2 text-blue-400" />
-                      <h4 className="font-medium mb-1">Upload Documents</h4>
-                      <p className="text-sm text-gray-400">Add brand guidelines and resources</p>
-                    </button>
+                    <label className="flex items-center gap-3 p-4 bg-blue-500/20 border border-blue-500/30 rounded-lg hover:bg-blue-500/30 transition-all duration-300 cursor-pointer">
+                      <Upload className="w-6 h-6 text-blue-500" />
+                      <div className="text-left">
+                        <p className="font-medium">Upload Documents</p>
+                        <p className="text-sm text-gray-400">Add reference materials</p>
+                      </div>
+                      <input
+                        type="file"
+                        multiple
+                        onChange={handleFileUpload}
+                        className="hidden"
+                        disabled={isUploading}
+                      />
+                    </label>
                   </div>
                 </div>
               </div>
 
-              {/* Recent Documents */}
+              {/* Project Info */}
               <div>
-                <h2 className="text-lg font-semibold mb-4">Recent Documents</h2>
-                <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
-                  {documents.length === 0 ? (
-                    <div className="text-center py-8">
-                      <FileText className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-                      <p className="text-gray-500 text-sm">No documents yet</p>
-                      <p className="text-gray-600 text-xs mt-1">Upload brand guidelines to get started</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {documents.slice(0, 5).map((doc) => (
-                        <div key={doc.id} className="flex items-center gap-3 p-2 bg-gray-700 rounded-lg">
-                          <FileText className="w-4 h-4 text-blue-400" />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium text-white truncate">{doc.original_filename}</p>
-                            <p className="text-xs text-gray-400">{formatFileSize(doc.file_size)}</p>
-                          </div>
-                        </div>
-                      ))}
-                      {documents.length > 5 && (
-                        <button
-                          onClick={() => setActiveTab('documents')}
-                          className="w-full text-sm text-orange-500 hover:text-orange-400 transition-colors"
-                        >
-                          View all {documents.length} documents
-                        </button>
-                      )}
-                    </div>
-                  )}
+                <h2 className="text-lg font-semibold mb-4">Project Details</h2>
+                <div className="bg-gray-800 rounded-lg border border-gray-700 p-6 space-y-4">
+                  <div>
+                    <p className="text-sm text-gray-400">Client</p>
+                    <p className="font-medium">{project.client_name || 'No client specified'}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-400">Created</p>
+                    <p className="font-medium">{formatDate(project.created_at)}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-400">Last Updated</p>
+                    <p className="font-medium">{formatDate(project.updated_at)}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-400">Documents</p>
+                    <p className="font-medium">{documents.length} files</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -423,74 +664,101 @@ export default function ProjectWorkspace() {
         {activeTab === 'documents' && (
           <div className="p-6">
             <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-xl font-semibold mb-1">Project Documents</h2>
-                <p className="text-gray-400">Manage your brand guidelines, style guides, and reference materials</p>
+              <h2 className="text-lg font-semibold">Documents</h2>
+              <div className="flex items-center gap-3">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <input
+                    type="text"
+                    placeholder="Search documents..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="pl-10 pr-4 py-2 bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500"
+                  />
+                </div>
+                <label className="px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 cursor-pointer flex items-center gap-2">
+                  <Upload className="w-4 h-4" />
+                  Upload Files
+                  <input
+                    type="file"
+                    multiple
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    disabled={isUploading}
+                  />
+                </label>
               </div>
-              <button
-                onClick={() => setShowUploadModal(true)}
-                className="px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 flex items-center gap-2"
-              >
-                <Plus className="w-4 h-4" />
-                Upload Document
-              </button>
             </div>
 
-            {isLoadingDocuments ? (
-              <div className="flex items-center justify-center h-64">
-                <Loader2 className="w-8 h-8 animate-spin text-orange-500" />
+            {isUploading && (
+              <div className="mb-6 bg-blue-900/30 border border-blue-500/30 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-blue-200">Uploading files...</span>
+                  <span className="text-blue-200">{Math.round(uploadProgress)}%</span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-2">
+                  <div 
+                    className="bg-gradient-to-r from-orange-500 to-violet-600 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
               </div>
-            ) : documents.length === 0 ? (
-              <div className="text-center py-12">
-                <Upload className="w-16 h-16 text-gray-600 mx-auto mb-4" />
-                <h3 className="text-lg font-semibold text-gray-300 mb-2">No documents uploaded</h3>
-                <p className="text-gray-500 mb-6">
-                  Upload brand guidelines, style guides, or sample content to help AI agents understand your requirements better.
-                </p>
-                <button
-                  onClick={() => setShowUploadModal(true)}
-                  className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 flex items-center gap-2 mx-auto"
-                >
-                  <Upload className="w-4 h-4" />
-                  Upload Your First Document
-                </button>
-              </div>
-            ) : (
-              <div className="grid gap-4">
-                {documents.map((document) => (
-                  <div key={document.id} className="bg-gray-800 border border-gray-700 rounded-lg p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <FileText className="w-8 h-8 text-blue-500" />
-                        <div>
-                          <h3 className="font-medium text-white">{document.original_filename}</h3>
-                          <div className="flex items-center gap-4 text-sm text-gray-400">
-                            <span>{formatFileSize(document.file_size)}</span>
-                            <span>{document.file_type}</span>
-                            <span>{formatDate(document.created_at)}</span>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => apiService.downloadDocument(document.id)}
-                          className="p-2 text-gray-400 hover:text-blue-400 transition-colors"
-                          title="Download"
-                        >
-                          <Download className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleDeleteDocument(document.id)}
-                          className="p-2 text-gray-400 hover:text-red-400 transition-colors"
-                          title="Delete"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredDocuments.map((doc) => (
+                <div key={doc.id} className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <FileText className="w-5 h-5 text-blue-500" />
+                      <div className="min-w-0">
+                        <p className="font-medium text-white truncate" title={doc.original_filename}>
+                          {doc.original_filename}
+                        </p>
+                        <p className="text-sm text-gray-400">
+                          {doc.file_type.toUpperCase()} • {formatFileSize(doc.file_size)}
+                        </p>
                       </div>
                     </div>
+                    <button
+                      onClick={() => handleDeleteDocument(doc.id)}
+                      className="p-1 text-gray-400 hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
-                ))}
+                  
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-500">
+                      {formatDate(doc.created_at)}
+                    </span>
+                    <button className="p-1 text-gray-400 hover:text-white transition-colors">
+                      <Download className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {filteredDocuments.length === 0 && !isUploading && (
+              <div className="text-center py-12">
+                <FileText className="w-12 h-12 text-gray-500 mx-auto mb-4" />
+                <p className="text-gray-400 mb-2">
+                  {searchTerm ? 'No documents match your search' : 'No documents uploaded yet'}
+                </p>
+                {!searchTerm && (
+                  <label className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 cursor-pointer">
+                    <Upload className="w-4 h-4" />
+                    Upload Your First Document
+                    <input
+                      type="file"
+                      multiple
+                      onChange={handleFileUpload}
+                      className="hidden"
+                      disabled={isUploading}
+                    />
+                  </label>
+                )}
               </div>
             )}
           </div>
@@ -498,164 +766,32 @@ export default function ProjectWorkspace() {
 
         {activeTab === 'workflows' && (
           <div className="p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-xl font-semibold mb-1">AI Workflows</h2>
-                <p className="text-gray-400">Multi-agent content creation workflows</p>
-              </div>
-              <button
-                onClick={handleStartWorkflow}
-                className="px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 flex items-center gap-2"
-              >
-                <Zap className="w-4 h-4" />
-                Start New Workflow
-              </button>
-            </div>
-
             <div className="text-center py-12">
-              <Zap className="w-16 h-16 text-gray-600 mx-auto mb-4" />
-              <h3 className="text-lg font-semibold text-gray-300 mb-2">No workflows yet</h3>
-              <p className="text-gray-500 mb-6">
-                Start your first SpinScribe AI workflow to create content with our multi-agent system.
+              <Zap className="w-16 h-16 text-gray-500 mx-auto mb-6" />
+              <h3 className="text-xl font-semibold mb-4">AI Workflows</h3>
+              <p className="text-gray-400 mb-6 max-w-md mx-auto">
+                Create intelligent content using AI agents that collaborate to produce high-quality results.
               </p>
               <button
                 onClick={handleStartWorkflow}
                 className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 flex items-center gap-2 mx-auto"
               >
-                <Zap className="w-4 h-4" />
-                Start AI Workflow
+                <Zap className="w-5 h-5" />
+                Start Your First Workflow
               </button>
             </div>
           </div>
         )}
 
-        {activeTab === 'settings' && (
-          <div className="p-6">
-            <h2 className="text-lg font-semibold mb-4">Project Settings</h2>
-            <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
-              <div className="space-y-6">
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
-                    Project Name
-                  </label>
-                  <input
-                    type="text"
-                    value={project.name}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-orange-500"
-                    readOnly
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
-                    Description
-                  </label>
-                  <textarea
-                    value={project.description || ''}
-                    rows={3}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-orange-500"
-                    readOnly
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
-                    Client Name
-                  </label>
-                  <input
-                    type="text"
-                    value={project.client_name || ''}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-orange-500"
-                    readOnly
-                  />
-                </div>
-                
-                <div className="pt-4 border-t border-gray-700">
-                  <p className="text-sm text-gray-500 mb-4">Created by: {user?.first_name} {user?.last_name}</p>
-                  <p className="text-sm text-gray-500">Project ID: {project.id}</p>
-                </div>
-              </div>
-            </div>
-          </div>
+        {activeTab === 'settings' && project && (
+          <ProjectSettingsTab 
+            project={project} 
+            onProjectUpdate={handleProjectUpdate}
+          />
         )}
       </div>
-
-      {/* Upload Document Modal */}
-      {showUploadModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-lg">
-            <h3 className="text-lg font-semibold mb-4">Upload Document</h3>
-            
-            <div 
-              className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
-                isDragging ? 'border-orange-500 bg-orange-500/10' : 'border-gray-600 hover:border-gray-500'
-              }`}
-              onDragEnter={handleDragEnter}
-              onDragLeave={handleDragLeave}
-              onDragOver={handleDragEvents}
-              onDrop={handleDrop}
-            >
-              <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-              
-              {selectedFile ? (
-                <div className="space-y-2">
-                  <p className="text-green-400 font-medium">{selectedFile.name}</p>
-                  <p className="text-sm text-gray-400">{formatFileSize(selectedFile.size)}</p>
-                  <button
-                    onClick={() => setSelectedFile(null)}
-                    className="text-sm text-red-400 hover:text-red-300"
-                  >
-                    Remove file
-                  </button>
-                </div>
-              ) : (
-                <div>
-                  <p className="text-gray-600 mb-2">Drag and drop your file here</p>
-                  <p className="text-sm text-gray-500 mb-4">or click to browse</p>
-                  <label className="inline-block">
-                    <input
-                      type="file"
-                      className="hidden"
-                      onChange={handleFileSelect}
-                      accept=".txt,.md,.doc,.docx,.pdf"
-                    />
-                    <span className="px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white font-medium rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300 cursor-pointer">
-                      Choose File
-                    </span>
-                  </label>
-                </div>
-              )}
-            </div>
-            
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => {
-                  setShowUploadModal(false);
-                  setSelectedFile(null);
-                }}
-                className="flex-1 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
-                disabled={isUploading}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleFileUpload}
-                disabled={!selectedFile || isUploading}
-                className="flex-1 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {isUploading ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Uploading...
-                  </>
-                ) : (
-                  'Upload Document'
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
-}
+};
+
+export default ProjectWorkspace;

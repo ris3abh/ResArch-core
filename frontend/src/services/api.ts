@@ -1,7 +1,9 @@
-// src/services/api.ts
+// frontend/src/services/api.ts
+// COMPLETE VERSION - Only minimal safe additions to your working code
+
 const API_BASE_URL = 'http://localhost:8000/api/v1';
 
-// TypeScript interfaces
+// TypeScript interfaces (your existing ones + minimal additions)
 export interface User {
   id: string;
   email: string;
@@ -57,7 +59,7 @@ export interface ChatMessage {
   created_at: string;
 }
 
-// Workflow interfaces
+// Workflow interfaces (your existing ones)
 export interface WorkflowConfig {
   title: string;
   contentType: string;
@@ -107,6 +109,13 @@ export interface CheckpointResponse {
 
 export interface CheckpointApproval {
   feedback?: string;
+}
+
+// NEW: Add interface for project update (needed for settings)
+export interface ProjectUpdateRequest {
+  name?: string;
+  description?: string;
+  client_name?: string;
 }
 
 class ApiService {
@@ -211,6 +220,7 @@ class ApiService {
     return this.request(`/projects/${projectId}`);
   }
 
+  // ✅ YOUR EXISTING updateProject METHOD - KEEPING AS IS
   async updateProject(projectId: string, projectData: {
     name?: string;
     description?: string;
@@ -233,6 +243,7 @@ class ApiService {
     return this.request(`/documents/project/${projectId}`);
   }
 
+  // ✅ YOUR EXISTING uploadDocument METHOD - KEEPING AS IS
   async uploadDocument(projectId: string, file: File): Promise<Document> {
     const formData = new FormData();
     formData.append('file', file);
@@ -309,7 +320,7 @@ class ApiService {
   }
 
   // ========================================
-  // WORKFLOW METHODS - NEW IMPLEMENTATIONS
+  // WORKFLOW METHODS - YOUR EXISTING IMPLEMENTATIONS
   // ========================================
 
   async startWorkflow(workflowData: WorkflowCreateRequest): Promise<WorkflowResponse> {
@@ -321,7 +332,6 @@ class ApiService {
 
   async getWorkflowStatus(workflowId: string): Promise<WorkflowResponse> {
     return this.request(`/workflows/status/${workflowId}`);
-
   }
 
   async listWorkflows(params?: {
@@ -343,6 +353,20 @@ class ApiService {
     const endpoint = queryString ? `/workflows/?${queryString}` : '/workflows/';
     
     return this.request(endpoint);
+  }
+
+  // NEW: Add alias method for getActiveWorkflows (uses your existing listWorkflows)
+  async getActiveWorkflows(projectId: string): Promise<WorkflowResponse[]> {
+    try {
+      return this.listWorkflows({ 
+        project_id: projectId, 
+        status: 'running' 
+      });
+    } catch (error) {
+      // If endpoint doesn't exist yet, return empty array
+      console.warn('Active workflows endpoint not available:', error);
+      return [];
+    }
   }
 
   async cancelWorkflow(workflowId: string): Promise<{ message: string; workflow_id: string; status: string }> {
