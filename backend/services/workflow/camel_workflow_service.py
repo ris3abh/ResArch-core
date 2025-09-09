@@ -1,7 +1,7 @@
 # services/workflow/camel_workflow_service.py
 """
 Enhanced CAMEL workflow service with chat integration for agent communication.
-This service now properly integrates with the chat system for real-time agent visibility.
+FIXED VERSION - Corrects parameter mapping and removes mock workflow.
 """
 
 import os
@@ -40,14 +40,14 @@ class CamelWorkflowService:
             logger.info("✅ Enhanced SpinScribe features available")
             
         except ImportError:
-            logger.warning("⚠️ SpinScribe library not available - using mock mode")
+            logger.warning("⚠️ SpinScribe library not available")
         
         # Check API key
         openai_key = os.getenv("OPENAI_API_KEY", "")
         self.api_key_available = openai_key and not openai_key.startswith("sk-dummy")
         
         if not self.api_key_available:
-            logger.warning("⚠️ No valid OpenAI API key found - using mock mode")
+            logger.warning("⚠️ No valid OpenAI API key found")
     
     def set_websocket_manager(self, websocket_manager_instance):
         """Connect the WebSocket manager for real-time updates."""
@@ -65,7 +65,7 @@ class CamelWorkflowService:
         workflow_id = f"workflow_{int(datetime.now().timestamp())}_{request.project_id}"
         
         logger.info(f"🚀 Starting workflow: {workflow_id}")
-        logger.info(f"   Mode: {'Enhanced SpinScribe' if self.enhanced_available and self.api_key_available else 'Mock'}")
+        logger.info(f"   Mode: Enhanced SpinScribe")
         logger.info(f"   Chat ID: {request.chat_id}")
         
         try:
@@ -95,13 +95,8 @@ class CamelWorkflowService:
                     "stage": "initialization"
                 })
             
-            # Choose execution mode and run workflow
-            if self.enhanced_available and self.api_key_available and not os.getenv("OPENAI_API_KEY", "").startswith("sk-dummy"):
-                # Real SpinScribe execution with agent communication
-                result = await self._run_enhanced_workflow_with_chat(workflow_id, request, project_documents)
-            else:
-                # Mock execution with simulated agent communication
-                result = await self._run_mock_workflow_with_chat(workflow_id, request)
+            # Run enhanced workflow
+            result = await self._run_enhanced_workflow_with_chat(workflow_id, request, project_documents)
             
             # Update state
             final_status = "completed" if result.get("final_content") else "failed"
@@ -129,7 +124,7 @@ class CamelWorkflowService:
                 progress=100.0 if final_status == "completed" else 0.0,
                 message="Workflow completed" if final_status == "completed" else "Workflow failed",
                 project_id=request.project_id,
-                chat_id=request.chat_id,  # Include chat_id in response
+                chat_id=request.chat_id,
                 title=request.title,
                 content_type=request.content_type,
                 final_content=result.get("final_content"),
@@ -170,9 +165,9 @@ class CamelWorkflowService:
                 await self._send_agent_message(workflow_id, "coordinator", "initialization", 
                     "🤖 Coordinator agent is analyzing the task and assembling the team...")
             
-            # Run the actual SpinScribe workflow
+            # FIXED: Use correct parameter name 'title' instead of 'task_description'
             result = await run_enhanced_content_task(
-                task_description=request.title,
+                title=request.title,  # ✅ FIXED: Changed from task_description to title
                 content_type=request.content_type,
                 initial_draft=request.initial_draft,
                 project_documents=project_documents,
@@ -197,18 +192,23 @@ class CamelWorkflowService:
     async def _run_basic_workflow_with_chat(self, workflow_id: str, request: WorkflowCreateRequest) -> Dict[str, Any]:
         """Run basic SpinScribe workflow with chat updates."""
         try:
-            from spinscribe.tasks.simple_process import run_content_task
+            # Try to import from process module
+            try:
+                from spinscribe.tasks.process import run_content_task
+            except ImportError:
+                # Try alternative import path
+                from spinscribe.tasks.enhanced_process import run_enhanced_content_task as run_content_task
             
             if request.chat_id:
                 await self._send_agent_message(workflow_id, "content_creator", "creation", 
                     "✍️ Content creation agent is working on your request...")
             
+            # FIXED: Use correct parameter names to match SpinScribe function signature  
             result = await run_content_task(
-                task_description=request.title,
+                title=request.title,  # ✅ FIXED: Changed from task_description to title
                 content_type=request.content_type,
-                initial_draft=request.initial_draft,
-                workflow_id=workflow_id,
-                agent_callback=self._create_agent_callback(workflow_id, request.chat_id)
+                first_draft=request.initial_draft,  # ✅ FIXED: Changed from initial_draft to first_draft
+                # Note: workflow_id and agent_callback may not be supported in basic version
             )
             
             logger.info(f"✅ Basic workflow completed: {workflow_id}")
@@ -216,80 +216,8 @@ class CamelWorkflowService:
             
         except Exception as e:
             logger.error(f"💥 Basic workflow failed: {str(e)}")
-            return await self._run_mock_workflow_with_chat(workflow_id, request)
-    
-    async def _run_mock_workflow_with_chat(self, workflow_id: str, request: WorkflowCreateRequest) -> Dict[str, Any]:
-        """Run mock workflow with simulated agent communication."""
-        logger.info(f"🎭 Running mock workflow with agent simulation: {workflow_id}")
-        
-        try:
-            # Simulate agent collaboration
-            agents = [
-                ("coordinator", "Task Analysis", "📋 Analyzing task requirements and planning approach..."),
-                ("style_analysis", "Style Analysis", "🎨 Analyzing writing style and tone requirements..."), 
-                ("content_planning", "Content Planning", "📝 Creating content outline and structure..."),
-                ("content_creator", "Content Creation", "✍️ Writing the content based on requirements..."),
-                ("quality_assurance", "Quality Review", "🔍 Reviewing content for quality and accuracy...")
-            ]
-            
-            final_content = f"""# {request.title}
-
-This is mock content generated by the SpinScribe simulation.
-
-## Content Type: {request.content_type}
-
-In a real workflow, multiple AI agents would collaborate to create high-quality content:
-- **Coordinator Agent**: Plans and manages the overall workflow
-- **Style Analysis Agent**: Ensures consistent tone and voice
-- **Content Planning Agent**: Creates detailed outlines and structure  
-- **Content Creator Agent**: Writes the actual content
-- **Quality Assurance Agent**: Reviews and refines the final output
-
-The agents communicate through this chat interface, allowing humans to:
-- See real-time progress
-- Approve/reject at key checkpoints
-- Provide feedback and guidance
-- Maintain control over the creative process
-
-{f'Initial draft incorporated: {request.initial_draft[:200]}...' if request.initial_draft else ''}
-"""
-            
-            # Simulate agent work with delays and chat updates
-            for i, (agent_type, stage_name, message) in enumerate(agents):
-                if request.chat_id:
-                    await self._send_agent_message(workflow_id, agent_type, stage_name.lower().replace(" ", "_"), message)
-                
-                # Simulate work time
-                await asyncio.sleep(1)
-                
-                # Send progress update
-                progress = (i + 1) / len(agents) * 100
-                await self._send_status_update(workflow_id, {
-                    "status": "running",
-                    "current_stage": stage_name.lower().replace(" ", "_"),
-                    "progress": progress,
-                    "agent_type": agent_type
-                })
-                
-                # Simulate agent completion
-                if request.chat_id:
-                    await self._send_agent_completion(workflow_id, agent_type, f"{stage_name} completed successfully")
-            
-            return {
-                "workflow_id": workflow_id,
-                "final_content": final_content,
-                "current_stage": "completed",
-                "status": "completed",
-                "live_data": {
-                    "agents_used": [agent[0] for agent in agents],
-                    "simulation_mode": True,
-                    "chat_integration": bool(request.chat_id)
-                }
-            }
-            
-        except Exception as e:
-            logger.error(f"💥 Mock workflow failed: {str(e)}")
-            raise
+            # Re-raise the error instead of falling back to mock
+            raise Exception(f"SpinScribe workflow failed: {str(e)}")
     
     def _create_agent_callback(self, workflow_id: str, chat_id: Optional[str]):
         """Create callback function for agent communication."""
@@ -390,7 +318,6 @@ The agents communicate through this chat interface, allowing humans to:
                 )
         
         # Here you would integrate with the actual CAMEL workflow continuation
-        # For now, just log the continuation
         logger.info(f"🔄 Workflow {workflow_id} continuing after approval")
     
     async def handle_checkpoint_rejection(self, workflow_id: str, checkpoint_id: str, feedback: Optional[str] = None):
