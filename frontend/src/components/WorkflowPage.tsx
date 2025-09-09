@@ -1,5 +1,5 @@
 // frontend/src/components/WorkflowPage.tsx
-// UPDATED to use the new chat interface
+// FIXED VERSION - Properly integrates ChatWorkflowInterface
 
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -44,13 +44,13 @@ type WorkflowState = 'setup' | 'running' | 'completed' | 'error';
 const WorkflowPage: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   
   const [project, setProject] = useState<Project | null>(null);
   const [workflowState, setWorkflowState] = useState<WorkflowState>('setup');
   const [currentWorkflow, setCurrentWorkflow] = useState<WorkflowExecution | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
-  const [showSetupForm, setShowSetupForm] = useState(false);
 
   // Setup form state
   const [workflowConfig, setWorkflowConfig] = useState({
@@ -120,36 +120,28 @@ const WorkflowPage: React.FC = () => {
 
   const handleStartWorkflow = async () => {
     if (!projectId || !workflowConfig.title.trim()) {
-      setError('Please provide a workflow title');
+      setError('Please fill in all required fields');
       return;
     }
 
     try {
       setIsLoading(true);
-      const response = await apiService.startWorkflow({
+      setError('');
+
+      // Create workflow execution
+      const workflowExecution = await apiService.createWorkflowExecution({
         project_id: projectId,
         title: workflowConfig.title,
         content_type: workflowConfig.contentType,
         initial_draft: workflowConfig.initialDraft || undefined,
         use_project_documents: workflowConfig.useProjectDocuments
       });
-      
-      setCurrentWorkflow({
-        workflow_id: response.workflow_id,
-        project_id: projectId,
-        title: workflowConfig.title,
-        content_type: workflowConfig.contentType,
-        status: response.status,
-        current_stage: response.current_stage,
-        progress: response.progress,
-        created_at: new Date().toISOString()
-      });
-      
+
+      setCurrentWorkflow(workflowExecution);
       setWorkflowState('running');
-      setShowSetupForm(false);
     } catch (error: any) {
       console.error('Failed to start workflow:', error);
-      setError('Failed to start workflow: ' + (error.message || 'Unknown error'));
+      setError(error.message || 'Failed to start workflow');
     } finally {
       setIsLoading(false);
     }
@@ -247,155 +239,148 @@ const WorkflowPage: React.FC = () => {
             <div className="w-px h-6 bg-gray-600" />
             <div>
               <h1 className="text-xl font-semibold text-white">
-                {workflowState === 'setup' ? 'Start AI Workflow' : 
-                 workflowState === 'running' ? 'AI Workflow Chat' : 
-                 workflowState === 'completed' ? 'Workflow Completed' : 
-                 'Workflow Error'}
+                {workflowState === 'setup' ? 'Setup Content Workflow' : 
+                 workflowState === 'running' ? 'AI Workflow in Progress' :
+                 workflowState === 'completed' ? 'Workflow Completed' : 'Workflow Error'}
               </h1>
-              <p className="text-sm text-gray-400">
-                {project?.name} {project?.client_name && `• ${project.client_name}`}
-              </p>
+              {project && (
+                <p className="text-sm text-gray-400">
+                  {project.name} {project.client_name && `• ${project.client_name}`}
+                </p>
+              )}
             </div>
           </div>
-
-          {/* Status Indicator */}
-          <div className="flex items-center gap-2">
-            {workflowState === 'running' && currentWorkflow && (
-              <>
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                <span className="text-green-400 text-sm">
-                  {currentWorkflow.current_stage || 'Running'}
-                </span>
-              </>
+          <div className="flex items-center gap-3">
+            {workflowState === 'running' && (
+              <div className="flex items-center gap-2 text-green-400">
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                <span className="text-sm">Live</span>
+              </div>
             )}
-            {workflowState === 'completed' && (
-              <>
-                <CheckCircle className="w-4 h-4 text-green-500" />
-                <span className="text-green-400 text-sm">Completed</span>
-              </>
-            )}
-            {workflowState === 'error' && (
-              <>
-                <AlertCircle className="w-4 h-4 text-red-500" />
-                <span className="text-red-400 text-sm">Error</span>
-              </>
-            )}
+            <div className="flex items-center gap-2 text-gray-400">
+              <Users className="w-4 h-4" />
+              <span className="text-sm">{user?.first_name || user?.email}</span>
+            </div>
           </div>
         </div>
       </div>
 
       {/* Main Content */}
-      <div className="h-[calc(100vh-73px)]">
+      <div className="flex-1 p-6">
+        {/* Setup State */}
         {workflowState === 'setup' && (
-          <div className="h-full flex items-center justify-center">
-            <div className="max-w-2xl w-full mx-auto p-6">
-              <div className="text-center mb-8">
-                <div className="w-16 h-16 bg-gradient-to-br from-orange-500 to-violet-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <Zap className="w-8 h-8 text-white" />
+          <div className="max-w-2xl mx-auto">
+            <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-violet-600 rounded-lg flex items-center justify-center">
+                  <Zap className="w-6 h-6 text-white" />
                 </div>
-                <h2 className="text-2xl font-bold text-white mb-2">Start AI Workflow</h2>
-                <p className="text-gray-400">Configure your content creation workflow</p>
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Create AI Content</h2>
+                  <p className="text-sm text-gray-400">Configure your multi-agent workflow</p>
+                </div>
               </div>
 
-              <div className="bg-gray-800 rounded-xl border border-gray-700 p-6">
-                <div className="space-y-6">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2">
-                      Content Title *
-                    </label>
+              <form onSubmit={(e) => { e.preventDefault(); handleStartWorkflow(); }} className="space-y-6">
+                {/* Title */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    Content Title *
+                  </label>
+                  <input
+                    type="text"
+                    value={workflowConfig.title}
+                    onChange={(e) => setWorkflowConfig(prev => ({ ...prev, title: e.target.value }))}
+                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500"
+                    placeholder="e.g., 'AI Revolution in Healthcare'"
+                    required
+                  />
+                </div>
+
+                {/* Content Type */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    Content Type
+                  </label>
+                  <select
+                    value={workflowConfig.contentType}
+                    onChange={(e) => setWorkflowConfig(prev => ({ ...prev, contentType: e.target.value }))}
+                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-orange-500"
+                  >
+                    {contentTypes.map(type => (
+                      <option key={type.value} value={type.value}>
+                        {type.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Initial Draft */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">
+                    Initial Draft (Optional)
+                  </label>
+                  <textarea
+                    value={workflowConfig.initialDraft}
+                    onChange={(e) => setWorkflowConfig(prev => ({ ...prev, initialDraft: e.target.value }))}
+                    rows={4}
+                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500"
+                    placeholder="Provide any initial content, outline, or requirements..."
+                  />
+                </div>
+
+                {/* Options */}
+                <div className="space-y-3">
+                  <label className="flex items-center gap-3">
                     <input
-                      type="text"
-                      value={workflowConfig.title}
-                      onChange={(e) => setWorkflowConfig(prev => ({ ...prev, title: e.target.value }))}
-                      className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500"
-                      placeholder="What content do you want to create?"
+                      type="checkbox"
+                      checked={workflowConfig.useProjectDocuments}
+                      onChange={(e) => setWorkflowConfig(prev => ({ ...prev, useProjectDocuments: e.target.checked }))}
+                      className="w-5 h-5 text-orange-500 bg-gray-700 border-gray-600 rounded focus:ring-orange-500"
                     />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2">
-                      Content Type
-                    </label>
-                    <select
-                      value={workflowConfig.contentType}
-                      onChange={(e) => setWorkflowConfig(prev => ({ ...prev, contentType: e.target.value }))}
-                      className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-orange-500"
-                    >
-                      {contentTypes.map((type) => (
-                        <option key={type.value} value={type.value}>
-                          {type.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2">
-                      Initial Draft (Optional)
-                    </label>
-                    <textarea
-                      value={workflowConfig.initialDraft}
-                      onChange={(e) => setWorkflowConfig(prev => ({ ...prev, initialDraft: e.target.value }))}
-                      rows={4}
-                      className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500"
-                      placeholder="Provide an initial draft or outline (optional)..."
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between p-4 bg-gray-700 rounded-lg">
-                    <div>
-                      <h4 className="font-medium text-white">Use Project Documents</h4>
-                      <p className="text-sm text-gray-400">Include uploaded documents as context</p>
-                    </div>
-                    <button
-                      onClick={() => setWorkflowConfig(prev => ({ ...prev, useProjectDocuments: !prev.useProjectDocuments }))}
-                      className={`w-12 h-6 rounded-full transition-all duration-300 ${
-                        workflowConfig.useProjectDocuments ? 'bg-gradient-to-r from-orange-500 to-violet-600' : 'bg-gray-500'
-                      }`}
-                    >
-                      <div className={`w-5 h-5 bg-white rounded-full transition-transform duration-300 ${
-                        workflowConfig.useProjectDocuments ? 'transform translate-x-6' : 'transform translate-x-0.5'
-                      }`} />
-                    </button>
-                  </div>
+                    <span className="text-sm text-gray-300">Use project documents and knowledge base</span>
+                  </label>
                 </div>
 
                 {error && (
-                  <div className="mt-4 p-3 bg-red-900/30 border border-red-500/50 rounded-lg">
+                  <div className="p-4 bg-red-900/20 border border-red-700 rounded-lg">
                     <p className="text-red-400 text-sm">{error}</p>
                   </div>
                 )}
 
-                <div className="mt-6 flex gap-3">
+                {/* Actions */}
+                <div className="flex gap-3 pt-4">
                   <button
+                    type="button"
                     onClick={handleBackToProject}
-                    className="flex-1 px-4 py-3 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                    className="px-6 py-3 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
                   >
                     Cancel
                   </button>
                   <button
-                    onClick={handleStartWorkflow}
-                    disabled={!workflowConfig.title.trim() || isLoading}
-                    className="flex-1 px-4 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    type="submit"
+                    disabled={isLoading || !workflowConfig.title.trim()}
+                    className="flex-1 px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center justify-center gap-2"
                   >
                     {isLoading ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
-                        Starting...
+                        Starting Workflow...
                       </>
                     ) : (
                       <>
-                        <Zap className="w-4 h-4" />
-                        Start Workflow
+                        <Play className="w-4 h-4" />
+                        Start AI Workflow
                       </>
                     )}
                   </button>
                 </div>
-              </div>
+              </form>
             </div>
           </div>
         )}
 
+        {/* Running State - Use ChatWorkflowInterface */}
         {workflowState === 'running' && currentWorkflow && (
           <ChatWorkflowInterface
             workflowId={currentWorkflow.workflow_id}
@@ -404,29 +389,30 @@ const WorkflowPage: React.FC = () => {
           />
         )}
 
+        {/* Completed State */}
         {workflowState === 'completed' && currentWorkflow && (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center max-w-2xl px-6">
-              <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-6" />
-              <h2 className="text-2xl font-bold text-white mb-4">
-                Workflow Completed Successfully!
-              </h2>
-              <p className="text-gray-300 mb-6">
-                Your content "{currentWorkflow.title}" has been generated and is ready for review.
-              </p>
+          <div className="max-w-4xl mx-auto">
+            <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 bg-green-500 rounded-lg flex items-center justify-center">
+                  <CheckCircle className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Workflow Completed Successfully!</h2>
+                  <p className="text-sm text-gray-400">Your content has been generated and is ready for review</p>
+                </div>
+              </div>
 
               {currentWorkflow.final_content && (
-                <div className="bg-gray-800 rounded-lg p-6 mb-6 text-left">
-                  <h3 className="text-lg font-semibold text-white mb-4">Generated Content</h3>
-                  <div className="bg-gray-900 rounded-lg p-4 text-gray-100 max-h-96 overflow-y-auto">
-                    <pre className="whitespace-pre-wrap text-sm">
-                      {currentWorkflow.final_content}
-                    </pre>
+                <div className="mb-6">
+                  <h3 className="text-lg font-medium text-white mb-3">Generated Content:</h3>
+                  <div className="bg-gray-900 rounded-lg p-4 max-h-96 overflow-y-auto">
+                    <pre className="text-gray-300 whitespace-pre-wrap">{currentWorkflow.final_content}</pre>
                   </div>
                 </div>
               )}
 
-              <div className="flex gap-4 justify-center">
+              <div className="flex gap-3">
                 <button
                   onClick={handleBackToProject}
                   className="px-6 py-3 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
@@ -435,40 +421,36 @@ const WorkflowPage: React.FC = () => {
                 </button>
                 <button
                   onClick={handleStartNewWorkflow}
-                  className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300 flex items-center gap-2"
+                  className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
                 >
-                  <Zap className="w-4 h-4" />
-                  Start New Workflow
+                  Create Another Content
                 </button>
               </div>
             </div>
           </div>
         )}
 
+        {/* Error State */}
         {workflowState === 'error' && (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center max-w-md px-6">
-              <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-6" />
-              <h2 className="text-2xl font-bold text-white mb-4">
-                Workflow Error
-              </h2>
-              <p className="text-gray-300 mb-6">
-                {error || 'An error occurred while processing your workflow.'}
-              </p>
-              <div className="flex gap-4 justify-center">
-                <button
-                  onClick={handleBackToProject}
-                  className="px-6 py-3 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
-                >
-                  Back to Project
-                </button>
-                <button
-                  onClick={handleStartNewWorkflow}
-                  className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
-                >
-                  Try Again
-                </button>
-              </div>
+          <div className="max-w-2xl mx-auto text-center">
+            <div className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
+              <AlertCircle className="w-8 h-8 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold mb-2">Workflow Failed</h2>
+            <p className="text-gray-400 mb-6">{error || 'An error occurred during content creation'}</p>
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={handleBackToProject}
+                className="px-6 py-3 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
+              >
+                Back to Project
+              </button>
+              <button
+                onClick={handleStartNewWorkflow}
+                className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
+              >
+                Try Again
+              </button>
             </div>
           </div>
         )}

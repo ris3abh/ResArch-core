@@ -1,5 +1,5 @@
 // frontend/src/components/workflow/ChatWorkflowInterface.tsx
-// Create this new file in your project
+// FIXED VERSION - Properly handles chat interface and agent interactions
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
@@ -19,7 +19,8 @@ import {
   Users,
   Brain,
   Copy,
-  ExternalLink
+  ExternalLink,
+  AlertTriangle
 } from 'lucide-react';
 import { apiService } from '../../services/api';
 
@@ -66,6 +67,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   const [pendingCheckpoint, setPendingCheckpoint] = useState<CheckpointData | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [finalContent, setFinalContent] = useState<string>('');
+  const [selectedStage, setSelectedStage] = useState<string>('all');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -116,26 +118,27 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       } catch (error) {
         console.error('Failed to create WebSocket connection:', error);
         setIsConnected(false);
+        addSystemMessage('❌ Failed to connect to workflow. Please refresh the page.');
       }
     };
 
     connectWebSocket();
 
+    // Cleanup on unmount
     return () => {
       if (wsRef.current) {
-        wsRef.current.close(1000); // Normal closure
+        wsRef.current.close(1000, 'Component unmounting');
       }
     };
   }, [workflowId, workflowStatus]);
 
   const addSystemMessage = (content: string) => {
     const message: WorkflowMessage = {
-      id: `system-${Date.now()}-${Math.random()}`,
+      id: `sys-${Date.now()}`,
       type: 'system',
       sender: 'System',
       content,
-      timestamp: new Date().toISOString(),
-      metadata: { workflow_id: workflowId }
+      timestamp: new Date().toISOString()
     };
     setMessages(prev => [...prev, message]);
   };
@@ -144,429 +147,384 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     console.log('📨 Received WebSocket message:', data);
 
     switch (data.type) {
-      case 'agent_communication':
       case 'agent_message':
-        addAgentMessage(data.data || data);
+        const agentMessage: WorkflowMessage = {
+          id: data.data.id || `agent-${Date.now()}`,
+          type: 'agent',
+          sender: data.data.agent_type || 'AI Agent',
+          content: data.data.message_content || data.data.content || '',
+          timestamp: data.timestamp || new Date().toISOString(),
+          metadata: {
+            agent_type: data.data.agent_type,
+            stage: data.data.stage,
+            workflow_id: data.data.workflow_id,
+            message_type: data.data.message_type
+          }
+        };
+        setMessages(prev => [...prev, agentMessage]);
+        
+        // Update active agents
+        if (data.data.agent_type && !activeAgents.includes(data.data.agent_type)) {
+          setActiveAgents(prev => [...prev, data.data.agent_type]);
+        }
         break;
-      case 'workflow_update':
-        handleWorkflowUpdate(data.data || data);
+
+      case 'workflow_stage_update':
+        setCurrentStage(data.data.stage || 'Unknown Stage');
+        addSystemMessage(`🔄 Stage Update: ${data.data.stage}`);
         break;
+
       case 'checkpoint_required':
-      case 'human_checkpoint':
-        handleCheckpointRequired(data.data || data);
+        const checkpoint: CheckpointData = {
+          id: data.data.checkpoint_id,
+          title: data.data.title || 'Review Required',
+          description: data.data.description || 'Please review the following content.',
+          status: 'pending',
+          data: data.data.data || {}
+        };
+        setPendingCheckpoint(checkpoint);
+        addSystemMessage(`⏸️ Checkpoint reached: ${checkpoint.title}`);
         break;
+
       case 'workflow_completed':
-      case 'workflow_complete':
-        handleWorkflowCompleted(data.data || data);
+        setWorkflowStatus('completed');
+        setFinalContent(data.data.final_content || '');
+        addSystemMessage('✅ Workflow completed successfully!');
+        
+        if (onWorkflowComplete) {
+          onWorkflowComplete(data.data);
+        }
         break;
-      case 'agent_status':
-        updateAgentStatus(data.data || data);
+
+      case 'workflow_error':
+        setWorkflowStatus('error');
+        addSystemMessage(`❌ Workflow error: ${data.data.error || 'Unknown error occurred'}`);
         break;
-      case 'stage_update':
-        handleStageUpdate(data.data || data);
+
+      case 'system_message':
+        addSystemMessage(data.data.message_content || data.data.content || '');
         break;
+
+      default:
+        console.log('Unknown message type:', data.type);
     }
   };
 
-  const addAgentMessage = (agentData: any) => {
-    const message: WorkflowMessage = {
-      id: `agent-${Date.now()}-${Math.random()}`,
-      type: 'agent',
-      sender: agentData.agent_type || agentData.sender || 'AI Agent',
-      content: agentData.content || agentData.message_content || agentData.message || '',
-      timestamp: new Date().toISOString(),
-      metadata: {
-        agent_type: agentData.agent_type,
-        stage: agentData.stage,
-        workflow_id: workflowId,
-        message_type: agentData.message_type
-      }
-    };
-    setMessages(prev => [...prev, message]);
-  };
+  const sendMessage = async () => {
+    if (!inputMessage.trim() || !isConnected) return;
 
-  const handleWorkflowUpdate = (updateData: any) => {
-    if (updateData.stage) {
-      setCurrentStage(updateData.stage);
-    }
-    if (updateData.status) {
-      setWorkflowStatus(updateData.status);
-    }
-    
-    if (updateData.message) {
-      addSystemMessage(`📊 ${updateData.message}`);
-    }
-  };
-
-  const handleStageUpdate = (stageData: any) => {
-    const stageName = stageData.stage || stageData.name || 'Unknown Stage';
-    setCurrentStage(stageName);
-    addSystemMessage(`🔄 Moving to stage: ${stageName}`);
-  };
-
-  const handleCheckpointRequired = (checkpointData: any) => {
-    const checkpoint = {
-      id: checkpointData.checkpoint_id || checkpointData.id || `checkpoint-${Date.now()}`,
-      title: checkpointData.title || 'Human Approval Required',
-      description: checkpointData.description || 'Please review and approve the current progress.',
-      status: 'pending' as const,
-      data: checkpointData
-    };
-    
-    setPendingCheckpoint(checkpoint);
-
-    const message: WorkflowMessage = {
-      id: `checkpoint-${Date.now()}-${Math.random()}`,
-      type: 'checkpoint',
-      sender: 'Human Checkpoint',
-      content: `🚦 ${checkpoint.title}`,
-      timestamp: new Date().toISOString(),
-      metadata: {
-        checkpoint_id: checkpoint.id,
-        requires_approval: true,
-        workflow_id: workflowId
-      }
-    };
-    setMessages(prev => [...prev, message]);
-    setWorkflowStatus('paused');
-  };
-
-  const handleWorkflowCompleted = (completionData: any) => {
-    setWorkflowStatus('completed');
-    setActiveAgents([]);
-    setPendingCheckpoint(null);
-    
-    if (completionData.final_content || completionData.content) {
-      setFinalContent(completionData.final_content || completionData.content);
-    }
-    
-    addSystemMessage('🎉 Workflow completed successfully! Your content is ready.');
-
-    if (onWorkflowComplete) {
-      onWorkflowComplete(completionData);
-    }
-  };
-
-  const updateAgentStatus = (statusData: any) => {
-    if (statusData.active_agents) {
-      setActiveAgents(statusData.active_agents);
-    } else if (statusData.agents) {
-      setActiveAgents(statusData.agents);
-    }
-  };
-
-  const sendHumanMessage = async () => {
-    if (!inputMessage.trim()) return;
-
-    const message: WorkflowMessage = {
-      id: `human-${Date.now()}-${Math.random()}`,
+    const userMessage: WorkflowMessage = {
+      id: `user-${Date.now()}`,
       type: 'human',
       sender: 'You',
       content: inputMessage,
-      timestamp: new Date().toISOString(),
-      metadata: { workflow_id: workflowId }
+      timestamp: new Date().toISOString()
     };
-    
-    setMessages(prev => [...prev, message]);
 
-    // Send to WebSocket
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'human_message',
+    setMessages(prev => [...prev, userMessage]);
+
+    try {
+      // Send message to backend
+      await apiService.sendWorkflowMessage(workflowId, {
         content: inputMessage,
-        workflow_id: workflowId
-      }));
-    }
+        type: 'human_feedback'
+      });
 
-    setInputMessage('');
+      setInputMessage('');
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      addSystemMessage('❌ Failed to send message. Please try again.');
+    }
   };
 
   const handleCheckpointApproval = async (approved: boolean, feedback?: string) => {
     if (!pendingCheckpoint) return;
 
     try {
-      // Call API to approve/reject checkpoint
-      if (approved) {
-        await apiService.approveCheckpoint(pendingCheckpoint.id, { feedback: feedback || '' });
-      } else {
-        await apiService.rejectCheckpoint(pendingCheckpoint.id, { feedback: feedback || '' });
-      }
-
-      // Send approval via WebSocket
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'checkpoint_approval',
-          data: {
-            checkpoint_id: pendingCheckpoint.id,
-            approved,
-            feedback: feedback || ''
-          },
-          workflow_id: workflowId
-        }));
-      }
-
-      // Add response message
-      const message: WorkflowMessage = {
-        id: `approval-${Date.now()}-${Math.random()}`,
-        type: 'human',
-        sender: 'You',
-        content: `${approved ? '✅ Approved' : '❌ Rejected'}: ${pendingCheckpoint.title}${feedback ? ` - ${feedback}` : ''}`,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          checkpoint_id: pendingCheckpoint.id,
-          workflow_id: workflowId
-        }
-      };
-      setMessages(prev => [...prev, message]);
+      await apiService.respondToCheckpoint(workflowId, pendingCheckpoint.id, {
+        approved,
+        feedback
+      });
 
       setPendingCheckpoint(null);
-      setWorkflowStatus('running');
-
-    } catch (error: any) {
-      console.error('Failed to handle checkpoint:', error);
-      addSystemMessage(`❌ Failed to ${approved ? 'approve' : 'reject'} checkpoint: ${error.message}`);
+      addSystemMessage(
+        approved 
+          ? '✅ Checkpoint approved. Workflow continuing...' 
+          : '🔄 Checkpoint rejected. Agents will revise and try again...'
+      );
+    } catch (error) {
+      console.error('Failed to respond to checkpoint:', error);
+      addSystemMessage('❌ Failed to respond to checkpoint. Please try again.');
     }
-  };
-
-  const getMessageIcon = (message: WorkflowMessage) => {
-    switch (message.type) {
-      case 'agent':
-        return <Bot className="w-4 h-4 text-orange-500" />;
-      case 'human':
-        return <User className="w-4 h-4 text-blue-500" />;
-      case 'system':
-        return <Settings className="w-4 h-4 text-purple-500" />;
-      case 'checkpoint':
-        return <AlertCircle className="w-4 h-4 text-yellow-500" />;
-      default:
-        return <MessageCircle className="w-4 h-4 text-gray-500" />;
-    }
-  };
-
-  const getStatusIcon = () => {
-    switch (workflowStatus) {
-      case 'running':
-        return <Play className="w-4 h-4 text-green-500 animate-pulse" />;
-      case 'paused':
-        return <Pause className="w-4 h-4 text-yellow-500" />;
-      case 'completed':
-        return <CheckCircle className="w-4 h-4 text-green-500" />;
-      case 'error':
-        return <StopCircle className="w-4 h-4 text-red-500" />;
-      default:
-        return <Clock className="w-4 h-4 text-gray-500" />;
-    }
-  };
-
-  const formatTime = (timestamp: string) => {
-    return new Date(timestamp).toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit'
-    });
   };
 
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text).then(() => {
-      addSystemMessage('📋 Copied to clipboard!');
-    });
+    navigator.clipboard.writeText(text);
+    addSystemMessage('📋 Content copied to clipboard!');
   };
 
+  // Agent types and their colors
+  const agentColors: { [key: string]: string } = {
+    'coordinator': 'from-blue-500 to-blue-600',
+    'style_analysis': 'from-purple-500 to-purple-600',
+    'content_planning': 'from-indigo-500 to-indigo-600',
+    'content_generation': 'from-green-500 to-green-600',
+    'editing_qa': 'from-yellow-500 to-yellow-600',
+    'default': 'from-gray-500 to-gray-600'
+  };
+
+  // Filter messages by stage
+  const filteredMessages = selectedStage === 'all' 
+    ? messages 
+    : messages.filter(msg => 
+        msg.metadata?.stage === selectedStage || 
+        msg.type === 'system' || 
+        msg.type === 'human'
+      );
+
+  // Available stages for filtering
+  const stages = [
+    { id: 'all', label: 'All Messages', color: 'from-gray-500 to-gray-600' },
+    { id: 'document_processing', label: 'Document Processing', color: 'from-blue-500 to-blue-600' },
+    { id: 'style_analysis', label: 'Style Analysis', color: 'from-purple-500 to-purple-600' },
+    { id: 'content_planning', label: 'Content Planning', color: 'from-indigo-500 to-indigo-600' },
+    { id: 'content_generation', label: 'Content Generation', color: 'from-green-500 to-green-600' },
+    { id: 'editing_qa', label: 'Editing & QA', color: 'from-yellow-500 to-yellow-600' },
+  ];
+
   return (
-    <div className="h-full bg-gray-900 flex flex-col">
-      {/* Header */}
-      <div className="bg-gray-800 border-b border-gray-700 p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              {getStatusIcon()}
-              <h2 className="text-lg font-semibold text-white">AI Workflow Chat</h2>
+    <div className="flex h-full bg-gray-900">
+      {/* Sidebar */}
+      <div className="w-80 bg-gray-800 border-r border-gray-700 flex flex-col">
+        {/* Sidebar Header */}
+        <div className="p-4 border-b border-gray-700">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-violet-600 rounded-lg flex items-center justify-center">
+              <Brain className="w-6 h-6 text-white" />
             </div>
-            <div className="flex items-center gap-2 text-sm text-gray-400">
-              <span>•</span>
-              <span>{currentStage}</span>
-              {isConnected ? (
-                <span className="text-green-400">• Connected</span>
-              ) : (
-                <span className="text-red-400">• Disconnected</span>
-              )}
+            <div>
+              <h3 className="font-semibold text-white">AI Workflow</h3>
+              <p className="text-xs text-gray-400">Multi-Agent Chat</p>
             </div>
           </div>
+          
+          {/* Status Indicator */}
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${
+              workflowStatus === 'running' ? 'bg-green-400 animate-pulse' :
+              workflowStatus === 'completed' ? 'bg-blue-400' :
+              workflowStatus === 'error' ? 'bg-red-400' : 'bg-gray-400'
+            }`} />
+            <span className="text-sm text-gray-300">
+              {workflowStatus === 'running' ? `Running: ${currentStage}` :
+               workflowStatus === 'completed' ? 'Completed' :
+               workflowStatus === 'error' ? 'Error' : 'Initializing'}
+            </span>
+          </div>
+        </div>
 
-          {/* Active Agents */}
-          {activeAgents.length > 0 && (
-            <div className="flex items-center gap-2">
-              <Users className="w-4 h-4 text-gray-400" />
-              <div className="flex gap-1 flex-wrap">
-                {activeAgents.map((agent, index) => (
-                  <div
-                    key={index}
-                    className="px-2 py-1 bg-orange-500/20 text-orange-300 rounded text-xs"
-                  >
-                    {agent}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+        {/* Stage Filter */}
+        <div className="p-4 border-b border-gray-700">
+          <h3 className="text-sm font-medium text-gray-300 mb-3">
+            {selectedStage === 'all' ? 'Project Chat' : 'Chat Sessions'}
+          </h3>
+          
+          <div className="space-y-2 mb-6">
+            {stages.map((stage) => (
+              <button
+                key={stage.id}
+                onClick={() => setSelectedStage(stage.id)}
+                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-300 ${
+                  selectedStage === stage.id
+                    ? 'bg-gradient-to-r from-orange-500/20 to-violet-600/20 text-orange-500 border border-orange-500/30'
+                    : 'text-gray-300 hover:text-white hover:bg-gray-700'
+                }`}
+              >
+                <div className={`w-3 h-3 rounded-full bg-gradient-to-r ${stage.color}`} />
+                <span className="text-sm">{stage.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Active Agents */}
+        <div className="p-4 border-b border-gray-700">
+          <h4 className="text-sm font-medium text-gray-300 mb-3">Active Agents</h4>
+          <div className="space-y-2">
+            {activeAgents.length > 0 ? (
+              activeAgents.map((agent) => (
+                <div key={agent} className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full bg-gradient-to-r ${agentColors[agent] || agentColors.default}`} />
+                  <span className="text-sm text-gray-400 capitalize">{agent.replace('_', ' ')}</span>
+                </div>
+              ))
+            ) : (
+              <p className="text-xs text-gray-500">No active agents</p>
+            )}
+          </div>
+        </div>
+
+        {/* Connection Status */}
+        <div className="mt-auto p-4 border-t border-gray-700">
+          <div className="flex items-center gap-2 text-xs">
+            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
+            <span className="text-gray-400">
+              {isConnected ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`flex gap-3 ${message.type === 'human' ? 'justify-end' : 'justify-start'}`}
-          >
-            {message.type !== 'human' && (
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center">
-                {getMessageIcon(message)}
-              </div>
-            )}
-            
-            <div className={`max-w-[70%] ${message.type === 'human' ? 'order-first' : ''}`}>
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-sm font-medium text-white">{message.sender}</span>
-                <span className="text-xs text-gray-400">{formatTime(message.timestamp)}</span>
-                {message.metadata?.agent_type && (
-                  <span className="text-xs bg-orange-500/20 text-orange-300 px-2 py-0.5 rounded">
-                    {message.metadata.agent_type}
-                  </span>
-                )}
-                {message.metadata?.stage && (
-                  <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded">
-                    {message.metadata.stage}
-                  </span>
-                )}
-              </div>
+      {/* Main Chat Area */}
+      <div className="flex-1 flex flex-col">
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {filteredMessages.map((msg) => (
+            <div
+              key={msg.id}
+              className={`flex gap-3 ${msg.type === 'human' ? 'justify-end' : 'justify-start'}`}
+            >
+              {msg.type !== 'human' && (
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                  msg.type === 'agent' ? `bg-gradient-to-r ${agentColors[msg.metadata?.agent_type || 'default']}` : 'bg-gray-500'
+                }`}>
+                  {msg.type === 'agent' ? (
+                    <Bot className="w-4 h-4 text-white" />
+                  ) : (
+                    <Clock className="w-4 h-4 text-white" />
+                  )}
+                </div>
+              )}
               
-              <div className={`rounded-lg p-3 ${
-                message.type === 'human' 
-                  ? 'bg-blue-600 text-white' 
-                  : message.type === 'agent'
-                  ? 'bg-gray-700 text-gray-100 border-l-2 border-orange-500'
-                  : message.type === 'system'
-                  ? 'bg-purple-900/30 text-purple-200 border border-purple-500/30'
-                  : message.type === 'checkpoint'
-                  ? 'bg-yellow-900/30 text-yellow-200 border border-yellow-500/30'
-                  : 'bg-gray-800 text-gray-200'
-              }`}>
-                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+              <div className={`max-w-2xl ${msg.type === 'human' ? 'bg-gradient-to-r from-orange-500 to-violet-600' : 'bg-gray-800'} rounded-lg p-4`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-sm font-medium text-white">{msg.sender}</span>
+                  {msg.metadata?.stage && (
+                    <span className="text-xs bg-gray-700 text-gray-300 px-2 py-1 rounded">
+                      {msg.metadata.stage.replace('_', ' ')}
+                    </span>
+                  )}
+                  <span className="text-xs text-gray-400 ml-auto">
+                    {new Date(msg.timestamp).toLocaleTimeString()}
+                  </span>
+                </div>
+                <div className="text-gray-100 whitespace-pre-wrap">{msg.content}</div>
               </div>
-            </div>
 
-            {message.type === 'human' && (
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center">
-                <User className="w-4 h-4 text-white" />
-              </div>
-            )}
-          </div>
-        ))}
+              {msg.type === 'human' && (
+                <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
+                  <User className="w-4 h-4 text-white" />
+                </div>
+              )}
+            </div>
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
 
         {/* Checkpoint Approval */}
         {pendingCheckpoint && (
-          <div className="bg-yellow-900/30 border border-yellow-500/50 rounded-lg p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <AlertCircle className="w-5 h-5 text-yellow-500" />
-              <h3 className="font-medium text-yellow-200">Human Checkpoint Required</h3>
-            </div>
-            
-            <div className="mb-4">
-              <h4 className="font-medium text-white mb-2">{pendingCheckpoint.title}</h4>
-              <p className="text-gray-300 text-sm">{pendingCheckpoint.description}</p>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                onClick={() => handleCheckpointApproval(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-              >
-                <CheckCircle className="w-4 h-4" />
-                Approve & Continue
-              </button>
-              <button
-                onClick={() => handleCheckpointApproval(false, 'Please revise and try again')}
-                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-              >
-                <StopCircle className="w-4 h-4" />
-                Request Changes
-              </button>
+          <div className="border-t border-gray-700 p-4 bg-yellow-900/20">
+            <div className="max-w-2xl mx-auto">
+              <div className="flex items-center gap-2 mb-3">
+                <AlertTriangle className="w-5 h-5 text-yellow-400" />
+                <h4 className="font-medium text-white">{pendingCheckpoint.title}</h4>
+              </div>
+              <p className="text-gray-300 text-sm mb-4">{pendingCheckpoint.description}</p>
+              
+              {pendingCheckpoint.data && (
+                <div className="bg-gray-900 rounded-lg p-3 mb-4 max-h-32 overflow-y-auto">
+                  <pre className="text-xs text-gray-400 whitespace-pre-wrap">
+                    {JSON.stringify(pendingCheckpoint.data, null, 2)}
+                  </pre>
+                </div>
+              )}
+              
+              <div className="flex gap-3">
+                <button
+                  onClick={() => handleCheckpointApproval(true)}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
+                >
+                  <CheckCircle className="w-4 h-4" />
+                  Approve
+                </button>
+                <button
+                  onClick={() => handleCheckpointApproval(false)}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center gap-2"
+                >
+                  <AlertTriangle className="w-4 h-4" />
+                  Request Changes
+                </button>
+              </div>
             </div>
           </div>
         )}
 
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input */}
-      {workflowStatus !== 'completed' && (
-        <div className="border-t border-gray-700 p-4">
-          <div className="flex gap-3">
-            <input
-              type="text"
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && sendHumanMessage()}
-              placeholder={
-                pendingCheckpoint 
-                  ? "Awaiting your approval above..." 
-                  : "Send guidance to the AI agents..."
-              }
-              className="flex-1 px-4 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500"
-              disabled={!isConnected || !!pendingCheckpoint}
-            />
-            <button
-              onClick={sendHumanMessage}
-              disabled={!inputMessage.trim() || !isConnected || !!pendingCheckpoint}
-              className="px-4 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </div>
-          
-          {!isConnected && (
-            <p className="text-xs text-red-400 mt-2">
-              Connection lost. Attempting to reconnect...
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Completion Actions */}
-      {workflowStatus === 'completed' && (
-        <div className="border-t border-gray-700 p-4 bg-green-900/20">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-green-400">
-              <CheckCircle className="w-5 h-5" />
-              <span className="font-medium">Workflow Completed Successfully!</span>
-            </div>
+        {/* Input Area */}
+        {workflowStatus === 'running' && !pendingCheckpoint && (
+          <div className="border-t border-gray-700 p-4">
             <div className="flex gap-3">
-              {finalContent && (
-                <button 
-                  onClick={() => copyToClipboard(finalContent)}
-                  className="flex items-center gap-2 px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
-                >
-                  <Copy className="w-4 h-4" />
-                  Copy Content
-                </button>
-              )}
-              <button className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300">
-                <Zap className="w-4 h-4" />
-                Start New Workflow
+              <input
+                type="text"
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+                placeholder={isConnected ? "Send feedback to agents..." : "Connecting..."}
+                disabled={!isConnected}
+                className="flex-1 px-4 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500 disabled:opacity-50"
+              />
+              <button
+                onClick={sendMessage}
+                disabled={!inputMessage.trim() || !isConnected}
+                className="px-4 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Send className="w-4 h-4" />
               </button>
             </div>
+            
+            {!isConnected && (
+              <p className="text-xs text-red-400 mt-2">
+                Connection lost. Attempting to reconnect...
+              </p>
+            )}
           </div>
-          
-          {finalContent && (
-            <div className="mt-4 p-4 bg-gray-800 rounded-lg">
-              <h4 className="font-medium text-white mb-2">Generated Content:</h4>
-              <div className="text-sm text-gray-300 bg-gray-900 p-3 rounded max-h-40 overflow-y-auto">
-                <pre className="whitespace-pre-wrap">{finalContent}</pre>
+        )}
+
+        {/* Completion Actions */}
+        {workflowStatus === 'completed' && (
+          <div className="border-t border-gray-700 p-4 bg-green-900/20">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-green-400">
+                <CheckCircle className="w-5 h-5" />
+                <span className="font-medium">Workflow Completed Successfully!</span>
+              </div>
+              <div className="flex gap-3">
+                {finalContent && (
+                  <button 
+                    onClick={() => copyToClipboard(finalContent)}
+                    className="flex items-center gap-2 px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                  >
+                    <Copy className="w-4 h-4" />
+                    Copy Content
+                  </button>
+                )}
+                <button className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300">
+                  <Zap className="w-4 h-4" />
+                  Start New Workflow
+                </button>
               </div>
             </div>
-          )}
-        </div>
-      )}
+            
+            {finalContent && (
+              <div className="mt-4 p-4 bg-gray-800 rounded-lg">
+                <h4 className="font-medium text-white mb-2">Generated Content:</h4>
+                <div className="text-sm text-gray-300 bg-gray-900 p-3 rounded max-h-40 overflow-y-auto">
+                  <pre className="whitespace-pre-wrap">{finalContent}</pre>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

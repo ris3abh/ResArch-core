@@ -1,13 +1,13 @@
 // src/App.tsx
+// FIXED VERSION - Proper routing for workflow components
+
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import AuthModal from './components/AuthModal';
 import Dashboard from './components/Dashboard';
 import ProjectWorkspace from './components/ProjectWorkspace';
+import WorkflowPage from './components/WorkflowPage';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-
-// Import the workflow interface
-import SpinscribeWorkflowInterface from './components/workflow/SpinscribeWorkflowInterface';
 
 function AppRoutes() {
   const { user, isLoading } = useAuth();
@@ -38,12 +38,15 @@ function AppRoutes() {
       {/* Project Management */}
       <Route path="/project/:projectId" element={<ProjectWorkspace />} />
       
-      {/* Workflow Routes */}
-      <Route path="/workflow/:projectId" element={<SpinscribeWorkflowInterface />} />
-      <Route path="/workflow/:projectId/:chatId" element={<SpinscribeWorkflowInterface />} />
+      {/* Workflow Routes - Updated to use the fixed WorkflowPage */}
+      <Route path="/workflow/:projectId" element={<WorkflowPage />} />
+      <Route path="/workflow/:projectId/:workflowId" element={<WorkflowPage />} />
       
       {/* Default redirect */}
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      
+      {/* Catch-all route */}
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   );
 }

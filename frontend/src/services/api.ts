@@ -1,5 +1,5 @@
 // frontend/src/services/api.ts
-// COMPLETE VERSION - Only minimal safe additions to your working code
+// COMPLETE VERSION - Your existing code + minimal safe additions for chat workflow
 
 const API_BASE_URL = 'http://localhost:8000/api/v1';
 
@@ -116,6 +116,36 @@ export interface ProjectUpdateRequest {
   name?: string;
   description?: string;
   client_name?: string;
+}
+
+// NEW: Additional interfaces for chat workflow integration
+export interface WorkflowExecution {
+  workflow_id: string;
+  project_id: string;
+  title: string;
+  content_type: string;
+  status: string;
+  current_stage?: string;
+  progress?: number;
+  final_content?: string;
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface WorkflowMessage {
+  id: string;
+  type: 'agent' | 'human' | 'system' | 'checkpoint';
+  sender: string;
+  content: string;
+  timestamp: string;
+  metadata?: {
+    agent_type?: string;
+    stage?: string;
+    workflow_id?: string;
+    checkpoint_id?: string;
+    requires_approval?: boolean;
+    message_type?: string;
+  };
 }
 
 class ApiService {
@@ -355,7 +385,7 @@ class ApiService {
     return this.request(endpoint);
   }
 
-  // NEW: Add alias method for getActiveWorkflows (uses your existing listWorkflows)
+  // Alias method for getActiveWorkflows (uses your existing listWorkflows)
   async getActiveWorkflows(projectId: string): Promise<WorkflowResponse[]> {
     try {
       return this.listWorkflows({ 
@@ -416,16 +446,140 @@ class ApiService {
     });
   }
 
+  // ========================================
+  // NEW METHODS FOR CHAT WORKFLOW INTERFACE
+  // ========================================
+
+  // Create workflow execution (adapts your startWorkflow)
+  async createWorkflowExecution(data: {
+    project_id: string;
+    title: string;
+    content_type: string;
+    initial_draft?: string;
+    use_project_documents?: boolean;
+  }): Promise<WorkflowExecution> {
+    try {
+      const workflowData: WorkflowCreateRequest = {
+        project_id: data.project_id,
+        title: data.title,
+        content_type: data.content_type,
+        initial_draft: data.initial_draft,
+        use_project_documents: data.use_project_documents || true,
+      };
+
+      const response = await this.startWorkflow(workflowData);
+      
+      // Map your WorkflowResponse to WorkflowExecution
+      return {
+        workflow_id: response.workflow_id,
+        project_id: response.project_id,
+        title: response.title,
+        content_type: response.content_type,
+        status: response.status,
+        current_stage: response.current_stage,
+        progress: response.progress,
+        final_content: response.final_content,
+        created_at: response.created_at || new Date().toISOString(),
+        completed_at: response.completed_at,
+      };
+    } catch (error) {
+      console.error('Failed to create workflow execution:', error);
+      throw error;
+    }
+  }
+
+  // Get workflow execution (adapts your getWorkflowStatus)
+  async getWorkflowExecution(workflowId: string): Promise<WorkflowExecution> {
+    try {
+      const response = await this.getWorkflowStatus(workflowId);
+      
+      return {
+        workflow_id: response.workflow_id,
+        project_id: response.project_id,
+        title: response.title,
+        content_type: response.content_type,
+        status: response.status,
+        current_stage: response.current_stage,
+        progress: response.progress,
+        final_content: response.final_content,
+        created_at: response.created_at || new Date().toISOString(),
+        completed_at: response.completed_at,
+      };
+    } catch (error) {
+      console.error('Failed to get workflow execution:', error);
+      throw error;
+    }
+  }
+
+  // Send workflow message (new method for chat interface)
+  async sendWorkflowMessage(workflowId: string, data: {
+    content: string;
+    type: string;
+  }): Promise<any> {
+    try {
+      // This would be a new endpoint you'll need to add to your backend
+      return this.request(`/workflows/${workflowId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    } catch (error) {
+      console.warn('Workflow message endpoint not available yet:', error);
+      // For now, just return a mock response
+      return {
+        id: `msg-${Date.now()}`,
+        workflow_id: workflowId,
+        content: data.content,
+        type: data.type,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Get workflow messages (new method for chat interface)
+  async getWorkflowMessages(workflowId: string): Promise<WorkflowMessage[]> {
+    try {
+      // This would be a new endpoint you'll need to add to your backend
+      return this.request(`/workflows/${workflowId}/messages`);
+    } catch (error) {
+      console.warn('Workflow messages endpoint not available yet:', error);
+      // For now, return empty array
+      return [];
+    }
+  }
+
+  // Respond to checkpoint (adapts your existing checkpoint methods)
+  async respondToCheckpoint(workflowId: string, checkpointId: string, data: {
+    approved: boolean;
+    feedback?: string;
+  }): Promise<any> {
+    try {
+      const approval: CheckpointApproval = {
+        feedback: data.feedback,
+      };
+
+      if (data.approved) {
+        return this.approveCheckpoint(checkpointId, approval);
+      } else {
+        return this.rejectCheckpoint(checkpointId, approval);
+      }
+    } catch (error) {
+      console.error('Failed to respond to checkpoint:', error);
+      throw error;
+    }
+  }
+
   // WebSocket Connection Helper
   createWorkflowWebSocket(workflowId: string): WebSocket {
     const token = localStorage.getItem('spinscribe_token');
     const wsUrl = `ws://localhost:8000/api/v1/ws/workflows/${workflowId}${token ? `?token=${token}` : ''}`;
+    console.log('🔌 Creating workflow WebSocket connection:', wsUrl);
     return new WebSocket(wsUrl);
   }
 
   createChatWebSocket(chatId: string): WebSocket {
     const token = localStorage.getItem('spinscribe_token');
     const wsUrl = `ws://localhost:8000/api/v1/ws/chats/${chatId}${token ? `?token=${token}` : ''}`;
+    console.log('🔌 Creating chat WebSocket connection:', wsUrl);
     return new WebSocket(wsUrl);
   }
 
@@ -441,6 +595,75 @@ class ApiService {
     timestamp: string;
   }> {
     return this.request('/ws/stats');
+  }
+
+  // ========================================
+  // UTILITY METHODS FOR BACKWARDS COMPATIBILITY
+  // ========================================
+
+  // Alias methods to maintain compatibility with existing code
+  async getDocuments(projectId: string): Promise<Document[]> {
+    return this.getProjectDocuments(projectId);
+  }
+
+  async getChatInstances(projectId: string): Promise<ChatInstance[]> {
+    return this.getProjectChats(projectId);
+  }
+
+  async createChatInstance(projectId: string, data: {
+    name: string;
+    description?: string;
+  }): Promise<ChatInstance> {
+    return this.createChat(projectId, {
+      ...data,
+      chat_type: 'project',
+    });
+  }
+
+  // File upload with progress (useful for large documents)
+  async uploadWithProgress(
+    endpoint: string,
+    file: File,
+    onProgress?: (progress: number) => void
+  ): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const xhr = new XMLHttpRequest();
+      const token = localStorage.getItem('spinscribe_token');
+
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable && onProgress) {
+          const progress = (event.loaded / event.total) * 100;
+          onProgress(progress);
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (error) {
+            resolve(xhr.responseText);
+          }
+        } else {
+          reject(new Error(`Upload failed: ${xhr.statusText}`));
+        }
+      });
+
+      xhr.addEventListener('error', () => {
+        reject(new Error('Upload failed'));
+      });
+
+      xhr.open('POST', `${API_BASE_URL}${endpoint}`);
+      
+      if (token) {
+        xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      }
+
+      xhr.send(formData);
+    });
   }
 }
 
