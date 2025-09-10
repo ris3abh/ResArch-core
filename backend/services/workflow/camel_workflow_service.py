@@ -12,8 +12,8 @@ from typing import Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
-from app.models.workflow_execution import WorkflowExecution
-from app.models.chat_instance import ChatInstance
+from app.models.workflow import WorkflowExecution
+from app.models.chat import ChatInstance
 
 logger = logging.getLogger(__name__)
 
