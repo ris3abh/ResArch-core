@@ -167,17 +167,17 @@ async def process_with_real_checkpoints(workflow, task, checkpoint_integration, 
         description="Please review and approve the content strategy before we begin content creation. This includes the approach, target audience, and key messaging strategy.",
         content=f"""Strategy for: {title}
         
-Proposed Approach:
-- Multi-agent content creation workflow
-- Brand voice analysis and consistency
-- Structured content planning and outlining
-- Quality assurance and refinement
-- RAG-enhanced knowledge integration
+            Proposed Approach:
+            - Multi-agent content creation workflow
+            - Brand voice analysis and consistency
+            - Structured content planning and outlining
+            - Quality assurance and refinement
+            - RAG-enhanced knowledge integration
 
-Target Audience: Professional readers interested in high-quality, informative content
-Key Messaging: Clear, authoritative, and engaging content that provides real value
+            Target Audience: Professional readers interested in high-quality, informative content
+            Key Messaging: Clear, authoritative, and engaging content that provides real value
 
-Please approve this strategy to proceed with content creation.""",
+            Please approve this strategy to proceed with content creation.""",
         priority=Priority.HIGH,
         timeout_hours=2  # 2 hour timeout
     )
@@ -207,15 +207,15 @@ Please approve this strategy to proceed with content creation.""",
         description="Please review the final generated content for quality, accuracy, brand alignment, and overall effectiveness. Approve to complete the workflow or reject to request revisions.",
         content=f"""Final Content for: {title}
 
-{content_preview}
+            {content_preview}
 
-Total Content Length: {len(content_result)} characters
+            Total Content Length: {len(content_result)} characters
 
-Please review and approve this content for delivery.""",
-        priority=Priority.HIGH,
-        timeout_hours=2
-    )
-    
+            Please review and approve this content for delivery.""",
+                    priority=Priority.HIGH,
+                    timeout_hours=2
+                )
+                
     if not final_approval.get('approved', False):
         logger.warning(f"⚠️ Final content not approved: {final_approval.get('feedback', 'No feedback')}")
         print(f"\n⚠️ CONTENT NOT APPROVED: {final_approval.get('feedback', 'No feedback')}")

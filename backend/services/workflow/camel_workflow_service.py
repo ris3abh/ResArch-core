@@ -1,353 +1,269 @@
 # services/workflow/camel_workflow_service.py
 """
-Enhanced CAMEL workflow service with chat integration for agent communication.
-FIXED VERSION - Corrects parameter mapping and removes mock workflow.
+SIMPLIFIED fix for SpinScribe - just calls your existing async workflow
+No console bridge needed - your workflow already works properly
 """
-
-import os
 import asyncio
 import logging
-from typing import Dict, List, Optional, Any
 from datetime import datetime
+from typing import Dict, Any, Optional
 
-from app.schemas.workflow import WorkflowCreateRequest, WorkflowResponse
-from app.core.websocket_manager import websocket_manager
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
 
-# Set up logging
+from app.models.workflow_execution import WorkflowExecution
+from app.models.chat_instance import ChatInstance
+from app.core.websocket_manager import WebSocketManager
+
 logger = logging.getLogger(__name__)
 
-class CamelWorkflowService:
-    """Enhanced CAMEL workflow service with chat integration."""
+class CAMELWorkflowService:
+    """Simplified workflow service that just calls your existing async CAMEL workflow"""
     
     def __init__(self):
-        self.active_workflows = {}
-        self.websocket_manager = None
+        self.websocket_manager: Optional[WebSocketManager] = None
+        self.active_workflows: Dict[str, Dict[str, Any]] = {}
         
-        # Check SpinScribe availability
-        self.spinscribe_available = False
-        self.enhanced_available = False
-        self.api_key_available = False
-        
-        try:
-            # Check if SpinScribe is available
-            import spinscribe
-            self.spinscribe_available = True
-            logger.info("✅ SpinScribe library detected")
-            
-            # Check for enhanced features
-            from spinscribe.tasks.enhanced_process import run_enhanced_content_task
-            self.enhanced_available = True
-            logger.info("✅ Enhanced SpinScribe features available")
-            
-        except ImportError:
-            logger.warning("⚠️ SpinScribe library not available")
-        
-        # Check API key
-        openai_key = os.getenv("OPENAI_API_KEY", "")
-        self.api_key_available = openai_key and not openai_key.startswith("sk-dummy")
-        
-        if not self.api_key_available:
-            logger.warning("⚠️ No valid OpenAI API key found")
-    
-    def set_websocket_manager(self, websocket_manager_instance):
-        """Connect the WebSocket manager for real-time updates."""
-        self.websocket_manager = websocket_manager_instance
-        logger.info("🔌 WebSocket manager connected to workflow service")
+    def set_websocket_manager(self, websocket_manager: WebSocketManager):
+        """Set WebSocket manager"""
+        self.websocket_manager = websocket_manager
+        logger.info("WebSocket manager connected to CAMEL workflow service")
     
     async def start_workflow(
         self,
-        request: WorkflowCreateRequest,
-        project_documents: Optional[List[str]] = None,
-        user_id: Optional[str] = None
-    ) -> WorkflowResponse:
-        """Start a workflow with enhanced chat integration."""
+        db: AsyncSession,
+        workflow_execution: WorkflowExecution,
+        project_documents: list = None
+    ) -> Dict[str, Any]:
+        """Start your existing CAMEL workflow"""
         
-        workflow_id = f"workflow_{int(datetime.now().timestamp())}_{request.project_id}"
-        
-        logger.info(f"🚀 Starting workflow: {workflow_id}")
-        logger.info(f"   Mode: Enhanced SpinScribe")
-        logger.info(f"   Chat ID: {request.chat_id}")
+        workflow_id = str(workflow_execution.id)
         
         try:
-            # Link workflow to chat for real-time updates
-            if request.chat_id and self.websocket_manager:
-                self.websocket_manager.link_workflow_to_chat(workflow_id, request.chat_id)
+            # Update workflow status
+            await self._update_workflow_status(db, workflow_id, "running", "initialization")
             
-            # Store workflow state
-            workflow_state = {
-                "workflow_id": workflow_id,
-                "request": request,
-                "status": "starting",
-                "created_at": datetime.now(),
-                "user_id": user_id,
-                "project_documents": project_documents or [],
-                "chat_id": request.chat_id
-            }
-            self.active_workflows[workflow_id] = workflow_state
+            # Handle chat instance
+            chat_instance = None
+            if workflow_execution.chat_instance_id:
+                stmt = select(ChatInstance).where(ChatInstance.id == workflow_execution.chat_instance_id)
+                result = await db.execute(stmt)
+                chat_instance = result.scalar_one_or_none()
             
-            # Send initial status to chat
-            if request.chat_id:
-                await self._send_chat_update(request.chat_id, {
-                    "type": "workflow_initialized",
-                    "workflow_id": workflow_id,
-                    "message": f"🚀 Initializing SpinScribe workflow: {request.title}",
-                    "status": "starting",
-                    "stage": "initialization"
-                })
+            if not chat_instance:
+                # Create new chat instance
+                chat_instance = ChatInstance(
+                    project_id=workflow_execution.project_id,
+                    name=f"SpinScribe: {workflow_execution.title}",
+                    description=f"Agent collaboration chat for {workflow_execution.content_type}",
+                    chat_type="workflow",
+                    created_by=workflow_execution.user_id,
+                    workflow_id=workflow_execution.workflow_id,
+                    agent_config={
+                        "enable_agent_messages": True,
+                        "show_agent_thinking": True,
+                        "checkpoint_notifications": True,
+                        "workflow_transparency": True
+                    }
+                )
+                
+                db.add(chat_instance)
+                await db.flush()
+                
+                # Update workflow execution
+                workflow_execution.chat_instance_id = chat_instance.id
+                workflow_execution.chat_id = chat_instance.id
+                await db.commit()
             
-            # Run enhanced workflow
-            result = await self._run_enhanced_workflow_with_chat(workflow_id, request, project_documents)
+            chat_id = str(chat_instance.id)
             
-            # Update state
-            final_status = "completed" if result.get("final_content") else "failed"
-            workflow_state.update({
-                "status": final_status,
-                "completed_at": datetime.now(),
-                "result": result
-            })
-            
-            # Send final status to chat
-            if request.chat_id:
-                final_message = "🎉 Workflow completed successfully!" if final_status == "completed" else "❌ Workflow failed"
-                await self._send_chat_update(request.chat_id, {
-                    "type": "workflow_completed",
-                    "workflow_id": workflow_id,
-                    "message": final_message,
-                    "status": final_status,
-                    "final_content": result.get("final_content")
-                })
-            
-            return WorkflowResponse(
-                workflow_id=workflow_id,
-                status=final_status,
-                current_stage=result.get("current_stage", "completed"),
-                progress=100.0 if final_status == "completed" else 0.0,
-                message="Workflow completed" if final_status == "completed" else "Workflow failed",
-                project_id=request.project_id,
-                chat_id=request.chat_id,
-                title=request.title,
-                content_type=request.content_type,
-                final_content=result.get("final_content"),
-                created_at=workflow_state["created_at"],
-                completed_at=workflow_state.get("completed_at"),
-                live_data=result.get("live_data", {})
-            )
-            
-        except Exception as e:
-            logger.error(f"💥 Workflow failed: {str(e)}")
-            
-            # Update state to failed
-            if workflow_id in self.active_workflows:
-                self.active_workflows[workflow_id].update({
-                    "status": "failed",
-                    "error": str(e),
-                    "completed_at": datetime.now()
-                })
-            
-            # Notify chat of failure
-            if request.chat_id:
-                await self._send_chat_update(request.chat_id, {
-                    "type": "workflow_failed",
-                    "workflow_id": workflow_id,
-                    "message": f"❌ Workflow failed: {str(e)}",
-                    "status": "failed"
-                })
-            
-            raise
-    
-    async def _run_enhanced_workflow_with_chat(self, workflow_id: str, request: WorkflowCreateRequest, project_documents: List[str]) -> Dict[str, Any]:
-        """Run enhanced SpinScribe workflow with real-time chat updates."""
-        try:
-            from spinscribe.tasks.enhanced_process import run_enhanced_content_task
-            
-            # Send agent startup notification
-            if request.chat_id:
-                await self._send_agent_message(workflow_id, "coordinator", "initialization", 
-                    "🤖 Coordinator agent is analyzing the task and assembling the team...")
-            
-            # FIXED: Use correct parameter name 'title' instead of 'task_description'
-            result = await run_enhanced_content_task(
-                title=request.title,  # ✅ FIXED: Changed from task_description to title
-                content_type=request.content_type,
-                initial_draft=request.initial_draft,
-                project_documents=project_documents,
-                workflow_id=workflow_id,
-                # Pass chat callback for agent communication
-                agent_callback=self._create_agent_callback(workflow_id, request.chat_id)
-            )
-            
-            logger.info(f"✅ Enhanced workflow completed: {workflow_id}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"💥 Enhanced workflow failed: {str(e)}")
-            # Log the full traceback for debugging
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            
-            # Fall back to basic workflow
-            logger.info("🔄 Falling back to basic workflow...")
-            return await self._run_basic_workflow_with_chat(workflow_id, request)
-    
-    async def _run_basic_workflow_with_chat(self, workflow_id: str, request: WorkflowCreateRequest) -> Dict[str, Any]:
-        """Run basic SpinScribe workflow with chat updates."""
-        try:
-            # Try to import from process module
-            try:
-                from spinscribe.tasks.process import run_content_task
-            except ImportError:
-                # Try alternative import path
-                from spinscribe.tasks.enhanced_process import run_enhanced_content_task as run_content_task
-            
-            if request.chat_id:
-                await self._send_agent_message(workflow_id, "content_creator", "creation", 
-                    "✍️ Content creation agent is working on your request...")
-            
-            # FIXED: Use correct parameter names to match SpinScribe function signature  
-            result = await run_content_task(
-                title=request.title,  # ✅ FIXED: Changed from task_description to title
-                content_type=request.content_type,
-                first_draft=request.initial_draft,  # ✅ FIXED: Changed from initial_draft to first_draft
-                # Note: workflow_id and agent_callback may not be supported in basic version
-            )
-            
-            logger.info(f"✅ Basic workflow completed: {workflow_id}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"💥 Basic workflow failed: {str(e)}")
-            # Re-raise the error instead of falling back to mock
-            raise Exception(f"SpinScribe workflow failed: {str(e)}")
-    
-    def _create_agent_callback(self, workflow_id: str, chat_id: Optional[str]):
-        """Create callback function for agent communication."""
-        
-        async def agent_callback(agent_type: str, stage: str, message: str, message_type: str = "agent_update"):
-            """Callback for agents to communicate through chat."""
-            if chat_id and self.websocket_manager:
-                await self._send_agent_message(workflow_id, agent_type, stage, message, message_type)
-        
-        return agent_callback
-    
-    async def _send_agent_message(self, workflow_id: str, agent_type: str, stage: str, content: str, message_type: str = "agent_update"):
-        """Send agent message to linked chat."""
-        if self.websocket_manager:
-            agent_message = {
-                "agent_type": agent_type,
-                "content": content,
-                "stage": stage,
-                "message_type": message_type,
-                "metadata": {
-                    "agent_type": agent_type,
-                    "stage": stage,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
+            # Store workflow info
+            self.active_workflows[workflow_id] = {
+                "chat_id": chat_id,
+                "project_id": str(workflow_execution.project_id),
+                "title": workflow_execution.title,
+                "content_type": workflow_execution.content_type,
+                "status": "running",
+                "started_at": datetime.now(datetime.timezone.utc),
             }
             
-            await self.websocket_manager.broadcast_agent_message(workflow_id, agent_message)
-    
-    async def _send_agent_completion(self, workflow_id: str, agent_type: str, result: str):
-        """Send agent completion notification."""
-        if self.websocket_manager:
-            await self.websocket_manager.send_agent_completion(workflow_id, agent_type, result)
-    
-    async def _send_status_update(self, workflow_id: str, update: Dict[str, Any]):
-        """Send workflow status update."""
-        if self.websocket_manager:
-            await self.websocket_manager.broadcast_workflow_update(workflow_id, update)
-    
-    async def _send_chat_update(self, chat_id: str, update: Dict[str, Any]):
-        """Send update directly to chat."""
-        if self.websocket_manager:
-            await self.websocket_manager.send_to_chat(chat_id, {
-                "type": "system_message",
-                "data": {
-                    "sender_type": "system",
-                    "message_content": update.get("message", ""),
-                    "message_type": "system",
-                    "metadata": update
-                },
-                "timestamp": datetime.utcnow().isoformat()
-            })
-    
-    async def get_workflow_status(self, workflow_id: str) -> Optional[Dict[str, Any]]:
-        """Get current workflow status."""
-        if workflow_id in self.active_workflows:
-            workflow_state = self.active_workflows[workflow_id]
+            # Notify frontend
+            if self.websocket_manager:
+                await self.websocket_manager.broadcast_to_chat(chat_id, {
+                    "type": "workflow_started",
+                    "workflow_id": workflow_id,
+                    "title": workflow_execution.title,
+                    "content_type": workflow_execution.content_type,
+                    "status": "running"
+                })
+            
+            # Start your existing workflow in background
+            asyncio.create_task(self._run_your_existing_workflow(db, workflow_id, workflow_execution))
+            
             return {
                 "workflow_id": workflow_id,
-                "status": workflow_state.get("status", "unknown"),
-                "current_stage": workflow_state.get("result", {}).get("current_stage", "unknown"),
-                "chat_id": workflow_state.get("chat_id"),
-                "created_at": workflow_state.get("created_at"),
-                "live_data": workflow_state.get("result", {}).get("live_data", {})
+                "status": "started",
+                "chat_id": chat_id
             }
-        
-        return None
-    
-    async def cancel_workflow(self, workflow_id: str):
-        """Cancel a running workflow."""
-        if workflow_id in self.active_workflows:
-            workflow_state = self.active_workflows[workflow_id]
-            workflow_state["status"] = "cancelled"
             
-            # Notify chat
-            if workflow_state.get("chat_id"):
-                await self._send_chat_update(workflow_state["chat_id"], {
-                    "type": "workflow_cancelled",
+        except Exception as e:
+            logger.error(f"Failed to start workflow {workflow_id}: {e}")
+            await self._update_workflow_status(db, workflow_id, "error", error_details=str(e))
+            raise
+    
+    async def _run_your_existing_workflow(self, db: AsyncSession, workflow_id: str, workflow_execution: WorkflowExecution):
+        """Run your existing enhanced_process workflow"""
+        
+        try:
+            workflow_info = self.active_workflows.get(workflow_id, {})
+            chat_id = workflow_info.get("chat_id")
+            
+            # Update status
+            await self._update_workflow_status(db, workflow_id, "running", "content_creation")
+            
+            # Notify frontend that content creation is starting
+            if self.websocket_manager and chat_id:
+                await self.websocket_manager.broadcast_to_chat(chat_id, {
+                    "type": "workflow_update",
                     "workflow_id": workflow_id,
-                    "message": "🛑 Workflow cancelled by user request"
+                    "stage": "content_creation",
+                    "message": "Starting enhanced content creation with CAMEL agents..."
                 })
             
-            logger.info(f"🛑 Workflow cancelled: {workflow_id}")
+            # Import and call your existing async function
+            from spinscribe.tasks.enhanced_process import run_enhanced_content_task
+            
+            # Call your existing async function with the right parameters
+            result = await run_enhanced_content_task(
+                title=workflow_execution.title,
+                content_type=workflow_execution.content_type,
+                project_id=str(workflow_execution.project_id),
+                enable_checkpoints=workflow_execution.enable_checkpoints
+            )
+            
+            # Extract final content from your result structure
+            final_content = result.get("final_content", "No content generated")
+            
+            # Update workflow completion
+            await self._update_workflow_completion(db, workflow_id, final_content)
+            
+            # Notify completion
+            if self.websocket_manager and chat_id:
+                await self.websocket_manager.broadcast_to_chat(chat_id, {
+                    "type": "workflow_completed",
+                    "workflow_id": workflow_id,
+                    "final_content": final_content,
+                    "status": "completed",
+                    "execution_time": result.get("execution_time", 0)
+                })
+            
+            # Cleanup
+            self.active_workflows.pop(workflow_id, None)
+            
+            logger.info(f"Workflow {workflow_id} completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error in workflow {workflow_id}: {e}")
+            await self._update_workflow_status(db, workflow_id, "error", error_details=str(e))
+            
+            # Notify error
+            if self.websocket_manager and chat_id:
+                await self.websocket_manager.broadcast_to_chat(chat_id, {
+                    "type": "workflow_error",
+                    "workflow_id": workflow_id,
+                    "error": str(e)
+                })
     
-    async def continue_workflow_after_approval(self, workflow_id: str, checkpoint_id: str, feedback: Optional[str] = None):
-        """Continue workflow execution after checkpoint approval."""
-        logger.info(f"✅ Continuing workflow {workflow_id} after checkpoint {checkpoint_id}")
+    async def get_workflow_status(self, workflow_id: str) -> Dict[str, Any]:
+        """Get current workflow status"""
         
         if workflow_id in self.active_workflows:
-            workflow_state = self.active_workflows[workflow_id]
+            workflow_info = self.active_workflows[workflow_id]
             
-            # Notify agents about approval
-            if workflow_state.get("chat_id"):
-                await self._send_agent_message(
-                    workflow_id, 
-                    "coordinator", 
-                    "checkpoint_approved",
-                    f"✅ Checkpoint approved{f' with feedback: {feedback}' if feedback else ''}, continuing workflow..."
-                )
+            return {
+                "workflow_id": workflow_id,
+                "status": workflow_info["status"],
+                "chat_id": workflow_info["chat_id"],
+                "title": workflow_info["title"],
+                "content_type": workflow_info["content_type"],
+                "started_at": workflow_info["started_at"].isoformat()
+            }
         
-        # Here you would integrate with the actual CAMEL workflow continuation
-        logger.info(f"🔄 Workflow {workflow_id} continuing after approval")
+        return {"workflow_id": workflow_id, "status": "not_found"}
     
-    async def handle_checkpoint_rejection(self, workflow_id: str, checkpoint_id: str, feedback: Optional[str] = None):
-        """Handle checkpoint rejection and agent revision."""
-        logger.info(f"❌ Handling workflow {workflow_id} checkpoint rejection {checkpoint_id}")
+    async def stop_workflow(self, workflow_id: str, db: AsyncSession) -> bool:
+        """Stop running workflow"""
         
         if workflow_id in self.active_workflows:
-            workflow_state = self.active_workflows[workflow_id]
-            
-            # Notify agents about rejection and needed changes
-            if workflow_state.get("chat_id"):
-                await self._send_agent_message(
-                    workflow_id,
-                    "coordinator", 
-                    "revision_required",
-                    f"🔄 Checkpoint rejected - revising work based on feedback: {feedback or 'No specific feedback provided'}"
-                )
+            try:
+                await self._update_workflow_status(db, workflow_id, "stopped", "manually_stopped")
+                self.active_workflows.pop(workflow_id, None)
+                return True
+            except Exception as e:
+                logger.error(f"Error stopping workflow {workflow_id}: {e}")
+                return False
         
-        # Here you would integrate with CAMEL to handle revisions
-        logger.info(f"🔄 Workflow {workflow_id} handling rejection and revision")
+        return False
+    
+    async def _update_workflow_status(
+        self, 
+        db: AsyncSession, 
+        workflow_id: str, 
+        status: str, 
+        stage: str = None, 
+        progress: float = None,
+        error_details: str = None
+    ):
+        """Update workflow status in database"""
+        
+        try:
+            update_data = {"status": status, "updated_at": datetime.now(datetime.timezone.utc)}
+            
+            if stage:
+                update_data["current_stage"] = stage
+            if progress is not None:
+                update_data["progress_percentage"] = progress
+            if error_details:
+                update_data["error_details"] = error_details
+            if status == "completed":
+                update_data["completed_at"] = datetime.now(datetime.timezone.utc)
+            
+            stmt = (
+                update(WorkflowExecution)
+                .where(WorkflowExecution.id == workflow_id)
+                .values(**update_data)
+            )
+            
+            await db.execute(stmt)
+            await db.commit()
+            
+        except Exception as e:
+            logger.error(f"Failed to update workflow status: {e}")
+            await db.rollback()
+    
+    async def _update_workflow_completion(self, db: AsyncSession, workflow_id: str, final_content: str):
+        """Update workflow with completion data"""
+        
+        try:
+            stmt = (
+                update(WorkflowExecution)
+                .where(WorkflowExecution.id == workflow_id)
+                .values(
+                    status="completed",
+                    current_stage="completed",
+                    progress_percentage=100.0,
+                    completed_at=datetime.now(datetime.timezone.utc),
+                    final_content=final_content,
+                    updated_at=datetime.now(datetime.timezone.utc)
+                )
+            )
+            
+            await db.execute(stmt)
+            await db.commit()
+            
+        except Exception as e:
+            logger.error(f"Failed to update workflow completion: {e}")
+            await db.rollback()
 
-# Create global instance
-workflow_service = CamelWorkflowService()
-
-async def health_check() -> Dict[str, Any]:
-    """Check the health of the workflow service."""
-    return {
-        "available": workflow_service.spinscribe_available,
-        "enhanced": workflow_service.enhanced_available,
-        "api_key_available": workflow_service.api_key_available,
-        "active_workflows": len(workflow_service.active_workflows),
-        "version": "0.2.16"  # CAMEL version
-    }
+# Global service instance
+workflow_service = CAMELWorkflowService()
