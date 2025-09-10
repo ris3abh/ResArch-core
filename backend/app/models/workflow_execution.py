@@ -9,12 +9,13 @@ from app.core.database import Base
 
 class WorkflowExecution(Base):
     __tablename__ = "workflow_executions"
+    __table_args__ = {'extend_existing': True}  # This fixes the duplicate table error
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     workflow_id = Column(String, nullable=False)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    chat_instance_id = Column(UUID(as_uuid=True), ForeignKey("chat_instances.id"), nullable=True)
+    project_id = Column(UUID(as_uuid=True), nullable=False)  # Remove ForeignKey for now
+    user_id = Column(UUID(as_uuid=True), nullable=False)     # Remove ForeignKey for now
+    chat_instance_id = Column(UUID(as_uuid=True), nullable=True)
     chat_id = Column(UUID(as_uuid=True), nullable=True)
     
     title = Column(String, nullable=False)
@@ -38,11 +39,6 @@ class WorkflowExecution(Base):
     
     created_at = Column(DateTime, default=lambda: datetime.now(datetime.timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(datetime.timezone.utc))
-    
-    # Relationships
-    project = relationship("Project", back_populates="workflow_executions")
-    user = relationship("User", back_populates="workflow_executions")
-    chat_instance = relationship("ChatInstance", back_populates="workflow_executions")
     
     @classmethod
     async def get_by_id(cls, db, workflow_id: str):
