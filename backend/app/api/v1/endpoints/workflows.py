@@ -1,7 +1,6 @@
 # backend/app/api/v1/endpoints/workflows.py
 """
-Updated workflow endpoints with proper chat_id integration.
-This version should resolve the 'chat_id' is an invalid keyword argument error.
+FIXED workflow endpoints - corrected start_workflow call
 """
 
 from typing import Optional, List
@@ -73,7 +72,6 @@ async def start_spinscribe_workflow(
 ):
     """
     Start the complete Spinscribe multi-agent workflow with real CAMEL integration.
-    Now properly handles chat_id for agent communication.
     """
     try:
         # Validate project access
@@ -124,56 +122,58 @@ async def start_spinscribe_workflow(
         logger.info(f"   Chat: {request.chat_id}")
         logger.info(f"   Title: {request.title}")
         logger.info(f"   Content Type: {request.content_type}")
-        logger.info(f"   Has Initial Draft: {bool(request.initial_draft)}")
-        logger.info(f"   Use Project Documents: {request.use_project_documents}")
         
         # Get project documents for RAG if requested
         project_documents = []
         if request.use_project_documents:
-            documents = await ProjectService.get_project_documents(db, request.project_id, str(current_user.id))
+            from sqlalchemy import select
+            result = await db.execute(
+                select(Document).where(Document.project_id == uuid.UUID(request.project_id))
+            )
+            documents = result.scalars().all()
             project_documents = [doc.file_path for doc in documents]
             logger.info(f"📄 Found {len(project_documents)} project documents for RAG")
         
-        # Create workflow execution record - NOW WITH PROPER chat_id
+        # Create workflow execution record
         workflow_execution = WorkflowExecution(
-        workflow_id=str(uuid.uuid4()),
-        project_id=uuid.UUID(request.project_id),
-        user_id=current_user.id,
-        chat_instance_id=uuid.UUID(request.chat_id),
-        chat_id=uuid.UUID(request.chat_id),
-        title=request.title,
-        content_type=request.content_type,
-        status="starting",
-        current_stage="initialization",
-        progress_percentage=0.0,
-        
-        # Required fields with defaults
-        timeout_seconds=600,
-        enable_human_interaction=True,
-        enable_checkpoints=True,
-        
-        # ADD THESE MISSING TIMESTAMP FIELDS:
-        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
-        updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
-        started_at=datetime.now(timezone.utc).replace(tzinfo=None),
-        
-        # JSON fields
-        agent_config={
-            "use_project_documents": request.use_project_documents,
-            "enable_agent_messages": True,
-            "show_agent_thinking": True,
-            "checkpoint_notifications": True,
-            "workflow_transparency": True
-        },
-        execution_log={
-            "started_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-            "stage": "initialization",
-            "status": "starting"
-        },
-        
-        # Optional fields
-        first_draft=request.initial_draft
-    )
+            workflow_id=str(uuid.uuid4()),
+            project_id=uuid.UUID(request.project_id),
+            user_id=current_user.id,
+            chat_instance_id=uuid.UUID(request.chat_id),
+            chat_id=uuid.UUID(request.chat_id),
+            title=request.title,
+            content_type=request.content_type,
+            status="starting",
+            current_stage="initialization",
+            progress_percentage=0.0,
+            
+            # Required fields with defaults
+            timeout_seconds=600,
+            enable_human_interaction=True,
+            enable_checkpoints=True,
+            
+            # Timestamp fields
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            started_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            
+            # JSON fields
+            agent_config={
+                "use_project_documents": request.use_project_documents,
+                "enable_agent_messages": True,
+                "show_agent_thinking": True,
+                "checkpoint_notifications": True,
+                "workflow_transparency": True
+            },
+            execution_log={
+                "started_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                "stage": "initialization",
+                "status": "starting"
+            },
+            
+            # Optional fields
+            first_draft=request.initial_draft
+        )
         
         db.add(workflow_execution)
         await db.commit()
@@ -194,42 +194,42 @@ async def start_spinscribe_workflow(
             "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         })
         
-        # Start the actual Spinscribe workflow via the service
-        workflow_response = await workflow_service.start_workflow(
-            request=request,
-            project_documents=project_documents,
-            user_id=str(current_user.id)
+        # ===== FIXED: START THE WORKFLOW PROPERLY =====
+        # Start the workflow in background task with correct parameters
+        background_tasks.add_task(
+            workflow_service.start_workflow,
+            db,  # Pass the database session
+            workflow_execution,  # Pass the workflow execution object
+            project_documents  # Pass the project documents list
         )
+        # ===== END FIX =====
         
-        # Update database record with workflow service response
-        workflow_execution.workflow_id = workflow_response.workflow_id
-        workflow_execution.status = workflow_response.status
-        workflow_execution.current_stage = workflow_response.current_stage
-        workflow_execution.final_content = workflow_response.final_content
-        workflow_execution.agent_config.update(workflow_response.live_data or {})
-        
-        if workflow_response.status == "completed":
-            workflow_execution.completed_at = workflow_response.completed_at
-        
-        await db.commit()
-        
-        # Add background task for cleanup
+        # Add cleanup task
         background_tasks.add_task(
             cleanup_old_workflows,
             db_session=db
         )
         
-        # Update response with chat_id
-        workflow_response.chat_id = str(chat_instance.id)
-        
-        logger.info(f"✅ Workflow started successfully: {workflow_response.workflow_id}")
-        return workflow_response
+        # Return response
+        return WorkflowResponse(
+            workflow_id=str(workflow_execution.workflow_id),
+            status=workflow_execution.status,
+            current_stage=workflow_execution.current_stage,
+            progress=float(workflow_execution.progress_percentage) if workflow_execution.progress_percentage else 0.0,
+            project_id=str(workflow_execution.project_id),
+            chat_id=str(chat_instance.id),
+            title=workflow_execution.title,
+            content_type=workflow_execution.content_type,
+            final_content=workflow_execution.final_content,
+            created_at=workflow_execution.created_at,
+            completed_at=workflow_execution.completed_at,
+            live_data=workflow_execution.agent_config
+        )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"💥 Failed to start workflow: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"💥 Failed to start workflow: {str(e)}", exc_info=True)
         
         # Update workflow record if it exists
         if 'workflow_execution' in locals():
@@ -278,7 +278,10 @@ async def get_workflow_status(
         checkpoints = checkpoint_result.scalars().all()
         
         # Get live status if available
-        live_status = await workflow_service.get_workflow_status(workflow_id)
+        try:
+            live_status = await workflow_service.get_workflow_status(workflow_id)
+        except:
+            live_status = None
         
         return WorkflowResponse(
             workflow_id=workflow_execution.workflow_id or str(workflow_execution.id),
@@ -286,7 +289,7 @@ async def get_workflow_status(
             current_stage=workflow_execution.current_stage,
             progress=float(workflow_execution.progress_percentage) if workflow_execution.progress_percentage else None,
             project_id=str(workflow_execution.project_id),
-            chat_id=str(workflow_execution.chat_id) if workflow_execution.chat_id else None,  # NEW
+            chat_id=str(workflow_execution.chat_id) if workflow_execution.chat_id else None,
             title=workflow_execution.title,
             content_type=workflow_execution.content_type,
             final_content=workflow_execution.final_content,
@@ -404,7 +407,7 @@ async def list_workflows(
                 current_stage=wf.current_stage,
                 progress=float(wf.progress_percentage) if wf.progress_percentage else None,
                 project_id=str(wf.project_id),
-                chat_id=str(wf.chat_id) if wf.chat_id else None,  # NEW: Include chat_id
+                chat_id=str(wf.chat_id) if wf.chat_id else None,
                 title=wf.title,
                 content_type=wf.content_type,
                 final_content=wf.final_content,
@@ -721,11 +724,11 @@ async def reject_checkpoint(
 async def workflow_health():
     """Check workflow service health."""
     try:
-        status = await health_check()
+        status = health_check()
         return {
-            "status": "healthy" if status["available"] else "unhealthy",
-            "spinscribe_available": status["available"],
-            "enhanced_mode": status["enhanced"],
+            "status": "healthy" if status.get("available") else "unhealthy",
+            "spinscribe_available": status.get("available", False),
+            "enhanced_mode": status.get("enhanced", False),
             "camel_version": status.get("version", "unknown"),
             "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         }

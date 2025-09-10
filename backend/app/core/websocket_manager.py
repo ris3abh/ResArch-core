@@ -382,5 +382,44 @@ class WebSocketManager:
         
         await self.broadcast_agent_message(workflow_id, agent_message)
 
+    async def broadcast_to_chat(self, chat_id: str, message: Dict[str, Any]):
+        """Broadcast message to all connections in a chat"""
+        # Convert chat_id to string to ensure consistency
+        chat_id = str(chat_id)
+        
+        if chat_id in self.chat_connections:
+            disconnected = []
+            for connection_id in list(self.chat_connections[chat_id]):
+                if connection_id in self.active_connections:
+                    try:
+                        await self.active_connections[connection_id].send_json(message)
+                    except Exception as e:
+                        logger.warning(f"Failed to send to connection {connection_id}: {e}")
+                        disconnected.append(connection_id)
+            
+            # Clean up disconnected
+            for conn_id in disconnected:
+                self.chat_connections[chat_id].discard(conn_id)
+                if conn_id in self.active_connections:
+                    del self.active_connections[conn_id]
+        else:
+            logger.debug(f"No active connections for chat {chat_id}")
+
+    async def broadcast_to_workflow(self, workflow_id: str, message: Dict[str, Any]):
+        """Broadcast message to workflow subscribers"""
+        workflow_id = str(workflow_id)
+        
+        if workflow_id in self.workflow_connections:
+            for connection_id in list(self.workflow_connections[workflow_id]):
+                if connection_id in self.active_connections:
+                    try:
+                        await self.active_connections[connection_id].send_json(message)
+                    except Exception as e:
+                        logger.warning(f"Failed to send to connection {connection_id}: {e}")
+
+    async def send_to_chat(self, chat_id: str, message: Dict[str, Any]):
+        """Alias for broadcast_to_chat for compatibility"""
+        await self.broadcast_to_chat(chat_id, message)
+
 # Create singleton instance
 websocket_manager = WebSocketManager()

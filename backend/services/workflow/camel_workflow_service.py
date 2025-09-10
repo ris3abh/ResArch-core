@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,7 +84,7 @@ class CAMELWorkflowService:
                 "title": workflow_execution.title,
                 "content_type": workflow_execution.content_type,
                 "status": "running",
-                "started_at": datetime.now(datetime.timezone.utc),
+                "started_at": datetime.now(timezone.utc).replace(tzinfo=None),
             }
             
             # Notify frontend
@@ -150,7 +150,8 @@ class CAMELWorkflowService:
                     title=workflow_execution.title,
                     content_type=workflow_execution.content_type,
                     project_id=str(workflow_execution.project_id),
-                    enable_checkpoints=workflow_execution.enable_checkpoints
+                    enable_human_interaction=workflow_execution.enable_checkpoints,  # Map checkpoints to human interaction
+                    first_draft=workflow_execution.first_draft  # Also pass first_draft if available
                 )
                 
                 # Extract final content from your result structure
@@ -234,28 +235,20 @@ class CAMELWorkflowService:
         db: AsyncSession, 
         workflow_id: str, 
         status: str, 
-        stage: str = None, 
-        progress: float = None,
+        stage: str = None,
         error_details: str = None
     ):
         """Update workflow status in database"""
         
         try:
-            update_data = {"status": status, "updated_at": datetime.now(datetime.timezone.utc)}
-            
-            if stage:
-                update_data["current_stage"] = stage
-            if progress is not None:
-                update_data["progress_percentage"] = progress
-            if error_details:
-                update_data["error_details"] = error_details
-            if status == "completed":
-                update_data["completed_at"] = datetime.now(datetime.timezone.utc)
-            
-            stmt = (
-                update(WorkflowExecution)
-                .where(WorkflowExecution.id == workflow_id)
-                .values(**update_data)
+            # Use timezone-naive datetime for PostgreSQL
+            stmt = update(WorkflowExecution).where(
+                WorkflowExecution.id == workflow_id
+            ).values(
+                status=status,
+                current_stage=stage if stage else WorkflowExecution.current_stage,
+                error_details={"error": error_details, "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()} if error_details else None,
+                updated_at=datetime.now(timezone.utc).replace(tzinfo=None)  # Use utcnow() for naive datetime
             )
             
             await db.execute(stmt)
@@ -263,23 +256,25 @@ class CAMELWorkflowService:
             
         except Exception as e:
             logger.error(f"Failed to update workflow status: {e}")
-            await db.rollback()
-    
+            # Don't rollback if already in a bad state
+            try:
+                await db.rollback()
+            except:
+                pass
+
     async def _update_workflow_completion(self, db: AsyncSession, workflow_id: str, final_content: str):
-        """Update workflow with completion data"""
+        """Update workflow completion in database"""
         
         try:
-            stmt = (
-                update(WorkflowExecution)
-                .where(WorkflowExecution.id == workflow_id)
-                .values(
-                    status="completed",
-                    current_stage="completed",
-                    progress_percentage=100.0,
-                    completed_at=datetime.now(datetime.timezone.utc),
-                    final_content=final_content,
-                    updated_at=datetime.now(datetime.timezone.utc)
-                )
+            stmt = update(WorkflowExecution).where(
+                WorkflowExecution.id == workflow_id
+            ).values(
+                status="completed",
+                current_stage="completed",
+                progress_percentage=100.0,
+                completed_at=datetime.now(timezone.utc).replace(tzinfo=None),  # Use utcnow() for naive datetime
+                final_content=final_content,
+                updated_at=datetime.now(timezone.utc).replace(tzinfo=None)  # Use utcnow() for naive datetime
             )
             
             await db.execute(stmt)
@@ -287,7 +282,10 @@ class CAMELWorkflowService:
             
         except Exception as e:
             logger.error(f"Failed to update workflow completion: {e}")
-            await db.rollback()
+            try:
+                await db.rollback()
+            except:
+                pass
 
 # Global service instance
 workflow_service = CAMELWorkflowService()
