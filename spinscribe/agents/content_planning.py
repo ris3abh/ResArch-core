@@ -1,7 +1,9 @@
 # File: spinscribe/agents/content_planning.py
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
-from camel.toolkits import HumanToolkit, FunctionTool
+# from camel.toolkits import HumanToolkit, FunctionTool
+from camel.toolkits import FunctionTool
+from spinscribe.tools.fixed_human_toolkit import FixedHumanToolkit
 from spinscribe.memory.memory_setup import get_memory
 from config.settings import MODEL_PLATFORM, MODEL_TYPE, MODEL_CONFIG
 
@@ -26,7 +28,7 @@ def create_content_planning_agent():
     )
     
     # Initialize HumanToolkit for human interaction
-    human_toolkit = HumanToolkit()
+    human_toolkit = FixedHumanToolkit()
     
     # Define outline approval function
     if hl:

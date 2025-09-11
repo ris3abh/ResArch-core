@@ -10,7 +10,8 @@ import time
 from typing import Dict, Any, Optional
 
 from camel.tasks import Task
-from camel.toolkits import HumanToolkit
+# from camel.toolkits import HumanToolkit
+from spinscribe.tools.fixed_human_toolkit import FixedHumanToolkit
 from camel.models import ModelFactory
 from camel.types import ModelPlatformType, ModelType
 from camel.agents import ChatAgent
@@ -98,7 +99,8 @@ async def run_enhanced_content_task(
         
         if enable_human_interaction:
             try:
-                human_toolkit = HumanToolkit()
+                # human_toolkit = HumanToolkit()
+                human_toolkit = FixedHumanToolkit()
                 tools = human_toolkit.get_tools()
                 logger.info(f"💬 Human interaction enabled with {len(tools)} tools")
                 logger.info("📱 Agents will ask you questions via console - be ready to respond!")
@@ -430,7 +432,8 @@ if __name__ == "__main__":
         print("✅ Core CAMEL imports successful")
         
         # Test HumanToolkit functionality
-        human_toolkit = HumanToolkit()
+        # human_toolkit = HumanToolkit()
+        human_toolkit = FixedHumanToolkit()
         tools = human_toolkit.get_tools()
         print(f"✅ HumanToolkit initialized with {len(tools)} interaction tools")
         

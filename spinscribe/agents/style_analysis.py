@@ -1,7 +1,9 @@
 # File: spinscribe/agents/style_analysis.py
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
-from camel.toolkits import HumanToolkit, FunctionTool
+# from camel.toolkits import HumanToolkit, FunctionTool
+from camel.toolkits import FunctionTool
+from spinscribe.tools.fixed_human_toolkit import FixedHumanToolkit
 from spinscribe.memory.memory_setup import get_memory
 from config.settings import MODEL_PLATFORM, MODEL_TYPE, MODEL_CONFIG
 
@@ -26,7 +28,10 @@ def create_style_analysis_agent():
     )
     
     # Initialize HumanToolkit for human interaction
-    human_toolkit = HumanToolkit()
+    # human_toolkit = HumanToolkit()
+
+    human_toolkit = FixedHumanToolkit()
+
     
     # Define style guide approval function
     if hl:

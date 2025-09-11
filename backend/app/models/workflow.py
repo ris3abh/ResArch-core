@@ -63,6 +63,40 @@ class WorkflowExecution(Base):
     user = relationship("User")
     # Use chat_instance_id as primary chat relationship
     chat_instance = relationship("ChatInstance", foreign_keys=[chat_instance_id])
+
+    @classmethod
+    async def get_by_id(cls, db, workflow_id: str):
+        """Get workflow by ID"""
+        from sqlalchemy import select
+        result = await db.execute(select(cls).where(cls.id == workflow_id))
+        return result.scalar_one_or_none()
+    
+    @classmethod
+    async def get_by_filters(cls, db, filters: dict, limit: int = 20, offset: int = 0):
+        """Get workflows by filters"""
+        from sqlalchemy import select
+        query = select(cls)
+        
+        for key, value in filters.items():
+            if hasattr(cls, key):
+                query = query.where(getattr(cls, key) == value)
+        
+        query = query.order_by(cls.created_at.desc()).limit(limit).offset(offset)
+        result = await db.execute(query)
+        return result.scalars().all()
+    
+    @classmethod
+    async def count_by_filters(cls, db, filters: dict):
+        """Count workflows by filters"""
+        from sqlalchemy import select, func
+        query = select(func.count(cls.id))
+        
+        for key, value in filters.items():
+            if hasattr(cls, key):
+                query = query.where(getattr(cls, key) == value)
+        
+        result = await db.execute(query)
+        return result.scalar()
     
     # Property to maintain compatibility with new code expecting initial_draft
     @property

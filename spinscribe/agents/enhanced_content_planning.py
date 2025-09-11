@@ -14,7 +14,8 @@ from camel.agents import ChatAgent
 from camel.models import ModelFactory
 from camel.messages import BaseMessage
 from camel.types import RoleType
-from camel.toolkits import HumanToolkit
+# from camel.toolkits import HumanToolkit
+from spinscribe.tools.fixed_human_toolkit import FixedHumanToolkit
 
 try:
     from spinscribe.memory.memory_setup import get_memory
@@ -57,7 +58,10 @@ class EnhancedContentPlanningAgent:
         self.tools = []
         
         # Initialize CAMEL's built-in HumanToolkit (always available)
-        human_toolkit = HumanToolkit()
+        # human_toolkit = HumanToolkit()
+        # self.tools.extend(human_toolkit.get_tools())
+
+        human_toolkit = FixedHumanToolkit()
         self.tools.extend(human_toolkit.get_tools())
         
         # Initialize knowledge toolkit (existing RAG functionality)

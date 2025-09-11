@@ -10,7 +10,7 @@ FIXED VERSION - Using only CAMEL's built-in human interaction capabilities.
 
 from camel.agents import ChatAgent
 from camel.models import ModelFactory
-from camel.toolkits import HumanToolkit
+from spinscribe.tools.fixed_human_toolkit import FixedHumanToolkit
 from spinscribe.memory.memory_setup import get_memory
 from config.settings import MODEL_PLATFORM, MODEL_TYPE, MODEL_CONFIG
 
@@ -23,7 +23,7 @@ def create_coordinator_agent():
     )
     
     # Initialize CAMEL's built-in HumanToolkit (always available)
-    human_toolkit = HumanToolkit()
+    human_toolkit = FixedHumanToolkit()
     
     sys_msg = (
         "You are the Coordinator Agent responsible for workflow management with "
