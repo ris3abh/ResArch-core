@@ -10,7 +10,7 @@ import time
 from typing import Dict, Any, Optional
 
 from camel.tasks import Task
-from spinscribe.workforce.enhanced_builder import build_enhanced_content_workflow
+from spinscribe.workforce.enhanced_builder import create_enhanced_workforce as build_enhanced_content_workflow
 from spinscribe.knowledge.knowledge_manager import KnowledgeManager
 from spinscribe.utils.enhanced_logging import workflow_tracker, log_execution_time, setup_enhanced_logging
 from spinscribe.checkpoints.checkpoint_manager import CheckpointManager, CheckpointType, Priority

@@ -1,6 +1,6 @@
 # backend/services/workflow/camel_workflow_service.py
 """
-CAMEL workflow service with WebSocket bridge integration for human interaction
+FIXED CAMEL workflow service with proper workflow ID handling and async execution
 """
 import asyncio
 import logging
@@ -8,6 +8,7 @@ import sys
 import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -15,16 +16,19 @@ from sqlalchemy import select, update
 from app.models.workflow import WorkflowExecution
 from app.models.chat import ChatInstance
 
-from services.workflow.camel_websocket_bridge import CAMELWebSocketBridge
-
 logger = logging.getLogger(__name__)
 
+# Add spinscribe to path for imports
+backend_path = Path(__file__).parent.parent.parent
+spinscribe_path = backend_path.parent
+sys.path.insert(0, str(spinscribe_path))
+
 class CAMELWorkflowService:
-    """Workflow service that calls your existing async CAMEL workflow with WebSocket bridge"""
+    """Workflow service with WebSocket bridge integration"""
     
     def __init__(self):
         self.websocket_manager: Optional[Any] = None
-        self.camel_bridge: Optional[CAMELWebSocketBridge] = None
+        self.camel_bridge: Optional[Any] = None  # Will be set by endpoint
         self.active_workflows: Dict[str, Dict[str, Any]] = {}
         
     def set_websocket_manager(self, websocket_manager):
@@ -32,7 +36,7 @@ class CAMELWorkflowService:
         self.websocket_manager = websocket_manager
         logger.info("WebSocket manager connected to CAMEL workflow service")
     
-    def set_camel_bridge(self, bridge: CAMELWebSocketBridge):
+    def set_camel_bridge(self, bridge):
         """Set the CAMEL WebSocket bridge for human interaction"""
         self.camel_bridge = bridge
         logger.info("CAMEL WebSocket bridge connected to workflow service")
@@ -43,215 +47,210 @@ class CAMELWorkflowService:
         workflow_execution: WorkflowExecution,
         project_documents: list = None
     ) -> Dict[str, Any]:
-        """Start your existing CAMEL workflow"""
+        """Start workflow with WebSocket connection wait"""
         
+        # FIX 1: Use the actual workflow execution ID
         workflow_id = str(workflow_execution.id)
         
         try:
             # Update workflow status
-            await self._update_workflow_status(db, workflow_id, "running", "initialization")
+            await self._update_workflow_status(db, workflow_id, "starting", "initialization")
             
-            # Handle chat instance
-            chat_instance = None
-            if workflow_execution.chat_instance_id:
-                stmt = select(ChatInstance).where(ChatInstance.id == workflow_execution.chat_instance_id)
-                result = await db.execute(stmt)
-                chat_instance = result.scalar_one_or_none()
-            
-            if not chat_instance:
-                # Create new chat instance
-                chat_instance = ChatInstance(
-                    project_id=workflow_execution.project_id,
-                    name=f"SpinScribe: {workflow_execution.title}",
-                    description=f"Agent collaboration chat for {workflow_execution.content_type}",
-                    chat_type="workflow",
-                    created_by=workflow_execution.user_id,
-                    workflow_id=workflow_execution.workflow_id,
-                    agent_config={
-                        "enable_agent_messages": True,
-                        "show_agent_thinking": True,
-                        "checkpoint_notifications": True,
-                        "workflow_transparency": True
-                    }
-                )
-                
-                db.add(chat_instance)
-                await db.flush()
-                
-                # Update workflow execution
-                workflow_execution.chat_instance_id = chat_instance.id
-                workflow_execution.chat_id = chat_instance.id
-                await db.commit()
-            
-            chat_id = str(chat_instance.id)
-            
-            # Store workflow info
+            # Store active workflow info
             self.active_workflows[workflow_id] = {
-                "chat_id": chat_id,
-                "project_id": str(workflow_execution.project_id),
-                "title": workflow_execution.title,
-                "content_type": workflow_execution.content_type,
-                "status": "running",
-                "started_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                "execution": workflow_execution,
+                "started_at": datetime.now(timezone.utc),
+                "documents": project_documents
             }
             
-            # Notify frontend
-            if self.websocket_manager:
-                try:
-                    await self.websocket_manager.broadcast_to_chat(chat_id, {
-                        "type": "workflow_started",
-                        "workflow_id": workflow_id,
-                        "title": workflow_execution.title,
-                        "content_type": workflow_execution.content_type,
-                        "status": "running"
-                    })
-                except Exception as e:
-                    logger.warning(f"Failed to send WebSocket notification: {e}")
+            # FIX 2: Wait for WebSocket connection before starting CAMEL
+            connected = await self._wait_for_websocket_connection(workflow_id)
+            if not connected:
+                logger.warning(f"No WebSocket connected for workflow {workflow_id}, continuing anyway")
             
-            # Start your existing workflow in background
-            asyncio.create_task(self._run_your_existing_workflow(db, workflow_id, workflow_execution))
+            # Update status to running
+            await self._update_workflow_status(db, workflow_id, "running", "content_creation")
             
-            return {
-                "workflow_id": workflow_id,
-                "status": "started",
-                "chat_id": chat_id
-            }
+            # FIX 3: Run the actual CAMEL workflow asynchronously
+            # This will be executed in background task
+            result = await self._run_camel_workflow_async(
+                workflow_id=workflow_id,
+                workflow_execution=workflow_execution,
+                project_documents=project_documents,
+                db=db
+            )
+            
+            return result
             
         except Exception as e:
             logger.error(f"Failed to start workflow {workflow_id}: {e}")
-            await self._update_workflow_status(db, workflow_id, "error", error_details=str(e))
+            await self._update_workflow_status(db, workflow_id, "failed", error_details=str(e))
             raise
     
-    async def _run_your_existing_workflow(self, db: AsyncSession, workflow_id: str, workflow_execution: WorkflowExecution):
-        """Run your existing enhanced_process workflow with WebSocket bridge"""
+    async def _wait_for_websocket_connection(self, workflow_id: str) -> bool:
+        """Wait for WebSocket client to connect (with timeout)"""
+        if not self.websocket_manager:
+            return False
+        
+        logger.info(f"Waiting for WebSocket connection for workflow {workflow_id}...")
+        
+        # Wait up to 5 seconds for connection
+        for i in range(10):
+            if hasattr(self.websocket_manager, 'workflow_connections'):
+                if workflow_id in self.websocket_manager.workflow_connections:
+                    if self.websocket_manager.workflow_connections[workflow_id]:
+                        logger.info(f"WebSocket connected for workflow {workflow_id}")
+                        return True
+            await asyncio.sleep(0.5)
+        
+        return False
+    
+    async def _run_camel_workflow_async(
+        self,
+        workflow_id: str,
+        workflow_execution: WorkflowExecution,
+        project_documents: list,
+        db: AsyncSession
+    ) -> Dict[str, Any]:
+        """Run the actual CAMEL workflow with WebSocket bridge"""
         
         try:
-            workflow_info = self.active_workflows.get(workflow_id, {})
-            chat_id = workflow_info.get("chat_id")
+            # Import the actual CAMEL workflow
+            from spinscribe.enhanced_process import run_enhanced_content_task
             
-            # Update status
-            await self._update_workflow_status(db, workflow_id, "running", "content_creation")
+            # Prepare documents text if available
+            documents_text = ""
+            if project_documents:
+                for doc in project_documents:
+                    if hasattr(doc, 'extracted_text') and doc.extracted_text:
+                        documents_text += f"\n{doc.extracted_text}\n"
             
-            # Notify frontend that content creation is starting
-            if self.websocket_manager and chat_id:
-                try:
-                    await self.websocket_manager.broadcast_to_chat(chat_id, {
-                        "type": "workflow_update",
-                        "workflow_id": workflow_id,
-                        "stage": "content_creation",
-                        "message": "Starting enhanced content creation with CAMEL agents..."
-                    })
-                except Exception as e:
-                    logger.warning(f"Failed to send WebSocket update: {e}")
-            
-            # Import and call your existing async function WITH WEBSOCKET BRIDGE
-            try:
-                # Add the backend directory to Python path
-                backend_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-                if backend_path not in sys.path:
-                    sys.path.append(backend_path)
+            # Run with WebSocket bridge capture if available
+            if self.camel_bridge:
+                logger.info(f"Running CAMEL workflow with WebSocket bridge for {workflow_id}")
                 
-                from spinscribe.tasks.enhanced_process import run_enhanced_content_task
-                
-                # Use CAMEL WebSocket bridge if available
-                if self.camel_bridge:
-                    logger.info(f"Running workflow {workflow_id} with WebSocket bridge")
+                # Use the bridge to capture I/O
+                with self.camel_bridge.capture_camel_session(workflow_id):
+                    # Notify WebSocket clients that workflow started
+                    if self.websocket_manager:
+                        await self.websocket_manager.broadcast_to_workflow(workflow_id, {
+                            "type": "workflow_started",
+                            "workflow_id": workflow_id,
+                            "title": workflow_execution.title,
+                            "content_type": workflow_execution.content_type,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
                     
-                    # Run with WebSocket capture
-                    with self.camel_bridge.capture_camel_session(workflow_id):
-                        # Send initial message
-                        if self.websocket_manager:
-                            await self.websocket_manager.broadcast_to_workflow(workflow_id, {
-                                "type": "workflow_started",
-                                "workflow_id": workflow_id,
-                                "message": "CAMEL agents initialized. You will receive prompts for input.",
-                                "timestamp": datetime.now(timezone.utc).isoformat()
-                            })
-                        
-                        # Call your existing async function
-                        result = await run_enhanced_content_task(
-                            title=workflow_execution.title,
-                            content_type=workflow_execution.content_type,
-                            project_id=str(workflow_execution.project_id),
-                            enable_human_interaction=workflow_execution.enable_checkpoints,
-                            first_draft=workflow_execution.first_draft
-                        )
-                else:
-                    logger.warning(f"Running workflow {workflow_id} without WebSocket bridge (console only)")
-                    # Fallback to regular execution without bridge
+                    # Run the CAMEL workflow
+                    # result = await run_enhanced_workflow(
+                    #     project_id=str(workflow_execution.project_id),
+                    #     content_title=workflow_execution.title,
+                    #     content_type=workflow_execution.content_type,
+                    #     client_context=documents_text if documents_text else None,
+                    #     enable_human_layer=True,
+                    #     enable_checkpoints=workflow_execution.enable_checkpoints
+                    # )
                     result = await run_enhanced_content_task(
                         title=workflow_execution.title,
                         content_type=workflow_execution.content_type,
                         project_id=str(workflow_execution.project_id),
-                        enable_human_interaction=workflow_execution.enable_checkpoints,
-                        first_draft=workflow_execution.first_draft
+                        client_documents_path=documents_text if documents_text else None,  # documents are passed as text, not path
+                        first_draft=workflow_execution.first_draft if hasattr(workflow_execution, 'first_draft') else None,
+                        enable_checkpoints=workflow_execution.enable_checkpoints
                     )
+            else:
+                # Run without bridge (fallback)
+                logger.warning(f"Running CAMEL workflow without WebSocket bridge for {workflow_id}")
+                # result = await run_enhanced_workflow(
+                #     project_id=str(workflow_execution.project_id),
+                #     content_title=workflow_execution.title,
+                #     content_type=workflow_execution.content_type,
+                #     client_context=documents_text if documents_text else None,
+                #     enable_human_layer=True,
+                #     enable_checkpoints=workflow_execution.enable_checkpoints
+                # )
+                result = await run_enhanced_content_task(
+                    title=workflow_execution.title,
+                    content_type=workflow_execution.content_type,
+                    project_id=str(workflow_execution.project_id),
+                    client_documents_path=documents_text if documents_text else None,  # or provide path if you have documents
+                    first_draft=workflow_execution.first_draft if hasattr(workflow_execution, 'first_draft') else None,
+                    enable_checkpoints=workflow_execution.enable_checkpoints
+                )
+            
+            # Update workflow with results
+            if result.get('status') == 'completed':
+                await self._update_workflow_completion(
+                    db, 
+                    workflow_id, 
+                    result.get('final_content', '')
+                )
                 
-                # Extract final content from your result structure
-                final_content = result.get("final_content", "No content generated")
-                
-                # Update workflow completion
-                await self._update_workflow_completion(db, workflow_id, final_content)
-                
-                # Notify completion
+                # Notify WebSocket clients
                 if self.websocket_manager:
                     await self.websocket_manager.broadcast_to_workflow(workflow_id, {
                         "type": "workflow_completed",
                         "workflow_id": workflow_id,
-                        "final_content": final_content[:500] + "..." if len(final_content) > 500 else final_content,
+                        "final_content": result.get('final_content', ''),
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     })
-                
-                logger.info(f"Workflow {workflow_id} completed successfully")
-                
-            except ImportError as e:
-                logger.error(f"Could not import enhanced_process: {e}")
-                # Create a basic fallback result
-                final_content = f"Workflow '{workflow_execution.title}' started but enhanced_process import failed: {str(e)}"
-                await self._update_workflow_completion(db, workflow_id, final_content)
-                
-            # Cleanup
-            self.active_workflows.pop(workflow_id, None)
+            else:
+                await self._update_workflow_status(
+                    db, 
+                    workflow_id, 
+                    "failed", 
+                    error_details=result.get('error', 'Unknown error')
+                )
+            
+            return result
             
         except Exception as e:
-            logger.error(f"Error in workflow {workflow_id}: {e}")
-            await self._update_workflow_status(db, workflow_id, "error", error_details=str(e))
-            
-            # Notify error
-            if self.websocket_manager and chat_id:
-                try:
-                    await self.websocket_manager.broadcast_to_chat(chat_id, {
-                        "type": "workflow_error",
-                        "workflow_id": workflow_id,
-                        "error": str(e)
-                    })
-                except Exception as ws_error:
-                    logger.warning(f"Failed to send error notification: {ws_error}")
+            logger.error(f"CAMEL workflow failed for {workflow_id}: {e}")
+            await self._update_workflow_status(db, workflow_id, "failed", error_details=str(e))
+            raise
+        finally:
+            # Clean up active workflow
+            self.active_workflows.pop(workflow_id, None)
     
     async def get_workflow_status(self, workflow_id: str) -> Dict[str, Any]:
         """Get current workflow status"""
-        
         if workflow_id in self.active_workflows:
-            workflow_info = self.active_workflows[workflow_id]
+            workflow_data = self.active_workflows[workflow_id]
+            execution = workflow_data["execution"]
             
             return {
                 "workflow_id": workflow_id,
-                "status": workflow_info["status"],
-                "chat_id": workflow_info["chat_id"],
-                "title": workflow_info["title"],
-                "content_type": workflow_info["content_type"],
-                "started_at": workflow_info["started_at"].isoformat()
+                "status": execution.status,
+                "current_stage": execution.current_stage,
+                "progress": execution.progress_percentage,
+                "started_at": workflow_data["started_at"].isoformat(),
+                "is_active": True
             }
         
-        return {"workflow_id": workflow_id, "status": "not_found"}
+        return {
+            "workflow_id": workflow_id,
+            "status": "not_found",
+            "is_active": False
+        }
     
     async def stop_workflow(self, workflow_id: str, db: AsyncSession) -> bool:
-        """Stop running workflow"""
-        
+        """Stop an active workflow"""
         if workflow_id in self.active_workflows:
             try:
-                await self._update_workflow_status(db, workflow_id, "stopped", "manually_stopped")
+                # Update status to cancelled
+                await self._update_workflow_status(db, workflow_id, "cancelled", "stopped_by_user")
+                
+                # Remove from active workflows
                 self.active_workflows.pop(workflow_id, None)
+                
+                # Notify WebSocket clients
+                if self.websocket_manager:
+                    await self.websocket_manager.broadcast_to_workflow(workflow_id, {
+                        "type": "workflow_stopped",
+                        "workflow_id": workflow_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+                
                 return True
             except Exception as e:
                 logger.error(f"Error stopping workflow {workflow_id}: {e}")
@@ -268,15 +267,13 @@ class CAMELWorkflowService:
         error_details: str = None
     ):
         """Update workflow status in database"""
-        
         try:
-            # Use timezone-naive datetime for PostgreSQL
             stmt = update(WorkflowExecution).where(
                 WorkflowExecution.id == workflow_id
             ).values(
                 status=status,
                 current_stage=stage if stage else WorkflowExecution.current_stage,
-                error_details={"error": error_details, "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()} if error_details else None,
+                error_details={"error": error_details} if error_details else None,
                 updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
             )
             
@@ -285,7 +282,6 @@ class CAMELWorkflowService:
             
         except Exception as e:
             logger.error(f"Failed to update workflow status: {e}")
-            # Don't rollback if already in a bad state
             try:
                 await db.rollback()
             except:
@@ -293,7 +289,6 @@ class CAMELWorkflowService:
 
     async def _update_workflow_completion(self, db: AsyncSession, workflow_id: str, final_content: str):
         """Update workflow completion in database"""
-        
         try:
             stmt = update(WorkflowExecution).where(
                 WorkflowExecution.id == workflow_id
@@ -319,7 +314,7 @@ class CAMELWorkflowService:
 # Global service instance
 workflow_service = CAMELWorkflowService()
 
-# Health check function for the workflow endpoints
+# Health check function
 def health_check():
     """Health check for workflow service"""
     return {

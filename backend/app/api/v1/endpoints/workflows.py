@@ -1,6 +1,6 @@
 # backend/app/api/v1/endpoints/workflows.py
 """
-FIXED workflow endpoints - corrected start_workflow call
+FIXED workflow endpoints with consistent workflow_id usage
 """
 
 from typing import Optional, List
@@ -134,9 +134,12 @@ async def start_spinscribe_workflow(
             project_documents = [doc.file_path for doc in documents]
             logger.info(f"📄 Found {len(project_documents)} project documents for RAG")
         
-        # Create workflow execution record
+        # FIX: Generate a consistent workflow_id upfront
+        generated_workflow_id = str(uuid.uuid4())
+        
+        # Create workflow execution record with the generated workflow_id
         workflow_execution = WorkflowExecution(
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=generated_workflow_id,  # Use the generated UUID consistently
             project_id=uuid.UUID(request.project_id),
             user_id=current_user.id,
             chat_instance_id=uuid.UUID(request.chat_id),
@@ -180,13 +183,23 @@ async def start_spinscribe_workflow(
         await db.refresh(workflow_execution)
         
         logger.info(f"💾 Created workflow execution record: {workflow_execution.id}")
+        logger.info(f"🔑 Workflow ID: {generated_workflow_id}")
         logger.info(f"🔗 Linked to chat: {chat_instance.id}")
+        
+        # Notify WebSocket with the workflow_id
+        await websocket_manager.broadcast_to_workflow(generated_workflow_id, {
+            "type": "workflow_initializing",
+            "workflow_id": generated_workflow_id,
+            "title": request.title,
+            "status": "starting",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
         
         # Send initial message to chat
         await websocket_manager.send_to_chat(str(chat_instance.id), {
             "type": "workflow_started",
             "data": {
-                "workflow_id": str(workflow_execution.id),
+                "workflow_id": generated_workflow_id,
                 "title": request.title,
                 "content_type": request.content_type,
                 "message": f"🚀 Starting SpinScribe workflow: {request.title}"
@@ -194,7 +207,6 @@ async def start_spinscribe_workflow(
             "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         })
         
-        # ===== FIXED: START THE WORKFLOW PROPERLY =====
         # Start the workflow in background task with correct parameters
         background_tasks.add_task(
             workflow_service.start_workflow,
@@ -202,7 +214,6 @@ async def start_spinscribe_workflow(
             workflow_execution,  # Pass the workflow execution object
             project_documents  # Pass the project documents list
         )
-        # ===== END FIX =====
         
         # Add cleanup task
         background_tasks.add_task(
@@ -210,9 +221,9 @@ async def start_spinscribe_workflow(
             db_session=db
         )
         
-        # Return response
+        # Return response with the consistent workflow_id
         return WorkflowResponse(
-            workflow_id=str(workflow_execution.workflow_id),
+            workflow_id=generated_workflow_id,  # Use the generated workflow_id
             status=workflow_execution.status,
             current_stage=workflow_execution.current_stage,
             progress=float(workflow_execution.progress_percentage) if workflow_execution.progress_percentage else 0.0,
@@ -253,12 +264,12 @@ async def get_workflow_status(
 ):
     """Get the current status of a workflow with chat information."""
     try:
-        # Get workflow execution record
+        # Query by workflow_id field, not id
         from sqlalchemy import select
         result = await db.execute(
             select(WorkflowExecution)
             .where(
-                WorkflowExecution.workflow_id == workflow_id,
+                WorkflowExecution.workflow_id == workflow_id,  # Use workflow_id field
                 WorkflowExecution.user_id == current_user.id
             )
         )
@@ -284,7 +295,7 @@ async def get_workflow_status(
             live_status = None
         
         return WorkflowResponse(
-            workflow_id=workflow_execution.workflow_id or str(workflow_execution.id),
+            workflow_id=workflow_execution.workflow_id,  # Return the workflow_id
             status=workflow_execution.status,
             current_stage=workflow_execution.current_stage,
             progress=float(workflow_execution.progress_percentage) if workflow_execution.progress_percentage else None,
@@ -315,7 +326,7 @@ async def cancel_workflow(
 ):
     """Cancel a running workflow and notify the chat."""
     try:
-        # Get workflow
+        # Query by workflow_id field
         from sqlalchemy import select
         result = await db.execute(
             select(WorkflowExecution)
@@ -402,7 +413,7 @@ async def list_workflows(
         workflow_responses = []
         for wf in workflows:
             workflow_responses.append(WorkflowResponse(
-                workflow_id=wf.workflow_id or str(wf.id),
+                workflow_id=wf.workflow_id,  # Use workflow_id field
                 status=wf.status,
                 current_stage=wf.current_stage,
                 progress=float(wf.progress_percentage) if wf.progress_percentage else None,
@@ -448,6 +459,7 @@ async def get_workflow_content(
 ):
     """Get the final content of a completed workflow."""
     try:
+        # Query by workflow_id field
         from sqlalchemy import select
         result = await db.execute(
             select(WorkflowExecution)
@@ -465,7 +477,7 @@ async def get_workflow_content(
             )
         
         return {
-            "workflow_id": workflow_id,
+            "workflow_id": workflow_execution.workflow_id,
             "title": workflow_execution.title,
             "content_type": workflow_execution.content_type,
             "content": workflow_execution.final_content or "",
@@ -494,7 +506,7 @@ async def get_workflow_checkpoints(
     try:
         from sqlalchemy import select
         
-        # Get workflow first to verify ownership
+        # Get workflow first to verify ownership - query by workflow_id field
         workflow_result = await db.execute(
             select(WorkflowExecution)
             .where(
@@ -510,7 +522,7 @@ async def get_workflow_checkpoints(
                 detail="Workflow not found"
             )
         
-        # Get checkpoints
+        # Get checkpoints using the database id
         checkpoint_result = await db.execute(
             select(WorkflowCheckpoint)
             .where(WorkflowCheckpoint.workflow_id == workflow_execution.id)
@@ -521,7 +533,7 @@ async def get_workflow_checkpoints(
         return [
             CheckpointResponse(
                 id=str(checkpoint.id),
-                workflow_id=workflow_id,
+                workflow_id=workflow_execution.workflow_id,  # Return the workflow_id
                 checkpoint_type=checkpoint.checkpoint_type,
                 stage=checkpoint.stage,
                 title=checkpoint.title,
@@ -599,7 +611,7 @@ async def approve_checkpoint(
                 "type": "checkpoint_approved",
                 "data": {
                     "checkpoint_id": checkpoint_id,
-                    "workflow_id": workflow.workflow_id,
+                    "workflow_id": workflow.workflow_id,  # Use workflow_id field
                     "stage": checkpoint.stage,
                     "feedback": approval.feedback,
                     "message": f"✅ {checkpoint.title} approved by {current_user.first_name}"
@@ -610,7 +622,7 @@ async def approve_checkpoint(
         # Continue workflow execution
         try:
             await workflow_service.continue_workflow_after_approval(
-                workflow.workflow_id, 
+                workflow.workflow_id,  # Use workflow_id field
                 checkpoint_id, 
                 approval.feedback
             )
@@ -620,7 +632,7 @@ async def approve_checkpoint(
         return {
             "message": "Checkpoint approved successfully",
             "checkpoint_id": checkpoint_id,
-            "workflow_id": workflow.workflow_id,
+            "workflow_id": workflow.workflow_id,  # Use workflow_id field
             "status": "approved"
         }
         
@@ -685,7 +697,7 @@ async def reject_checkpoint(
                 "type": "checkpoint_rejected",
                 "data": {
                     "checkpoint_id": checkpoint_id,
-                    "workflow_id": workflow.workflow_id,
+                    "workflow_id": workflow.workflow_id,  # Use workflow_id field
                     "stage": checkpoint.stage,
                     "feedback": rejection.feedback,
                     "message": f"❌ {checkpoint.title} rejected - needs revision"
@@ -696,7 +708,7 @@ async def reject_checkpoint(
         # Send rejection feedback to agents
         try:
             await workflow_service.handle_checkpoint_rejection(
-                workflow.workflow_id, 
+                workflow.workflow_id,  # Use workflow_id field
                 checkpoint_id, 
                 rejection.feedback
             )
@@ -706,7 +718,7 @@ async def reject_checkpoint(
         return {
             "message": "Checkpoint rejected",
             "checkpoint_id": checkpoint_id,
-            "workflow_id": workflow.workflow_id,
+            "workflow_id": workflow.workflow_id,  # Use workflow_id field
             "status": "rejected"
         }
         
