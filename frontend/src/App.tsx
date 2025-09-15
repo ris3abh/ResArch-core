@@ -8,6 +8,7 @@ import Dashboard from './components/Dashboard';
 import ProjectWorkspace from './components/ProjectWorkspace';
 import WorkflowPage from './components/WorkflowPage';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import 'react-toastify/dist/ReactToastify.css';
 
 function AppRoutes() {
   const { user, isLoading } = useAuth();
