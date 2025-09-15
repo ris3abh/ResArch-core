@@ -1,9 +1,13 @@
 // frontend/src/services/api.ts
-// COMPLETE VERSION - Your existing code + minimal safe additions for chat workflow
+// COMPLETE API SERVICE WITH WEBSOCKET INTEGRATION
+// Based on backend endpoints from SpinScribe project
 
 const API_BASE_URL = 'http://localhost:8000/api/v1';
 
-// TypeScript interfaces (your existing ones + minimal additions)
+// ========================================
+// TYPE DEFINITIONS
+// ========================================
+
 export interface User {
   id: string;
   email: string;
@@ -44,22 +48,32 @@ export interface ChatInstance {
   chat_type: string;
   is_active: boolean;
   created_by: string;
+  agent_config?: Record<string, any>;
+  workflow_id?: string;
   created_at: string;
   updated_at: string;
   message_count?: number;
+  active_workflows?: string[];
 }
 
 export interface ChatMessage {
   id: string;
   chat_instance_id: string;
-  sender_type: string;
+  sender_id?: string;
+  sender_type: 'user' | 'agent' | 'system';
   agent_type?: string;
   message_content: string;
   message_type: string;
+  message_metadata?: Record<string, any>;
+  parent_message_id?: string;
+  is_edited: boolean;
   created_at: string;
+  updated_at?: string;
+  workflow_id?: string;
+  stage?: string;
 }
 
-// Workflow interfaces (your existing ones)
+// Workflow interfaces based on backend schemas
 export interface WorkflowConfig {
   title: string;
   contentType: string;
@@ -85,6 +99,7 @@ export interface WorkflowResponse {
   progress?: number;
   message?: string;
   project_id: string;
+  chat_id?: string;
   title: string;
   content_type: string;
   final_content?: string;
@@ -111,14 +126,7 @@ export interface CheckpointApproval {
   feedback?: string;
 }
 
-// NEW: Add interface for project update (needed for settings)
-export interface ProjectUpdateRequest {
-  name?: string;
-  description?: string;
-  client_name?: string;
-}
-
-// NEW: Additional interfaces for chat workflow integration
+// Additional interfaces for enhanced features
 export interface WorkflowExecution {
   workflow_id: string;
   project_id: string;
@@ -148,7 +156,53 @@ export interface WorkflowMessage {
   };
 }
 
+export interface AgentMessage {
+  id: string;
+  agent_type: string;
+  message_content: string;
+  message_type: 'solution' | 'instruction' | 'question' | 'progress';
+  stage: string;
+  timestamp: string;
+}
+
+export interface HumanInputRequest {
+  request_id: string;
+  question: string;
+  question_type: 'yes_no' | 'multiple_choice' | 'text';
+  options?: string[];
+  timeout?: number;
+}
+
+export interface WorkflowStage {
+  id: string;
+  name: string;
+  agent: string;
+  status: 'pending' | 'active' | 'completed' | 'failed';
+  progress: number;
+  message?: string;
+  output?: string;
+  timestamp?: string;
+}
+
+export interface ProjectUpdateRequest {
+  name?: string;
+  description?: string;
+  client_name?: string;
+}
+
+export interface DocumentStats {
+  total_projects: number;
+  total_documents: number;
+  recent_projects: Project[];
+}
+
+// ========================================
+// API SERVICE CLASS
+// ========================================
+
 class ApiService {
+  private activeWebSockets: Map<string, WebSocket> = new Map();
+
   private getAuthHeaders(): Record<string, string> {
     const token = localStorage.getItem('spinscribe_token');
     return {
@@ -190,12 +244,18 @@ class ApiService {
     console.log('Session expired. Redirecting to login...');
   }
 
-  // Health Check
+  // ========================================
+  // HEALTH CHECK ENDPOINTS
+  // ========================================
+  
   async healthCheck() {
     return this.request('/health/');
   }
 
-  // Auth Methods
+  // ========================================
+  // AUTHENTICATION ENDPOINTS (backend/app/api/v1/endpoints/auth.py)
+  // ========================================
+
   async login(email: string, password: string) {
     const formData = new FormData();
     formData.append('username', email);
@@ -226,11 +286,18 @@ class ApiService {
     });
   }
 
+  async getCurrentUser(): Promise<User> {
+    return this.request('/auth/me');
+  }
+
   async testDatabase() {
     return this.request('/auth/test-db');
   }
 
-  // Project Methods
+  // ========================================
+  // PROJECT ENDPOINTS (backend/app/api/v1/endpoints/projects.py)
+  // ========================================
+
   async getProjects(): Promise<Project[]> {
     return this.request('/projects/');
   }
@@ -250,12 +317,7 @@ class ApiService {
     return this.request(`/projects/${projectId}`);
   }
 
-  // ✅ YOUR EXISTING updateProject METHOD - KEEPING AS IS
-  async updateProject(projectId: string, projectData: {
-    name?: string;
-    description?: string;
-    client_name?: string;
-  }): Promise<Project> {
+  async updateProject(projectId: string, projectData: ProjectUpdateRequest): Promise<Project> {
     return this.request(`/projects/${projectId}`, {
       method: 'PUT',
       body: JSON.stringify(projectData),
@@ -268,12 +330,14 @@ class ApiService {
     });
   }
 
-  // Document Methods
+  // ========================================
+  // DOCUMENT ENDPOINTS (backend/app/api/v1/endpoints/documents.py)
+  // ========================================
+
   async getProjectDocuments(projectId: string): Promise<Document[]> {
     return this.request(`/documents/project/${projectId}`);
   }
 
-  // ✅ YOUR EXISTING uploadDocument METHOD - KEEPING AS IS
   async uploadDocument(projectId: string, file: File): Promise<Document> {
     const formData = new FormData();
     formData.append('file', file);
@@ -316,7 +380,14 @@ class ApiService {
     return response.blob();
   }
 
-  // Chat Methods
+  async getDocumentStats(): Promise<DocumentStats> {
+    return this.request('/documents/stats');
+  }
+
+  // ========================================
+  // CHAT ENDPOINTS (backend/app/api/v1/endpoints/chats.py)
+  // ========================================
+
   async getProjectChats(projectId: string): Promise<ChatInstance[]> {
     return this.request(`/chats/project/${projectId}`);
   }
@@ -335,8 +406,45 @@ class ApiService {
     });
   }
 
-  async getChatMessages(chatId: string): Promise<ChatMessage[]> {
-    return this.request(`/chats/${chatId}/messages`);
+  async getChatInstance(chatId: string): Promise<ChatInstance> {
+    return this.request(`/chats/${chatId}`);
+  }
+
+  async updateChatInstance(chatId: string, chatData: {
+    name?: string;
+    description?: string;
+    is_active?: boolean;
+  }): Promise<ChatInstance> {
+    return this.request(`/chats/${chatId}`, {
+      method: 'PUT',
+      body: JSON.stringify(chatData),
+    });
+  }
+
+  async deleteChatInstance(chatId: string): Promise<void> {
+    return this.request(`/chats/${chatId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async getChatMessages(chatId: string, params?: {
+    limit?: number;
+    offset?: number;
+    include_workflow_context?: boolean;
+  }): Promise<ChatMessage[]> {
+    const searchParams = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined) {
+          searchParams.append(key, value.toString());
+        }
+      });
+    }
+    
+    const queryString = searchParams.toString();
+    const endpoint = queryString ? `/chats/${chatId}/messages?${queryString}` : `/chats/${chatId}/messages`;
+    
+    return this.request(endpoint);
   }
 
   async sendChatMessage(chatId: string, content: string): Promise<ChatMessage> {
@@ -349,8 +457,58 @@ class ApiService {
     });
   }
 
+  async updateChatMessage(chatId: string, messageId: string, content: string): Promise<ChatMessage> {
+    return this.request(`/chats/${chatId}/messages/${messageId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        message_content: content,
+      }),
+    });
+  }
+
+  async deleteChatMessage(chatId: string, messageId: string): Promise<void> {
+    return this.request(`/chats/${chatId}/messages/${messageId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async sendAgentMessage(chatId: string, agentData: {
+    agent_type: string;
+    message_content: string;
+    message_type?: string;
+    workflow_id?: string;
+    stage?: string;
+    metadata?: Record<string, any>;
+  }): Promise<ChatMessage> {
+    return this.request(`/chats/${chatId}/agent-message`, {
+      method: 'POST',
+      body: JSON.stringify(agentData),
+    });
+  }
+
+  async sendWorkflowUpdate(chatId: string, update: {
+    workflow_id: string;
+    status: string;
+    stage?: string;
+    message?: string;
+  }): Promise<any> {
+    return this.request(`/chats/${chatId}/workflow-update`, {
+      method: 'POST',
+      body: JSON.stringify(update),
+    });
+  }
+
+  async startSpinscribeWorkflow(chatId: string, task: string): Promise<any> {
+    return this.request(`/chats/${chatId}/start-spinscribe`, {
+      method: 'POST',
+      body: JSON.stringify({
+        task_description: task,
+      }),
+    });
+  }
+
   // ========================================
-  // WORKFLOW METHODS - YOUR EXISTING IMPLEMENTATIONS
+  // WORKFLOW ENDPOINTS (backend/app/api/v1/endpoints/workflows.py)
   // ========================================
 
   async startWorkflow(workflowData: WorkflowCreateRequest): Promise<WorkflowResponse> {
@@ -362,6 +520,16 @@ class ApiService {
 
   async getWorkflowStatus(workflowId: string): Promise<WorkflowResponse> {
     return this.request(`/workflows/status/${workflowId}`);
+  }
+
+  async cancelWorkflow(workflowId: string): Promise<{ 
+    message: string; 
+    workflow_id: string; 
+    status: string 
+  }> {
+    return this.request(`/workflows/${workflowId}/cancel`, {
+      method: 'POST',
+    });
   }
 
   async listWorkflows(params?: {
@@ -385,26 +553,6 @@ class ApiService {
     return this.request(endpoint);
   }
 
-  // Alias method for getActiveWorkflows (uses your existing listWorkflows)
-  async getActiveWorkflows(projectId: string): Promise<WorkflowResponse[]> {
-    try {
-      return this.listWorkflows({ 
-        project_id: projectId, 
-        status: 'running' 
-      });
-    } catch (error) {
-      // If endpoint doesn't exist yet, return empty array
-      console.warn('Active workflows endpoint not available:', error);
-      return [];
-    }
-  }
-
-  async cancelWorkflow(workflowId: string): Promise<{ message: string; workflow_id: string; status: string }> {
-    return this.request(`/workflows/${workflowId}/cancel`, {
-      method: 'POST',
-    });
-  }
-
   async getWorkflowContent(workflowId: string): Promise<{
     workflow_id: string;
     title: string;
@@ -417,7 +565,10 @@ class ApiService {
     return this.request(`/workflows/${workflowId}/content`);
   }
 
-  // Checkpoint Methods
+  // ========================================
+  // CHECKPOINT ENDPOINTS (backend/app/api/v1/endpoints/workflows.py)
+  // ========================================
+
   async getWorkflowCheckpoints(workflowId: string): Promise<CheckpointResponse[]> {
     return this.request(`/workflows/${workflowId}/checkpoints`);
   }
@@ -447,10 +598,103 @@ class ApiService {
   }
 
   // ========================================
-  // NEW METHODS FOR CHAT WORKFLOW INTERFACE
+  // WEBSOCKET METHODS
   // ========================================
 
-  // Create workflow execution (adapts your startWorkflow)
+  createWorkflowWebSocket(workflowId: string): WebSocket {
+    // Close existing connection if any
+    this.closeWorkflowWebSocket(workflowId);
+    
+    const token = localStorage.getItem('spinscribe_token');
+    const wsUrl = `ws://localhost:8000/api/v1/ws/workflows/${workflowId}${token ? `?token=${token}` : ''}`;
+    console.log('🔌 Creating workflow WebSocket connection:', wsUrl);
+    
+    const ws = new WebSocket(wsUrl);
+    this.activeWebSockets.set(workflowId, ws);
+    
+    // Auto-cleanup on close
+    ws.onclose = () => {
+      this.activeWebSockets.delete(workflowId);
+    };
+    
+    return ws;
+  }
+
+  createChatWebSocket(chatId: string): WebSocket {
+    const token = localStorage.getItem('spinscribe_token');
+    const wsUrl = `ws://localhost:8000/api/v1/ws/chats/${chatId}${token ? `?token=${token}` : ''}`;
+    console.log('🔌 Creating chat WebSocket connection:', wsUrl);
+    return new WebSocket(wsUrl);
+  }
+
+  closeWorkflowWebSocket(workflowId: string): void {
+    const ws = this.activeWebSockets.get(workflowId);
+    if (ws) {
+      ws.close(1000, 'Closing connection');
+      this.activeWebSockets.delete(workflowId);
+    }
+  }
+
+  private getActiveWebSocket(workflowId: string): WebSocket | null {
+    return this.activeWebSockets.get(workflowId) || null;
+  }
+
+  // Send human response through WebSocket (based on backend/app/api/v1/endpoints/websocket.py)
+  async sendHumanResponse(workflowId: string, requestId: string, response: string): Promise<void> {
+    const ws = this.getActiveWebSocket(workflowId);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'human_response',
+        request_id: requestId,
+        response: response,
+        workflow_id: workflowId
+      }));
+    } else {
+      throw new Error('WebSocket not connected');
+    }
+  }
+
+  // Send WebSocket message (generic)
+  async sendWebSocketMessage(workflowId: string, message: any): Promise<void> {
+    const ws = this.getActiveWebSocket(workflowId);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+    } else {
+      throw new Error('WebSocket not connected');
+    }
+  }
+
+  // Get workflow status through WebSocket
+  async requestWorkflowStatus(workflowId: string): Promise<void> {
+    return this.sendWebSocketMessage(workflowId, { type: 'get_status' });
+  }
+
+  // Send ping to keep connection alive
+  async pingWorkflow(workflowId: string): Promise<void> {
+    return this.sendWebSocketMessage(workflowId, { type: 'ping' });
+  }
+
+  // ========================================
+  // WEBSOCKET STATS ENDPOINT
+  // ========================================
+
+  async getWebSocketStats(): Promise<{
+    status: string;
+    connections: {
+      total_connections: number;
+      workflow_connections: number;
+      chat_connections: number;
+      user_connections: number;
+    };
+    timestamp: string;
+  }> {
+    return this.request('/ws/stats');
+  }
+
+  // ========================================
+  // ADDITIONAL METHODS FOR CHAT WORKFLOW INTERFACE
+  // ========================================
+
   async createWorkflowExecution(data: {
     project_id: string;
     title: string;
@@ -469,7 +713,6 @@ class ApiService {
 
       const response = await this.startWorkflow(workflowData);
       
-      // Map your WorkflowResponse to WorkflowExecution
       return {
         workflow_id: response.workflow_id,
         project_id: response.project_id,
@@ -488,7 +731,6 @@ class ApiService {
     }
   }
 
-  // Get workflow execution (adapts your getWorkflowStatus)
   async getWorkflowExecution(workflowId: string): Promise<WorkflowExecution> {
     try {
       const response = await this.getWorkflowStatus(workflowId);
@@ -511,43 +753,20 @@ class ApiService {
     }
   }
 
-  // Send workflow message (new method for chat interface)
   async sendWorkflowMessage(workflowId: string, data: {
     content: string;
     type: string;
   }): Promise<any> {
-    try {
-      // This would be a new endpoint you'll need to add to your backend
-      return this.request(`/workflows/${workflowId}/messages`, {
-        method: 'POST',
-        body: JSON.stringify(data),
-      });
-    } catch (error) {
-      console.warn('Workflow message endpoint not available yet:', error);
-      // For now, just return a mock response
-      return {
-        id: `msg-${Date.now()}`,
-        workflow_id: workflowId,
-        content: data.content,
-        type: data.type,
-        timestamp: new Date().toISOString(),
-      };
-    }
+    // Since this endpoint is not yet implemented in backend,
+    // we'll use WebSocket for now
+    return this.sendWebSocketMessage(workflowId, {
+      type: 'workflow_message',
+      content: data.content,
+      message_type: data.type,
+      timestamp: new Date().toISOString()
+    });
   }
 
-  // Get workflow messages (new method for chat interface)
-  async getWorkflowMessages(workflowId: string): Promise<WorkflowMessage[]> {
-    try {
-      // This would be a new endpoint you'll need to add to your backend
-      return this.request(`/workflows/${workflowId}/messages`);
-    } catch (error) {
-      console.warn('Workflow messages endpoint not available yet:', error);
-      // For now, return empty array
-      return [];
-    }
-  }
-
-  // Respond to checkpoint (adapts your existing checkpoint methods)
   async respondToCheckpoint(workflowId: string, checkpointId: string, data: {
     approved: boolean;
     feedback?: string;
@@ -568,40 +787,10 @@ class ApiService {
     }
   }
 
-  // WebSocket Connection Helper
-  createWorkflowWebSocket(workflowId: string): WebSocket {
-    const token = localStorage.getItem('spinscribe_token');
-    const wsUrl = `ws://localhost:8000/api/v1/ws/workflows/${workflowId}${token ? `?token=${token}` : ''}`;
-    console.log('🔌 Creating workflow WebSocket connection:', wsUrl);
-    return new WebSocket(wsUrl);
-  }
-
-  createChatWebSocket(chatId: string): WebSocket {
-    const token = localStorage.getItem('spinscribe_token');
-    const wsUrl = `ws://localhost:8000/api/v1/ws/chats/${chatId}${token ? `?token=${token}` : ''}`;
-    console.log('🔌 Creating chat WebSocket connection:', wsUrl);
-    return new WebSocket(wsUrl);
-  }
-
-  // WebSocket Statistics
-  async getWebSocketStats(): Promise<{
-    status: string;
-    connections: {
-      total_connections: number;
-      workflow_connections: number;
-      chat_connections: number;
-      user_connections: number;
-    };
-    timestamp: string;
-  }> {
-    return this.request('/ws/stats');
-  }
-
   // ========================================
   // UTILITY METHODS FOR BACKWARDS COMPATIBILITY
   // ========================================
 
-  // Alias methods to maintain compatibility with existing code
   async getDocuments(projectId: string): Promise<Document[]> {
     return this.getProjectDocuments(projectId);
   }
@@ -620,7 +809,19 @@ class ApiService {
     });
   }
 
-  // File upload with progress (useful for large documents)
+  async getActiveWorkflows(projectId: string): Promise<WorkflowResponse[]> {
+    try {
+      return this.listWorkflows({ 
+        project_id: projectId, 
+        status: 'running' 
+      });
+    } catch (error) {
+      console.warn('Active workflows endpoint not available:', error);
+      return [];
+    }
+  }
+
+  // File upload with progress
   async uploadWithProgress(
     endpoint: string,
     file: File,
