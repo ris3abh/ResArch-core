@@ -5,7 +5,7 @@ Enhanced WebSocket endpoints with human interaction support for CAMEL workflows
 import json
 import logging
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ async def handle_websocket_message(workflow_id: str, data: Dict[Any, Any], webso
             await websocket.send_json({
                 "type": "error",
                 "message": "Invalid human response: missing request_id or response",
-                "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             })
             return
         
@@ -61,13 +61,13 @@ async def handle_websocket_message(workflow_id: str, data: Dict[Any, Any], webso
             await websocket.send_json({
                 "type": "response_acknowledged",
                 "request_id": request_id,
-                "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             })
         else:
             await websocket.send_json({
                 "type": "error",
                 "message": "CAMEL bridge not available",
-                "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             })
     
     elif message_type == "get_status":
@@ -78,20 +78,20 @@ async def handle_websocket_message(workflow_id: str, data: Dict[Any, Any], webso
                 await websocket.send_json({
                     "type": "workflow_status",
                     "status": status,
-                    "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
             except Exception as e:
                 await websocket.send_json({
                     "type": "error",
                     "message": f"Failed to get workflow status: {str(e)}",
-                    "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
     
     elif message_type == "ping":
         # Heartbeat/keepalive
         await websocket.send_json({
             "type": "pong",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
     
     else:
@@ -99,7 +99,7 @@ async def handle_websocket_message(workflow_id: str, data: Dict[Any, Any], webso
         await websocket.send_json({
             "type": "error",
             "message": f"Unknown message type: {message_type}",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
 
@@ -116,20 +116,20 @@ async def handle_chat_message(chat_id: str, data: Dict[Any, Any], websocket: Web
             "type": "chat_message_received",
             "chat_id": chat_id,
             "content": content,
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
     
     elif message_type == "ping":
         await websocket.send_json({
             "type": "pong",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
     
     else:
         await websocket.send_json({
             "type": "error",
             "message": f"Unknown message type: {message_type}",
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
 
@@ -162,7 +162,7 @@ async def workflow_websocket(websocket: WebSocket, workflow_id: str):
                 "agent_messages": True,
                 "status_updates": True
             },
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         
         # Get current workflow status if available
@@ -172,7 +172,7 @@ async def workflow_websocket(websocket: WebSocket, workflow_id: str):
                 await websocket.send_json({
                     "type": "workflow_status",
                     "status": workflow_status,
-                    "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
             except Exception as e:
                 logger.warning(f"Failed to get initial workflow status: {e}")
@@ -191,7 +191,7 @@ async def workflow_websocket(websocket: WebSocket, workflow_id: str):
                 await websocket.send_json({
                     "type": "error",
                     "message": "Invalid JSON format",
-                    "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}")
@@ -199,7 +199,7 @@ async def workflow_websocket(websocket: WebSocket, workflow_id: str):
                     await websocket.send_json({
                         "type": "error",
                         "message": str(e),
-                        "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     })
                 except:
                     break
@@ -235,7 +235,7 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
             "type": "connection_established",
             "chat_id": chat_id,
             "connection_id": connection_id,
-            "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         
         # Listen for incoming messages
@@ -253,7 +253,7 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
                     await websocket.send_json({
                         "type": "error",
                         "message": str(e),
-                        "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     })
                 except:
                     break
@@ -285,5 +285,5 @@ async def get_websocket_stats():
         },
         "camel_bridge": "connected" if camel_bridge else "not_connected",
         "workflow_service": "connected" if workflow_service else "not_connected",
-        "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }

@@ -273,7 +273,7 @@ async def get_workflow_status(
         # Get any checkpoints from database
         checkpoint_result = await db.execute(
             select(WorkflowCheckpoint)
-            .where(WorkflowCheckpoint.workflow_id == workflow_execution.id)
+            .where(WorkflowCheckpoint.workflow_id == workflow_execution.workflow_id)
         )
         checkpoints = checkpoint_result.scalars().all()
         
@@ -518,7 +518,7 @@ async def get_workflow_checkpoints(
         # Get checkpoints from database
         checkpoint_result = await db.execute(
             select(WorkflowCheckpoint)
-            .where(WorkflowCheckpoint.workflow_id == workflow_execution.id)
+            .where(WorkflowCheckpoint.workflow_id == workflow_execution.workflow_id)
             .order_by(WorkflowCheckpoint.created_at)
         )
         checkpoints = checkpoint_result.scalars().all()

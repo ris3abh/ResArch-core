@@ -12,7 +12,7 @@ import uuid
 from contextlib import contextmanager
 from typing import Dict, Any, Optional, Callable
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class ConsoleCapture:
                 "type": "console_output",
                 "content": text.strip(),
                 "stream": stream_type,
-                "timestamp": datetime.now(datetime.timezone.utc).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "session_id": self.session_id,
                 **agent_info
             }
@@ -145,7 +145,7 @@ class ConsoleCapture:
                 "type": "human_input_required",
                 "request_id": request_id,
                 "question": question,
-                "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             })
             
             # Wait for response from WebSocket (with timeout)
@@ -321,7 +321,7 @@ class CAMELWebSocketBridge:
                 await self.websocket_manager.broadcast_to_workflow(session_id, {
                     "type": "workflow_started",
                     "session_id": session_id,
-                    "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
                 
                 # Run the existing workflow function
@@ -332,7 +332,7 @@ class CAMELWebSocketBridge:
                     "type": "workflow_completed",
                     "session_id": session_id,
                     "result": str(result) if result else "Workflow completed",
-                    "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
                 
                 return result
@@ -345,7 +345,7 @@ class CAMELWebSocketBridge:
                     "type": "workflow_error",
                     "session_id": session_id,
                     "error": str(e),
-                    "timestamp": datetime.now(datetime.timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
                 
                 raise
