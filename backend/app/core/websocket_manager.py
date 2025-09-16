@@ -16,26 +16,29 @@ class WebSocketManager:
     """Enhanced WebSocket manager for SpinScribe workflow-chat integration."""
     
     def __init__(self):
-        # Connection tracking
-        self.active_connections: Set[WebSocket] = set()
-        self.user_connections: Dict[str, Set[WebSocket]] = defaultdict(set)
-        self.chat_connections: Dict[str, Set[WebSocket]] = defaultdict(set)
-        self.workflow_connections: Dict[str, Set[WebSocket]] = defaultdict(set)
+        # Connection tracking - FIXED: Use consistent structure
+        self.active_connections: Dict[str, WebSocket] = {}  # connection_id -> websocket
+        self.user_connections: Dict[str, Set[str]] = defaultdict(set)  # user_id -> connection_ids
+        self.chat_connections: Dict[str, Set[str]] = defaultdict(set)  # chat_id -> connection_ids
+        self.workflow_connections: Dict[str, Set[str]] = defaultdict(set)  # workflow_id -> connection_ids
+        
+        # Reverse mapping for cleanup
+        self.connection_metadata: Dict[str, dict] = {}  # connection_id -> metadata
         
         # User mappings for cleanup
         self.user_chat_mapping: Dict[str, Set[str]] = defaultdict(set)
         self.user_workflow_mapping: Dict[str, Set[str]] = defaultdict(set)
         
-        # NEW: Chat-Workflow relationship tracking
+        # Chat-Workflow relationship tracking
         self.chat_workflow_mapping: Dict[str, Set[str]] = defaultdict(set)  # chat_id -> workflow_ids
         self.workflow_chat_mapping: Dict[str, str] = {}  # workflow_id -> chat_id
     
-    async def connect(self, websocket: WebSocket, connection_type: str, resource_id: str, user_id: str) -> str:
+    async def connect_accepted(self, websocket: WebSocket, connection_type: str, resource_id: str, user_id: str) -> str:
         """
-        Connect a WebSocket with enhanced workflow-chat tracking.
+        Register an already-accepted WebSocket connection.
         
         Args:
-            websocket: WebSocket connection
+            websocket: Already accepted WebSocket connection
             connection_type: 'user', 'chat', 'workflow'
             resource_id: ID of the resource (user_id, chat_id, workflow_id)
             user_id: User identifier
@@ -43,18 +46,24 @@ class WebSocketManager:
         Returns:
             Connection ID for tracking
         """
-        await websocket.accept()
-        connection_id = f"{connection_type}_{resource_id}_{len(self.active_connections)}"
+        # DO NOT call accept() here - it's already been accepted
+        connection_id = f"{connection_type}_{resource_id}_{id(websocket)}"
         
-        self.active_connections.add(websocket)
+        # Store connection
+        self.active_connections[connection_id] = websocket
+        self.connection_metadata[connection_id] = {
+            "type": connection_type,
+            "resource_id": resource_id,
+            "user_id": user_id
+        }
         
         if connection_type == "user":
-            self.user_connections[user_id].add(websocket)
+            self.user_connections[user_id].add(connection_id)
             logger.info(f"👤 User connected: {user_id}")
             
         elif connection_type == "chat":
             chat_id = resource_id
-            self.chat_connections[chat_id].add(websocket)
+            self.chat_connections[chat_id].add(connection_id)
             self.user_chat_mapping[user_id].add(chat_id)
             
             # Send welcome message with any active workflows
@@ -72,35 +81,72 @@ class WebSocketManager:
             
         elif connection_type == "workflow":
             workflow_id = resource_id
-            self.workflow_connections[workflow_id].add(websocket)
+            self.workflow_connections[workflow_id].add(connection_id)
             self.user_workflow_mapping[user_id].add(workflow_id)
             
             logger.info(f"🔄 User {user_id} subscribed to workflow: {workflow_id}")
         
         return connection_id
     
+    async def connect(self, websocket: WebSocket, connection_type: str, resource_id: str, user_id: str) -> str:
+        """
+        Connect a WebSocket with enhanced workflow-chat tracking (original method).
+        This version calls accept() for backwards compatibility.
+        
+        Args:
+            websocket: WebSocket connection
+            connection_type: 'user', 'chat', 'workflow'
+            resource_id: ID of the resource (user_id, chat_id, workflow_id)
+            user_id: User identifier
+            
+        Returns:
+            Connection ID for tracking
+        """
+        await websocket.accept()
+        return await self.connect_accepted(websocket, connection_type, resource_id, user_id)
+    
     async def disconnect(self, websocket: WebSocket):
         """Disconnect a WebSocket and clean up all references."""
-        if websocket not in self.active_connections:
+        # Find connection ID for this websocket
+        connection_id = None
+        for cid, ws in self.active_connections.items():
+            if ws == websocket:
+                connection_id = cid
+                break
+        
+        if not connection_id:
             return
         
-        self.active_connections.discard(websocket)
+        # Get metadata
+        metadata = self.connection_metadata.get(connection_id, {})
         
-        # Clean up all connection types
-        for user_id, connections in list(self.user_connections.items()):
-            connections.discard(websocket)
-            if not connections:
-                del self.user_connections[user_id]
+        # Remove from active connections
+        if connection_id in self.active_connections:
+            del self.active_connections[connection_id]
+        if connection_id in self.connection_metadata:
+            del self.connection_metadata[connection_id]
         
-        for chat_id, connections in list(self.chat_connections.items()):
-            connections.discard(websocket)
-            if not connections:
-                del self.chat_connections[chat_id]
+        # Clean up based on connection type
+        if metadata.get("type") == "user":
+            user_id = metadata.get("user_id")
+            if user_id:
+                self.user_connections[user_id].discard(connection_id)
+                if not self.user_connections[user_id]:
+                    del self.user_connections[user_id]
         
-        for workflow_id, connections in list(self.workflow_connections.items()):
-            connections.discard(websocket)
-            if not connections:
-                del self.workflow_connections[workflow_id]
+        elif metadata.get("type") == "chat":
+            chat_id = metadata.get("resource_id")
+            if chat_id:
+                self.chat_connections[chat_id].discard(connection_id)
+                if not self.chat_connections[chat_id]:
+                    del self.chat_connections[chat_id]
+        
+        elif metadata.get("type") == "workflow":
+            workflow_id = metadata.get("resource_id")
+            if workflow_id:
+                self.workflow_connections[workflow_id].discard(connection_id)
+                if not self.workflow_connections[workflow_id]:
+                    del self.workflow_connections[workflow_id]
     
     def link_workflow_to_chat(self, workflow_id: str, chat_id: str):
         """
@@ -130,51 +176,78 @@ class WebSocketManager:
         if user_id in self.user_connections:
             dead_connections = set()
             
-            for connection in self.user_connections[user_id]:
-                try:
-                    await connection.send_text(json.dumps(message))
-                except Exception as e:
-                    logger.warning(f"Failed to send to user {user_id}: {e}")
-                    dead_connections.add(connection)
+            for connection_id in list(self.user_connections[user_id]):
+                if connection_id in self.active_connections:
+                    try:
+                        websocket = self.active_connections[connection_id]
+                        await websocket.send_text(json.dumps(message))
+                    except Exception as e:
+                        logger.warning(f"Failed to send to user {user_id}: {str(e)}")
+                        dead_connections.add(connection_id)
+                else:
+                    dead_connections.add(connection_id)
             
             # Clean up dead connections
-            for dead_conn in dead_connections:
-                self.user_connections[user_id].discard(dead_conn)
-                self.active_connections.discard(dead_conn)
+            for dead_conn_id in dead_connections:
+                self.user_connections[user_id].discard(dead_conn_id)
+                if dead_conn_id in self.active_connections:
+                    del self.active_connections[dead_conn_id]
+                if dead_conn_id in self.connection_metadata:
+                    del self.connection_metadata[dead_conn_id]
     
     async def send_to_chat(self, chat_id: str, message: dict):
         """Send message to all users in a chat room."""
+        chat_id = str(chat_id)
         if chat_id in self.chat_connections:
             dead_connections = set()
             
-            for connection in self.chat_connections[chat_id]:
-                try:
-                    await connection.send_text(json.dumps(message))
-                except Exception as e:
-                    logger.warning(f"Failed to send to chat {chat_id}: {e}")
-                    dead_connections.add(connection)
+            for connection_id in list(self.chat_connections[chat_id]):
+                if connection_id in self.active_connections:
+                    try:
+                        websocket = self.active_connections[connection_id]
+                        await websocket.send_text(json.dumps(message))
+                    except Exception as e:
+                        logger.warning(f"Failed to send to chat {chat_id}: {str(e)}")
+                        dead_connections.add(connection_id)
+                else:
+                    dead_connections.add(connection_id)
             
             # Clean up dead connections
-            for dead_conn in dead_connections:
-                self.chat_connections[chat_id].discard(dead_conn)
-                self.active_connections.discard(dead_conn)
+            for dead_conn_id in dead_connections:
+                self.chat_connections[chat_id].discard(dead_conn_id)
+                if dead_conn_id in self.active_connections:
+                    del self.active_connections[dead_conn_id]
+                if dead_conn_id in self.connection_metadata:
+                    del self.connection_metadata[dead_conn_id]
     
     async def send_to_workflow(self, workflow_id: str, message: dict):
         """Send workflow update to all subscribers."""
+        workflow_id = str(workflow_id)
         if workflow_id in self.workflow_connections:
             dead_connections = set()
             
-            for connection in self.workflow_connections[workflow_id]:
-                try:
-                    await connection.send_text(json.dumps(message))
-                except Exception as e:
-                    logger.warning(f"Failed to send to workflow {workflow_id}: {e}")
-                    dead_connections.add(connection)
+            for connection_id in list(self.workflow_connections[workflow_id]):
+                if connection_id in self.active_connections:
+                    try:
+                        websocket = self.active_connections[connection_id]
+                        await websocket.send_text(json.dumps(message))
+                        logger.debug(f"Sent message to workflow {workflow_id} connection {connection_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to send to workflow {workflow_id}: {str(e)}")
+                        dead_connections.add(connection_id)
+                else:
+                    logger.debug(f"Connection {connection_id} not in active connections")
+                    dead_connections.add(connection_id)
             
             # Clean up dead connections
-            for dead_conn in dead_connections:
-                self.workflow_connections[workflow_id].discard(dead_conn)
-                self.active_connections.discard(dead_conn)
+            for dead_conn_id in dead_connections:
+                self.workflow_connections[workflow_id].discard(dead_conn_id)
+                if dead_conn_id in self.active_connections:
+                    del self.active_connections[dead_conn_id]
+                if dead_conn_id in self.connection_metadata:
+                    del self.connection_metadata[dead_conn_id]
+        else:
+            logger.debug(f"No connections for workflow {workflow_id}")
     
     async def broadcast_agent_message(self, workflow_id: str, agent_message: dict):
         """
@@ -351,7 +424,7 @@ class WebSocketManager:
         """
         agent_message = {
             "agent_type": agent_type,
-            "content": f"✅ {agent_type.replace('_', ' ').title()} completed: {result}",
+            "content": f"✅ {agent_type.replace('_', ' ').title()}: {result}",
             "message_type": "agent_completed",
             "stage": next_stage or "completed",
             "metadata": {
@@ -383,43 +456,12 @@ class WebSocketManager:
         await self.broadcast_agent_message(workflow_id, agent_message)
 
     async def broadcast_to_chat(self, chat_id: str, message: Dict[str, Any]):
-        """Broadcast message to all connections in a chat"""
-        # Convert chat_id to string to ensure consistency
-        chat_id = str(chat_id)
-        
-        if chat_id in self.chat_connections:
-            disconnected = []
-            for connection_id in list(self.chat_connections[chat_id]):
-                if connection_id in self.active_connections:
-                    try:
-                        await self.active_connections[connection_id].send_json(message)
-                    except Exception as e:
-                        logger.warning(f"Failed to send to connection {connection_id}: {e}")
-                        disconnected.append(connection_id)
-            
-            # Clean up disconnected
-            for conn_id in disconnected:
-                self.chat_connections[chat_id].discard(conn_id)
-                if conn_id in self.active_connections:
-                    del self.active_connections[conn_id]
-        else:
-            logger.debug(f"No active connections for chat {chat_id}")
+        """Broadcast message to all connections in a chat - alias for send_to_chat"""
+        await self.send_to_chat(chat_id, message)
 
     async def broadcast_to_workflow(self, workflow_id: str, message: Dict[str, Any]):
-        """Broadcast message to workflow subscribers"""
-        workflow_id = str(workflow_id)
-        
-        if workflow_id in self.workflow_connections:
-            for connection_id in list(self.workflow_connections[workflow_id]):
-                if connection_id in self.active_connections:
-                    try:
-                        await self.active_connections[connection_id].send_json(message)
-                    except Exception as e:
-                        logger.warning(f"Failed to send to connection {connection_id}: {e}")
-
-    async def send_to_chat(self, chat_id: str, message: Dict[str, Any]):
-        """Alias for broadcast_to_chat for compatibility"""
-        await self.broadcast_to_chat(chat_id, message)
+        """Broadcast message to workflow subscribers - alias for send_to_workflow"""
+        await self.send_to_workflow(workflow_id, message)
 
 # Create singleton instance
 websocket_manager = WebSocketManager()

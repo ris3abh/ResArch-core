@@ -49,32 +49,35 @@ class CAMELWorkflowService:
     ) -> Dict[str, Any]:
         """Start workflow with WebSocket connection wait"""
         
-        # FIX 1: Use the actual workflow execution ID
-        workflow_id = str(workflow_execution.id)
+        # FIXED: Use the public workflow_id for WebSocket operations
+        workflow_id = str(workflow_execution.workflow_id)
+        # Keep execution_id for database operations
+        execution_id = str(workflow_execution.id)
         
         try:
-            # Update workflow status
-            await self._update_workflow_status(db, workflow_id, "starting", "initialization")
+            # Update workflow status using execution ID
+            await self._update_workflow_status(db, execution_id, "starting", "initialization")
             
-            # Store active workflow info
+            # Store active workflow info using public workflow_id for WebSocket lookup
             self.active_workflows[workflow_id] = {
                 "execution": workflow_execution,
+                "execution_id": execution_id,
                 "started_at": datetime.now(timezone.utc),
                 "documents": project_documents
             }
             
-            # FIX 2: Wait for WebSocket connection before starting CAMEL
+            # Wait for WebSocket connection using public workflow_id
             connected = await self._wait_for_websocket_connection(workflow_id)
             if not connected:
                 logger.warning(f"No WebSocket connected for workflow {workflow_id}, continuing anyway")
             
             # Update status to running
-            await self._update_workflow_status(db, workflow_id, "running", "content_creation")
+            await self._update_workflow_status(db, execution_id, "running", "content_creation")
             
-            # FIX 3: Run the actual CAMEL workflow asynchronously
-            # This will be executed in background task
+            # Run the actual CAMEL workflow asynchronously
             result = await self._run_camel_workflow_async(
                 workflow_id=workflow_id,
+                execution_id=execution_id,
                 workflow_execution=workflow_execution,
                 project_documents=project_documents,
                 db=db
@@ -84,7 +87,7 @@ class CAMELWorkflowService:
             
         except Exception as e:
             logger.error(f"Failed to start workflow {workflow_id}: {e}")
-            await self._update_workflow_status(db, workflow_id, "failed", error_details=str(e))
+            await self._update_workflow_status(db, execution_id, "failed", error_details=str(e))
             raise
     
     async def _wait_for_websocket_connection(self, workflow_id: str) -> bool:
@@ -108,6 +111,7 @@ class CAMELWorkflowService:
     async def _run_camel_workflow_async(
         self,
         workflow_id: str,
+        execution_id: str,
         workflow_execution: WorkflowExecution,
         project_documents: list,
         db: AsyncSession
@@ -118,7 +122,7 @@ class CAMELWorkflowService:
             # Import the actual CAMEL workflow
             from spinscribe.enhanced_process import run_enhanced_content_task
             
-            # NEW: Import WebSocket interceptor
+            # Import WebSocket interceptor
             try:
                 from spinscribe.agents.websocket_interceptor import WebSocketMessageInterceptor
                 interceptor_available = True
@@ -133,7 +137,7 @@ class CAMELWorkflowService:
                     if hasattr(doc, 'extracted_text') and doc.extracted_text:
                         documents_text += f"\n{doc.extracted_text}\n"
             
-            # NEW: Create WebSocket interceptor if available
+            # Create WebSocket interceptor if available
             websocket_interceptor = None
             chat_id = None
             
@@ -142,10 +146,10 @@ class CAMELWorkflowService:
                 if hasattr(workflow_execution, 'chat_id'):
                     chat_id = str(workflow_execution.chat_id)
                 
-                # Create the interceptor
+                # Create the interceptor using public workflow_id
                 websocket_interceptor = WebSocketMessageInterceptor(
                     websocket_bridge=self.camel_bridge,
-                    workflow_id=workflow_id,
+                    workflow_id=workflow_id,  # Use public workflow_id
                     chat_id=chat_id,
                     enable_detailed_logging=True
                 )
@@ -157,23 +161,24 @@ class CAMELWorkflowService:
                 
                 logger.info(f"Created WebSocket interceptor for workflow {workflow_id}")
             
-            # MODIFIED: Run with both bridge capture AND interceptor
+            # Run with both bridge capture AND interceptor
             if self.camel_bridge:
                 logger.info(f"Running CAMEL workflow with WebSocket bridge and interceptor for {workflow_id}")
                 
-                # Use the bridge to capture I/O (for console output)
+                # Use the bridge to capture I/O using public workflow_id
                 with self.camel_bridge.capture_camel_session(workflow_id):
                     # Notify WebSocket clients that workflow started
                     if self.websocket_manager:
                         await self.websocket_manager.broadcast_to_workflow(workflow_id, {
                             "type": "workflow_started",
                             "workflow_id": workflow_id,
+                            "execution_id": execution_id,
                             "title": workflow_execution.title,
                             "content_type": workflow_execution.content_type,
                             "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                     
-                    # NEW: Run with WebSocket interceptor
+                    # Run with WebSocket interceptor
                     result = await run_enhanced_content_task(
                         title=workflow_execution.title,
                         content_type=workflow_execution.content_type,
@@ -181,8 +186,8 @@ class CAMELWorkflowService:
                         client_documents_path=documents_text if documents_text else None,
                         first_draft=workflow_execution.first_draft if hasattr(workflow_execution, 'first_draft') else None,
                         enable_checkpoints=workflow_execution.enable_checkpoints,
-                        websocket_interceptor=websocket_interceptor,  # NEW: Pass interceptor
-                        chat_id=chat_id  # NEW: Pass chat_id
+                        websocket_interceptor=websocket_interceptor,
+                        chat_id=chat_id
                     )
             else:
                 # Run without bridge (fallback)
@@ -196,37 +201,38 @@ class CAMELWorkflowService:
                     client_documents_path=documents_text if documents_text else None,
                     first_draft=workflow_execution.first_draft if hasattr(workflow_execution, 'first_draft') else None,
                     enable_checkpoints=workflow_execution.enable_checkpoints,
-                    websocket_interceptor=websocket_interceptor,  # NEW: Pass interceptor even without bridge
-                    chat_id=chat_id  # NEW: Pass chat_id
+                    websocket_interceptor=websocket_interceptor,
+                    chat_id=chat_id
                 )
             
-            # NEW: Clean up interceptor if it was created
+            # Clean up interceptor if it was created
             if websocket_interceptor:
                 try:
                     await websocket_interceptor.cleanup()
                 except Exception as e:
                     logger.warning(f"Error cleaning up interceptor: {e}")
             
-            # Update workflow with results
+            # Update workflow with results using execution_id for database
             if result.get('status') == 'completed':
                 await self._update_workflow_completion(
                     db, 
-                    workflow_id, 
+                    execution_id, 
                     result.get('final_content', '')
                 )
                 
-                # Notify WebSocket clients
+                # Notify WebSocket clients using public workflow_id
                 if self.websocket_manager:
                     await self.websocket_manager.broadcast_to_workflow(workflow_id, {
                         "type": "workflow_completed",
                         "workflow_id": workflow_id,
+                        "execution_id": execution_id,
                         "final_content": result.get('final_content', ''),
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     })
             else:
                 await self._update_workflow_status(
                     db, 
-                    workflow_id, 
+                    execution_id, 
                     "failed", 
                     error_details=result.get('error', 'Unknown error')
                 )
@@ -241,20 +247,21 @@ class CAMELWorkflowService:
                 logger.error(f"Full error: {traceback.format_exc()}")
             except:
                 pass
-            await self._update_workflow_status(db, workflow_id, "failed", error_details=str(e))
+            await self._update_workflow_status(db, execution_id, "failed", error_details=str(e))
             raise
         finally:
-            # Clean up active workflow
+            # Clean up active workflow using public workflow_id
             self.active_workflows.pop(workflow_id, None)
     
     async def get_workflow_status(self, workflow_id: str) -> Dict[str, Any]:
-        """Get current workflow status"""
+        """Get current workflow status - expects public workflow_id"""
         if workflow_id in self.active_workflows:
             workflow_data = self.active_workflows[workflow_id]
             execution = workflow_data["execution"]
             
             return {
                 "workflow_id": workflow_id,
+                "execution_id": workflow_data.get("execution_id"),
                 "status": execution.status,
                 "current_stage": execution.current_stage,
                 "progress": execution.progress_percentage,
@@ -269,16 +276,19 @@ class CAMELWorkflowService:
         }
     
     async def stop_workflow(self, workflow_id: str, db: AsyncSession) -> bool:
-        """Stop an active workflow"""
+        """Stop an active workflow - expects public workflow_id"""
         if workflow_id in self.active_workflows:
             try:
-                # Update status to cancelled
-                await self._update_workflow_status(db, workflow_id, "cancelled", "stopped_by_user")
+                workflow_data = self.active_workflows[workflow_id]
+                execution_id = workflow_data.get("execution_id")
+                
+                # Update status to cancelled using execution_id
+                await self._update_workflow_status(db, execution_id, "cancelled", "stopped_by_user")
                 
                 # Remove from active workflows
                 self.active_workflows.pop(workflow_id, None)
                 
-                # Notify WebSocket clients
+                # Notify WebSocket clients using public workflow_id
                 if self.websocket_manager:
                     await self.websocket_manager.broadcast_to_workflow(workflow_id, {
                         "type": "workflow_stopped",
@@ -296,15 +306,15 @@ class CAMELWorkflowService:
     async def _update_workflow_status(
         self, 
         db: AsyncSession, 
-        workflow_id: str, 
+        execution_id: str,  # This is the database execution ID
         status: str, 
         stage: str = None,
         error_details: str = None
     ):
-        """Update workflow status in database"""
+        """Update workflow status in database using execution ID"""
         try:
             stmt = update(WorkflowExecution).where(
-                WorkflowExecution.id == workflow_id
+                WorkflowExecution.id == execution_id
             ).values(
                 status=status,
                 current_stage=stage if stage else WorkflowExecution.current_stage,
@@ -322,11 +332,11 @@ class CAMELWorkflowService:
             except:
                 pass
 
-    async def _update_workflow_completion(self, db: AsyncSession, workflow_id: str, final_content: str):
-        """Update workflow completion in database"""
+    async def _update_workflow_completion(self, db: AsyncSession, execution_id: str, final_content: str):
+        """Update workflow completion in database using execution ID"""
         try:
             stmt = update(WorkflowExecution).where(
-                WorkflowExecution.id == workflow_id
+                WorkflowExecution.id == execution_id
             ).values(
                 status="completed",
                 current_stage="completed",

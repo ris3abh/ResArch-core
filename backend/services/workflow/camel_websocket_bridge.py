@@ -1,7 +1,7 @@
 # backend/services/workflow/camel_websocket_bridge.py
 """
 CAMEL WebSocket Bridge - Connects CAMEL's console I/O to WebSocket for frontend communication
-Fixed version with proper builtins handling
+Fixed version with proper builtins handling and required broadcast methods
 """
 
 import sys
@@ -30,7 +30,78 @@ class CAMELWebSocketBridge:
         self.active_sessions: Dict[str, 'CaptureSession'] = {}
         self.input_responses: Dict[str, str] = {}
         self.pending_inputs: Dict[str, threading.Event] = {}
+        self.workflow_chat_mapping: Dict[str, str] = {}  # Maps workflow_id to chat_id
         
+    def link_workflow_to_chat(self, workflow_id: str, chat_id: str):
+        """Link a workflow to a chat for message routing"""
+        self.workflow_chat_mapping[workflow_id] = chat_id
+        logger.info(f"Linked workflow {workflow_id} to chat {chat_id}")
+        
+    async def broadcast_agent_message(self, workflow_id: str, agent_message: dict):
+        """
+        Broadcast agent message to workflow and optionally to chat.
+        REQUIRED by WebSocketMessageInterceptor.
+        """
+        if not self.websocket_manager:
+            return
+            
+        # Send to workflow WebSocket connections
+        await self.websocket_manager.broadcast_to_workflow(workflow_id, {
+            "type": "agent_message",
+            "data": agent_message,
+            "timestamp": agent_message.get("timestamp", datetime.now(timezone.utc).isoformat())
+        })
+        
+        # Also send to chat if linked
+        if workflow_id in self.workflow_chat_mapping:
+            chat_id = self.workflow_chat_mapping[workflow_id]
+            await self.websocket_manager.send_to_chat(chat_id, {
+                "type": "agent_message",
+                "data": {
+                    "sender_type": "agent",
+                    "agent_type": agent_message.get("agent_type"),
+                    "message_content": agent_message.get("content"),
+                    "stage": agent_message.get("stage"),
+                    "workflow_id": workflow_id,
+                    "metadata": agent_message.get("metadata", {})
+                },
+                "timestamp": agent_message.get("timestamp")
+            })
+    
+    async def broadcast_to_workflow(self, workflow_id: str, message: dict):
+        """
+        Generic broadcast to workflow WebSocket connections.
+        REQUIRED by WebSocketMessageInterceptor for various message types.
+        """
+        if self.websocket_manager:
+            await self.websocket_manager.broadcast_to_workflow(workflow_id, message)
+            
+    async def broadcast_to_chat(self, chat_id: str, message: dict):
+        """
+        Broadcast to chat WebSocket connections.
+        Used for sending messages directly to chat interface.
+        """
+        if self.websocket_manager:
+            await self.websocket_manager.send_to_chat(chat_id, message)
+    
+    async def broadcast_checkpoint_notification(self, workflow_id: str, checkpoint_data: dict):
+        """
+        Broadcast checkpoint notification to workflow and chat.
+        Used when human approval is required.
+        """
+        message = {
+            "type": "checkpoint_required",
+            "data": checkpoint_data,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await self.broadcast_to_workflow(workflow_id, message)
+        
+        # Also send to chat if linked
+        if workflow_id in self.workflow_chat_mapping:
+            chat_id = self.workflow_chat_mapping[workflow_id]
+            await self.broadcast_to_chat(chat_id, message)
+            
     @contextmanager
     def capture_camel_session(self, session_id: str):
         """Context manager to capture CAMEL agent I/O for a session"""
@@ -255,6 +326,21 @@ class CaptureSession:
         elif "Content Strategist" in text:
             agent_info["is_agent_message"] = True
             agent_info["agent_role"] = "Content Strategist"
+        elif "Style Analysis" in text or "Style Analyst" in text:
+            agent_info["is_agent_message"] = True
+            agent_info["agent_role"] = "Style Analysis Agent"
+        elif "Content Planning" in text or "Content Planner" in text:
+            agent_info["is_agent_message"] = True
+            agent_info["agent_role"] = "Content Planning Agent"
+        elif "Content Generation" in text:
+            agent_info["is_agent_message"] = True
+            agent_info["agent_role"] = "Content Generation Agent"
+        elif "Quality Assurance" in text or "QA Agent" in text:
+            agent_info["is_agent_message"] = True
+            agent_info["agent_role"] = "Quality Assurance Agent"
+        elif "Coordinator" in text:
+            agent_info["is_agent_message"] = True
+            agent_info["agent_role"] = "Coordinator Agent"
         
         # Detect message types
         if "Solution:" in text:

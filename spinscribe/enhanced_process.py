@@ -105,6 +105,7 @@ async def run_enhanced_content_task(
             workflow = build_enhanced_content_workflow(project_id=project_id)
         
         # Setup checkpoint integration
+        # Setup checkpoint integration
         checkpoint_integration = None
         if checkpoints_enabled:
             checkpoint_integration = WorkflowCheckpointIntegration(
@@ -112,7 +113,7 @@ async def run_enhanced_content_task(
                 project_id=project_id
             )
             
-            # MODIFIED: Enhanced notification handler with WebSocket
+            # FIXED: Enhanced notification handler with proper WebSocket integration
             def checkpoint_notification_handler(data):
                 print(f"\n" + "="*80)
                 print(f"🛑 HUMAN CHECKPOINT REQUIRED")
@@ -141,18 +142,72 @@ async def run_enhanced_content_task(
                 print(f"="*80)
                 print(f"⏳ Workflow paused - waiting for your response...")
                 
-                # ADD: Send checkpoint to WebSocket
+                # FIXED: Send checkpoint to WebSocket with proper async handling
                 if websocket_interceptor:
-                    asyncio.create_task(
-                        websocket_interceptor._handle_checkpoint_request(
-                            content=data.get('content', ''),
-                            message_data={
-                                "agent_type": "Checkpoint Manager",
-                                "stage": "checkpoint_approval",
-                                "checkpoint_data": data
-                            }
-                        )
-                    )
+                    try:
+                        # Check if we're in an async context
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # We're in an async context, create task
+                            asyncio.create_task(
+                                websocket_interceptor._handle_checkpoint_request(
+                                    content=data.get('content', ''),
+                                    message_data={
+                                        "agent_type": "Checkpoint Manager",
+                                        "stage": "checkpoint_approval",
+                                        "checkpoint_data": data,
+                                        "checkpoint_id": checkpoint_id,
+                                        "title": data.get('title', 'Unknown'),
+                                        "description": data.get('description', 'No description'),
+                                        "priority": data.get('priority', 'medium'),
+                                        "checkpoint_type": data.get('checkpoint_type', 'unknown'),
+                                        "requires_approval": True
+                                    }
+                                )
+                            )
+                        else:
+                            # We're in a sync context, run it synchronously
+                            asyncio.run(
+                                websocket_interceptor._handle_checkpoint_request(
+                                    content=data.get('content', ''),
+                                    message_data={
+                                        "agent_type": "Checkpoint Manager",
+                                        "stage": "checkpoint_approval",
+                                        "checkpoint_data": data,
+                                        "checkpoint_id": checkpoint_id,
+                                        "title": data.get('title', 'Unknown'),
+                                        "description": data.get('description', 'No description'),
+                                        "priority": data.get('priority', 'medium'),
+                                        "checkpoint_type": data.get('checkpoint_type', 'unknown'),
+                                        "requires_approval": True
+                                    }
+                                )
+                            )
+                    except RuntimeError as e:
+                        # Handle case where no event loop is running
+                        logger.warning(f"Could not send checkpoint via WebSocket (no event loop): {e}")
+                        # Try to create a new event loop for this
+                        try:
+                            asyncio.run(
+                                websocket_interceptor._handle_checkpoint_request(
+                                    content=data.get('content', ''),
+                                    message_data={
+                                        "agent_type": "Checkpoint Manager",
+                                        "stage": "checkpoint_approval",
+                                        "checkpoint_data": data,
+                                        "checkpoint_id": checkpoint_id,
+                                        "title": data.get('title', 'Unknown'),
+                                        "description": data.get('description', 'No description'),
+                                        "priority": data.get('priority', 'medium'),
+                                        "checkpoint_type": data.get('checkpoint_type', 'unknown'),
+                                        "requires_approval": True
+                                    }
+                                )
+                            )
+                        except Exception as inner_e:
+                            logger.error(f"Failed to send checkpoint via WebSocket: {inner_e}")
+                    except Exception as e:
+                        logger.error(f"Error sending checkpoint via WebSocket: {e}")
                 
             checkpoint_manager.add_notification_handler(checkpoint_notification_handler)
             logger.info("✅ Real checkpoint integration enabled - will pause for human input")
