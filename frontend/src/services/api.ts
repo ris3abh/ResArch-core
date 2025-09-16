@@ -601,6 +601,12 @@ class ApiService {
   // WEBSOCKET METHODS
   // ========================================
 
+  // In your api.ts file, update these methods:
+
+  // ========================================
+  // WEBSOCKET METHODS
+  // ========================================
+
   createWorkflowWebSocket(workflowId: string): WebSocket {
     // Close existing connection if any
     this.closeWorkflowWebSocket(workflowId);
@@ -610,12 +616,37 @@ class ApiService {
     console.log('🔌 Creating workflow WebSocket connection:', wsUrl);
     
     const ws = new WebSocket(wsUrl);
-    this.activeWebSockets.set(workflowId, ws);
     
-    // Auto-cleanup on close
-    ws.onclose = () => {
+    // Set up event handlers
+    ws.onopen = () => {
+      console.log(`✅ WebSocket connected for workflow ${workflowId}`);
+    };
+    
+    ws.onerror = (error) => {
+      console.error(`❌ WebSocket error for workflow ${workflowId}:`, error);
+    };
+    
+    ws.onclose = (event) => {
+      console.log(`🔌 WebSocket closed for workflow ${workflowId}. Code: ${event.code}, Reason: ${event.reason}`);
       this.activeWebSockets.delete(workflowId);
     };
+    
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log(`📨 Message received for workflow ${workflowId}:`, data.type);
+        
+        // Handle heartbeat
+        if (data.type === 'heartbeat') {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+      } catch (error) {
+        console.error('Failed to parse WebSocket message:', error);
+      }
+    };
+    
+    // Store the connection
+    this.activeWebSockets.set(workflowId, ws);
     
     return ws;
   }
@@ -624,7 +655,46 @@ class ApiService {
     const token = localStorage.getItem('spinscribe_token');
     const wsUrl = `ws://localhost:8000/api/v1/ws/chats/${chatId}${token ? `?token=${token}` : ''}`;
     console.log('🔌 Creating chat WebSocket connection:', wsUrl);
-    return new WebSocket(wsUrl);
+    
+    const ws = new WebSocket(wsUrl);
+    
+    // Set up event handlers
+    ws.onopen = () => {
+      console.log(`✅ WebSocket connected for chat ${chatId}`);
+    };
+    
+    ws.onerror = (error) => {
+      console.error(`❌ WebSocket error for chat ${chatId}:`, error);
+    };
+    
+    ws.onclose = (event) => {
+      console.log(`🔌 WebSocket closed for chat ${chatId}. Code: ${event.code}, Reason: ${event.reason}`);
+    };
+    
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log(`📨 Message received for chat ${chatId}:`, data.type);
+        
+        // Handle heartbeat
+        if (data.type === 'heartbeat') {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+      } catch (error) {
+        console.error('Failed to parse WebSocket message:', error);
+      }
+    };
+    
+    return ws;
+  }
+
+  // Add a method to setup keep-alive for WebSockets
+  setupWebSocketKeepAlive(ws: WebSocket, interval: number = 25000): NodeJS.Timer {
+    return setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, interval);
   }
 
   closeWorkflowWebSocket(workflowId: string): void {
