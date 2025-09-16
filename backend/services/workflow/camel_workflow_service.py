@@ -1,6 +1,6 @@
 # backend/services/workflow/camel_workflow_service.py
 """
-FIXED CAMEL workflow service with proper workflow ID handling and async execution
+FIXED CAMEL workflow service with WebSocket interceptor integration
 """
 import asyncio
 import logging
@@ -24,7 +24,7 @@ spinscribe_path = backend_path.parent
 sys.path.insert(0, str(spinscribe_path))
 
 class CAMELWorkflowService:
-    """Workflow service with WebSocket bridge integration"""
+    """Workflow service with WebSocket bridge and interceptor integration"""
     
     def __init__(self):
         self.websocket_manager: Optional[Any] = None
@@ -112,11 +112,19 @@ class CAMELWorkflowService:
         project_documents: list,
         db: AsyncSession
     ) -> Dict[str, Any]:
-        """Run the actual CAMEL workflow with WebSocket bridge"""
+        """Run the actual CAMEL workflow with WebSocket interceptor"""
         
         try:
             # Import the actual CAMEL workflow
             from spinscribe.enhanced_process import run_enhanced_content_task
+            
+            # NEW: Import WebSocket interceptor
+            try:
+                from spinscribe.agents.websocket_interceptor import WebSocketMessageInterceptor
+                interceptor_available = True
+            except ImportError:
+                logger.warning("WebSocket interceptor not available, proceeding without real-time updates")
+                interceptor_available = False
             
             # Prepare documents text if available
             documents_text = ""
@@ -125,11 +133,35 @@ class CAMELWorkflowService:
                     if hasattr(doc, 'extracted_text') and doc.extracted_text:
                         documents_text += f"\n{doc.extracted_text}\n"
             
-            # Run with WebSocket bridge capture if available
-            if self.camel_bridge:
-                logger.info(f"Running CAMEL workflow with WebSocket bridge for {workflow_id}")
+            # NEW: Create WebSocket interceptor if available
+            websocket_interceptor = None
+            chat_id = None
+            
+            if interceptor_available and self.camel_bridge and self.websocket_manager:
+                # Extract chat_id if available
+                if hasattr(workflow_execution, 'chat_id'):
+                    chat_id = str(workflow_execution.chat_id)
                 
-                # Use the bridge to capture I/O
+                # Create the interceptor
+                websocket_interceptor = WebSocketMessageInterceptor(
+                    websocket_bridge=self.camel_bridge,
+                    workflow_id=workflow_id,
+                    chat_id=chat_id,
+                    enable_detailed_logging=True
+                )
+                
+                # Link workflow to chat if both exist
+                if chat_id and hasattr(self.camel_bridge, 'link_workflow_to_chat'):
+                    self.camel_bridge.link_workflow_to_chat(workflow_id, chat_id)
+                    logger.info(f"Linked workflow {workflow_id} to chat {chat_id}")
+                
+                logger.info(f"Created WebSocket interceptor for workflow {workflow_id}")
+            
+            # MODIFIED: Run with both bridge capture AND interceptor
+            if self.camel_bridge:
+                logger.info(f"Running CAMEL workflow with WebSocket bridge and interceptor for {workflow_id}")
+                
+                # Use the bridge to capture I/O (for console output)
                 with self.camel_bridge.capture_camel_session(workflow_id):
                     # Notify WebSocket clients that workflow started
                     if self.websocket_manager:
@@ -141,42 +173,39 @@ class CAMELWorkflowService:
                             "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                     
-                    # Run the CAMEL workflow
-                    # result = await run_enhanced_workflow(
-                    #     project_id=str(workflow_execution.project_id),
-                    #     content_title=workflow_execution.title,
-                    #     content_type=workflow_execution.content_type,
-                    #     client_context=documents_text if documents_text else None,
-                    #     enable_human_layer=True,
-                    #     enable_checkpoints=workflow_execution.enable_checkpoints
-                    # )
+                    # NEW: Run with WebSocket interceptor
                     result = await run_enhanced_content_task(
                         title=workflow_execution.title,
                         content_type=workflow_execution.content_type,
                         project_id=str(workflow_execution.project_id),
-                        client_documents_path=documents_text if documents_text else None,  # documents are passed as text, not path
+                        client_documents_path=documents_text if documents_text else None,
                         first_draft=workflow_execution.first_draft if hasattr(workflow_execution, 'first_draft') else None,
-                        enable_checkpoints=workflow_execution.enable_checkpoints
+                        enable_checkpoints=workflow_execution.enable_checkpoints,
+                        websocket_interceptor=websocket_interceptor,  # NEW: Pass interceptor
+                        chat_id=chat_id  # NEW: Pass chat_id
                     )
             else:
                 # Run without bridge (fallback)
                 logger.warning(f"Running CAMEL workflow without WebSocket bridge for {workflow_id}")
-                # result = await run_enhanced_workflow(
-                #     project_id=str(workflow_execution.project_id),
-                #     content_title=workflow_execution.title,
-                #     content_type=workflow_execution.content_type,
-                #     client_context=documents_text if documents_text else None,
-                #     enable_human_layer=True,
-                #     enable_checkpoints=workflow_execution.enable_checkpoints
-                # )
+                
+                # Still try to use interceptor if available
                 result = await run_enhanced_content_task(
                     title=workflow_execution.title,
                     content_type=workflow_execution.content_type,
                     project_id=str(workflow_execution.project_id),
-                    client_documents_path=documents_text if documents_text else None,  # or provide path if you have documents
+                    client_documents_path=documents_text if documents_text else None,
                     first_draft=workflow_execution.first_draft if hasattr(workflow_execution, 'first_draft') else None,
-                    enable_checkpoints=workflow_execution.enable_checkpoints
+                    enable_checkpoints=workflow_execution.enable_checkpoints,
+                    websocket_interceptor=websocket_interceptor,  # NEW: Pass interceptor even without bridge
+                    chat_id=chat_id  # NEW: Pass chat_id
                 )
+            
+            # NEW: Clean up interceptor if it was created
+            if websocket_interceptor:
+                try:
+                    await websocket_interceptor.cleanup()
+                except Exception as e:
+                    logger.warning(f"Error cleaning up interceptor: {e}")
             
             # Update workflow with results
             if result.get('status') == 'completed':
@@ -206,6 +235,12 @@ class CAMELWorkflowService:
             
         except Exception as e:
             logger.error(f"CAMEL workflow failed for {workflow_id}: {e}")
+            # Import traceback for better error logging
+            try:
+                import traceback
+                logger.error(f"Full error: {traceback.format_exc()}")
+            except:
+                pass
             await self._update_workflow_status(db, workflow_id, "failed", error_details=str(e))
             raise
         finally:

@@ -1,7 +1,6 @@
-# ─── FILE: spinscribe/tasks/enhanced_process.py (REAL CHECKPOINTS) ─────
 """
-Enhanced content creation with REAL human checkpoint integration.
-This version actually pauses and waits for human input at checkpoints.
+Enhanced content creation with REAL human checkpoint integration and WebSocket support.
+This version adds minimal WebSocket integration to your existing code.
 """
 
 import asyncio
@@ -29,10 +28,13 @@ async def run_enhanced_content_task(
     project_id: str = "default",
     client_documents_path: str = None,
     first_draft: str = None,
-    enable_checkpoints: bool = None
+    enable_checkpoints: bool = None,
+    websocket_interceptor = None,  # Add this
+    chat_id: str = None  # Add this
 ) -> Dict[str, Any]:
     """
     Enhanced content creation with REAL checkpoint integration that pauses for human input.
+    Now with optional WebSocket support for real-time updates.
     """
     
     setup_enhanced_logging(log_level="INFO", enable_file_logging=True)
@@ -44,6 +46,15 @@ async def run_enhanced_content_task(
     logger.info(f"🚀 Starting enhanced content workflow: {workflow_id}")
     logger.info(f"   Title: {title}")
     logger.info(f"   Checkpoints: {'✅ ENABLED' if checkpoints_enabled else '❌ DISABLED'}")
+    logger.info(f"   WebSocket: {'✅ CONNECTED' if websocket_interceptor else '❌ NOT CONNECTED'}")  # ADD THIS
+    
+    # ADD: Broadcast workflow start if interceptor available
+    if websocket_interceptor:
+        await websocket_interceptor.intercept_message(
+            message={"content": f"Starting workflow for: {title}"},
+            agent_type="System",
+            stage="initialization"
+        )
     
     try:
         workflow_tracker.start_workflow(workflow_id, {
@@ -55,11 +66,43 @@ async def run_enhanced_content_task(
         
         # Document Processing
         workflow_tracker.update_stage(workflow_id, "document_processing")
+        
+        # ADD: WebSocket update for document processing
+        if websocket_interceptor:
+            await websocket_interceptor.intercept_message(
+                message={"content": "Processing client documents..."},
+                agent_type="System",
+                stage="document_processing"
+            )
+        
         onboarding_summary = process_client_documents(client_documents_path, project_id)
         
-        # Build Workflow
+        # Build Workflow - MODIFIED TO PASS INTERCEPTOR
         workflow_tracker.update_stage(workflow_id, "workflow_building")
-        workflow = build_enhanced_content_workflow(project_id=project_id)
+        
+        # ADD: WebSocket update for workforce building
+        if websocket_interceptor:
+            await websocket_interceptor.intercept_message(
+                message={"content": "Building multi-agent workforce..."},
+                agent_type="System",
+                stage="workflow_building"
+            )
+        
+        # MODIFIED: Pass websocket_interceptor to workforce builder if it accepts it
+        try:
+            import inspect
+            builder_sig = inspect.signature(build_enhanced_content_workflow)
+            if 'websocket_interceptor' in builder_sig.parameters:
+                workflow = build_enhanced_content_workflow(
+                    project_id=project_id,
+                    websocket_interceptor=websocket_interceptor
+                )
+                logger.info("✅ Passing WebSocket interceptor to workforce builder")
+            else:
+                workflow = build_enhanced_content_workflow(project_id=project_id)
+                logger.info("⚠️ Workforce builder doesn't accept websocket_interceptor yet")
+        except Exception:
+            workflow = build_enhanced_content_workflow(project_id=project_id)
         
         # Setup checkpoint integration
         checkpoint_integration = None
@@ -69,7 +112,7 @@ async def run_enhanced_content_task(
                 project_id=project_id
             )
             
-            # Add notification handler
+            # MODIFIED: Enhanced notification handler with WebSocket
             def checkpoint_notification_handler(data):
                 print(f"\n" + "="*80)
                 print(f"🛑 HUMAN CHECKPOINT REQUIRED")
@@ -98,11 +141,33 @@ async def run_enhanced_content_task(
                 print(f"="*80)
                 print(f"⏳ Workflow paused - waiting for your response...")
                 
+                # ADD: Send checkpoint to WebSocket
+                if websocket_interceptor:
+                    asyncio.create_task(
+                        websocket_interceptor._handle_checkpoint_request(
+                            content=data.get('content', ''),
+                            message_data={
+                                "agent_type": "Checkpoint Manager",
+                                "stage": "checkpoint_approval",
+                                "checkpoint_data": data
+                            }
+                        )
+                    )
+                
             checkpoint_manager.add_notification_handler(checkpoint_notification_handler)
             logger.info("✅ Real checkpoint integration enabled - will pause for human input")
         
         # Create Task
         workflow_tracker.update_stage(workflow_id, "task_creation")
+        
+        # ADD: WebSocket update for task creation
+        if websocket_interceptor:
+            await websocket_interceptor.intercept_message(
+                message={"content": f"Creating task: {title}"},
+                agent_type="System",
+                stage="task_creation"
+            )
+        
         task = create_enhanced_task(workflow_id, title, content_type, project_id, first_draft, checkpoints_enabled, onboarding_summary)
         
         # Process with REAL checkpoints
@@ -110,13 +175,41 @@ async def run_enhanced_content_task(
         
         if checkpoints_enabled and checkpoint_integration:
             logger.info("🛑 Processing with REAL human checkpoints - will pause and wait for approval")
-            result_task = await process_with_real_checkpoints(workflow, task, checkpoint_integration, title)
+            
+            # ADD: WebSocket update
+            if websocket_interceptor:
+                await websocket_interceptor.intercept_message(
+                    message={"content": "Starting checkpoint-enabled workflow..."},
+                    agent_type="System",
+                    stage="agent_processing"
+                )
+            
+            result_task = await process_with_real_checkpoints(
+                workflow, task, checkpoint_integration, title, websocket_interceptor  # PASS INTERCEPTOR
+            )
         else:
             logger.info("⚡ Processing without checkpoints")
+            
+            # ADD: WebSocket update
+            if websocket_interceptor:
+                await websocket_interceptor.intercept_message(
+                    message={"content": "Running agent workflow..."},
+                    agent_type="System",
+                    stage="agent_processing"
+                )
+            
             result_task = await workflow.process_task_async(task)
         
         # Collect Results
         workflow_tracker.update_stage(workflow_id, "result_collection")
+        
+        # ADD: WebSocket update for results
+        if websocket_interceptor:
+            await websocket_interceptor.intercept_message(
+                message={"content": "Collecting final results..."},
+                agent_type="System",
+                stage="result_collection"
+            )
         
         final_result = {
             "workflow_id": workflow_id,
@@ -134,11 +227,23 @@ async def run_enhanced_content_task(
         workflow_tracker.complete_workflow(workflow_id, "completed", final_result)
         logger.info("🎉 Enhanced content workflow completed!")
         
+        # ADD: Send completion notification
+        if websocket_interceptor:
+            await websocket_interceptor.intercept_completion(
+                final_content=final_result["final_content"],
+                agent_type="System",
+                metadata=final_result
+            )
+        
         return final_result
         
     except Exception as e:
         logger.error(f"💥 Error in enhanced workflow: {str(e)}")
         workflow_tracker.complete_workflow(workflow_id, "failed")
+        
+        # ADD: Send error notification
+        if websocket_interceptor:
+            await websocket_interceptor._broadcast_error(str(e), "System")
         
         return {
             "workflow_id": workflow_id,
@@ -150,9 +255,13 @@ async def run_enhanced_content_task(
             "project_id": project_id
         }
 
-async def process_with_real_checkpoints(workflow, task, checkpoint_integration, title):
+async def process_with_real_checkpoints(
+    workflow, task, checkpoint_integration, title, 
+    websocket_interceptor=None  # ADD PARAMETER
+):
     """
     Process task with REAL checkpoints that actually pause and wait for human approval.
+    Now with WebSocket support.
     """
     
     logger.info("🛑 REAL CHECKPOINT PROCESSING - Will pause for human input")
@@ -160,6 +269,14 @@ async def process_with_real_checkpoints(workflow, task, checkpoint_integration, 
     # CHECKPOINT 1: Strategy Approval
     logger.info("📋 Creating Strategy Approval checkpoint...")
     print(f"\n🔴 CHECKPOINT 1: STRATEGY APPROVAL")
+    
+    # ADD: WebSocket notification
+    if websocket_interceptor:
+        await websocket_interceptor.intercept_message(
+            message={"content": "Requesting strategy approval..."},
+            agent_type="Checkpoint Manager",
+            stage="checkpoint_request"
+        )
     
     strategy_approval = await checkpoint_integration.request_approval(
         checkpoint_type=CheckpointType.STRATEGY_APPROVAL,
@@ -183,10 +300,25 @@ async def process_with_real_checkpoints(workflow, task, checkpoint_integration, 
     )
     
     if not strategy_approval.get('approved', False):
+        # ADD: WebSocket notification
+        if websocket_interceptor:
+            await websocket_interceptor.intercept_message(
+                message={"content": f"Strategy rejected: {strategy_approval.get('feedback', 'No feedback')}"},
+                agent_type="Checkpoint Manager",
+                stage="checkpoint_rejected"
+            )
         raise Exception(f"Strategy checkpoint rejected: {strategy_approval.get('feedback', 'No feedback provided')}")
     
     logger.info("✅ Strategy approved! Proceeding with content creation...")
     print(f"\n✅ STRATEGY APPROVED: {strategy_approval.get('feedback', 'No feedback')}")
+    
+    # ADD: WebSocket notification
+    if websocket_interceptor:
+        await websocket_interceptor.intercept_message(
+            message={"content": "Strategy approved! Starting content creation..."},
+            agent_type="Checkpoint Manager",
+            stage="checkpoint_approved"
+        )
     
     # Process the actual content
     logger.info("🔄 Running content creation workflow...")
@@ -197,6 +329,14 @@ async def process_with_real_checkpoints(workflow, task, checkpoint_integration, 
     # CHECKPOINT 2: Final Content Approval
     logger.info("📋 Creating Final Content Approval checkpoint...")
     print(f"\n🔴 CHECKPOINT 2: FINAL CONTENT APPROVAL")
+    
+    # ADD: WebSocket notification
+    if websocket_interceptor:
+        await websocket_interceptor.intercept_message(
+            message={"content": "Requesting final content approval..."},
+            agent_type="Checkpoint Manager",
+            stage="checkpoint_request"
+        )
     
     content_result = getattr(result_task, 'result', 'No content generated')
     content_preview = content_result[:800] + "\n\n[Content continues...]" if len(content_result) > 800 else content_result
@@ -212,20 +352,37 @@ async def process_with_real_checkpoints(workflow, task, checkpoint_integration, 
             Total Content Length: {len(content_result)} characters
 
             Please review and approve this content for delivery.""",
-                    priority=Priority.HIGH,
-                    timeout_hours=2
-                )
-                
+        priority=Priority.HIGH,
+        timeout_hours=2
+    )
+    
     if not final_approval.get('approved', False):
         logger.warning(f"⚠️ Final content not approved: {final_approval.get('feedback', 'No feedback')}")
         print(f"\n⚠️ CONTENT NOT APPROVED: {final_approval.get('feedback', 'No feedback')}")
         print("In a production system, this would trigger content revision.")
+        
+        # ADD: WebSocket notification
+        if websocket_interceptor:
+            await websocket_interceptor.intercept_message(
+                message={"content": f"Content rejected: {final_approval.get('feedback', 'No feedback')}"},
+                agent_type="Checkpoint Manager",
+                stage="checkpoint_rejected"
+            )
     else:
         logger.info("✅ Final content approved!")
         print(f"\n✅ FINAL CONTENT APPROVED: {final_approval.get('feedback', 'Content approved')}")
+        
+        # ADD: WebSocket notification
+        if websocket_interceptor:
+            await websocket_interceptor.intercept_message(
+                message={"content": "Final content approved!"},
+                agent_type="Checkpoint Manager",
+                stage="checkpoint_approved"
+            )
     
     return result_task
 
+# Keep the rest of your functions unchanged
 def process_client_documents(client_documents_path, project_id):
     """Process client documents if provided."""
     if client_documents_path:

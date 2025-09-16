@@ -1,10 +1,11 @@
-# File: spinscribe/workforce/enhanced_builder.py (MEMORY FIX INTEGRATION)
+# File: spinscribe/workforce/enhanced_builder.py (MEMORY FIX + WEBSOCKET INTEGRATION)
 """
-Enhanced Workforce Builder with integrated memory token limit fixes.
-This ensures all agents are created with 100K+ token limits from the start.
+Enhanced Workforce Builder with integrated memory token limit fixes and WebSocket support.
+This ensures all agents are created with 100K+ token limits from the start and can broadcast messages.
 """
 
 import logging
+import asyncio
 from typing import Dict, Any, Optional
 from camel.agents import ChatAgent
 from camel.configs import ChatGPTConfig
@@ -22,18 +23,114 @@ logger = logging.getLogger(__name__)
 
 class EnhancedWorkforceBuilder:
     """
-    Enhanced workforce builder that creates agents with proper memory limits.
-    All agents are guaranteed to have 100K+ token limits.
+    Enhanced workforce builder that creates agents with proper memory limits and WebSocket support.
+    All agents are guaranteed to have 100K+ token limits and can broadcast messages.
     """
     
-    def __init__(self, project_id: str, token_limit: int = 100000):
+    def __init__(self, project_id: str, token_limit: int = 100000, websocket_interceptor=None):
         self.project_id = project_id
         self.token_limit = token_limit
         self.agents: Dict[str, ChatAgent] = {}
         self.memory_patcher = MemoryTokenPatcher()
+        self.websocket_interceptor = websocket_interceptor  # NEW: Store WebSocket interceptor
         
         logger.info(f"🏗️ Initializing Enhanced Workforce Builder for {project_id}")
         logger.info(f"🔧 Using token limit: {token_limit}")
+        logger.info(f"📡 WebSocket: {'ENABLED' if websocket_interceptor else 'DISABLED'}")  # NEW: Log WebSocket status
+    
+    def wrap_agent_with_websocket(self, agent: ChatAgent, agent_name: str, agent_role: str):
+        """
+        NEW METHOD: Wrap an agent's step method to broadcast messages via WebSocket.
+        
+        Citation: Based on the WebSocket interceptor pattern from websocket_interceptor.py
+        which requires intercepting agent messages for real-time frontend updates.
+        
+        Args:
+            agent: The ChatAgent to wrap
+            agent_name: Internal name for logging
+            agent_role: Human-readable role for display
+        """
+        if not self.websocket_interceptor:
+            return  # No interceptor, nothing to wrap
+        
+        original_step = agent.step
+        interceptor = self.websocket_interceptor
+        
+        # Handle both sync and async step methods
+        if asyncio.iscoroutinefunction(original_step):
+            # Async step method
+            async def wrapped_step(input_message):
+                # Broadcast incoming message
+                try:
+                    await interceptor.intercept_message(
+                        message={"content": f"Processing request..."},
+                        agent_type=agent_role,
+                        stage="processing"
+                    )
+                except Exception as e:
+                    logger.debug(f"WebSocket broadcast error: {e}")
+                
+                # Call original step
+                result = await original_step(input_message)
+                
+                # Broadcast outgoing response
+                try:
+                    if result and hasattr(result, 'msg') and result.msg:
+                        content = result.msg.content if hasattr(result.msg, 'content') else str(result.msg)
+                        await interceptor.intercept_message(
+                            message={"content": content},
+                            agent_type=agent_role,
+                            stage="responding"
+                        )
+                except Exception as e:
+                    logger.debug(f"WebSocket broadcast error: {e}")
+                
+                return result
+            
+            agent.step = wrapped_step
+        else:
+            # Sync step method
+            def wrapped_step(input_message):
+                # Try to broadcast in sync context
+                if interceptor:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(
+                                interceptor.intercept_message(
+                                    message={"content": f"Processing request..."},
+                                    agent_type=agent_role,
+                                    stage="processing"
+                                )
+                            )
+                    except Exception as e:
+                        logger.debug(f"WebSocket broadcast error: {e}")
+                
+                # Call original step
+                result = original_step(input_message)
+                
+                # Try to broadcast response
+                if interceptor and result:
+                    try:
+                        if hasattr(result, 'msg') and result.msg:
+                            content = result.msg.content if hasattr(result.msg, 'content') else str(result.msg)
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                asyncio.create_task(
+                                    interceptor.intercept_message(
+                                        message={"content": content},
+                                        agent_type=agent_role,
+                                        stage="responding"
+                                    )
+                                )
+                    except Exception as e:
+                        logger.debug(f"WebSocket broadcast error: {e}")
+                
+                return result
+            
+            agent.step = wrapped_step
+        
+        logger.info(f"   ✅ Wrapped {agent_role} with WebSocket interceptor")
     
     def create_agent_with_memory_fix(
         self,
@@ -41,10 +138,14 @@ class EnhancedWorkforceBuilder:
         system_message: str,
         model_type: ModelType = ModelType.GPT_4O_MINI,
         tools: list = None,
-        token_limit: int = None
+        token_limit: int = None,
+        agent_role: str = None  # NEW: Add role for WebSocket display
     ) -> ChatAgent:
         """
-        Create an agent with properly configured memory and token limits.
+        Create an agent with properly configured memory and token limits, plus WebSocket support.
+        
+        MODIFIED: Added agent_role parameter for WebSocket message broadcasting
+        Citation: Extended to support WebSocket based on requirements from enhanced_process.py
         
         Args:
             agent_name: Name/ID for the agent
@@ -52,9 +153,10 @@ class EnhancedWorkforceBuilder:
             model_type: Model type to use
             tools: List of tools for the agent
             token_limit: Override token limit (defaults to instance limit)
+            agent_role: Human-readable role for WebSocket messages (NEW)
             
         Returns:
-            ChatAgent with high-capacity memory
+            ChatAgent with high-capacity memory and WebSocket support
         """
         if token_limit is None:
             token_limit = self.token_limit
@@ -62,7 +164,7 @@ class EnhancedWorkforceBuilder:
         logger.info(f"🤖 Creating agent '{agent_name}' with {token_limit} token limit")
         
         try:
-            # Create agent with high-capacity memory
+            # Create agent with high-capacity memory (existing code)
             memory = setup_agent_memory(
                 agent_id=agent_name,
                 model_name="gpt-4o-mini",
@@ -95,6 +197,10 @@ class EnhancedWorkforceBuilder:
             # Double-check and patch memory if needed
             if not self.memory_patcher.patch_agent_memory(agent, token_limit):
                 logger.warning(f"⚠️ Could not patch memory for agent {agent_name}")
+            
+            # NEW: Wrap with WebSocket if interceptor available
+            if self.websocket_interceptor and agent_role:
+                self.wrap_agent_with_websocket(agent, agent_name, agent_role)
             
             # Store agent
             self.agents[agent_name] = agent
@@ -138,7 +244,7 @@ class EnhancedWorkforceBuilder:
         return tools
     
     def create_style_analysis_agent(self) -> ChatAgent:
-        """Create Enhanced Style Analysis Agent with memory fixes."""
+        """Create Enhanced Style Analysis Agent with memory fixes and WebSocket support."""
         
         system_message = f"""You are the Enhanced Style Analysis Agent for project {self.project_id}.
 
@@ -168,11 +274,12 @@ class EnhancedWorkforceBuilder:
         return self.create_agent_with_memory_fix(
             agent_name="enhanced_style_analysis",
             system_message=system_message,
-            tools=tools
+            tools=tools,
+            agent_role="Style Analysis Agent"  # NEW: Add role for WebSocket
         )
     
     def create_content_planning_agent(self) -> ChatAgent:
-        """Create Enhanced Content Planning Agent with memory fixes."""
+        """Create Enhanced Content Planning Agent with memory fixes and WebSocket support."""
         
         system_message = f"""You are the Enhanced Content Planning Agent for project {self.project_id}.
 
@@ -202,11 +309,12 @@ class EnhancedWorkforceBuilder:
         return self.create_agent_with_memory_fix(
             agent_name="enhanced_content_planning",
             system_message=system_message,
-            tools=tools
+            tools=tools,
+            agent_role="Content Planning Agent"  # NEW: Add role for WebSocket
         )
     
     def create_content_generation_agent(self) -> ChatAgent:
-        """Create Enhanced Content Generation Agent with memory fixes."""
+        """Create Enhanced Content Generation Agent with memory fixes and WebSocket support."""
         
         system_message = f"""You are the Enhanced Content Generation Agent for project {self.project_id}.
 
@@ -236,11 +344,12 @@ class EnhancedWorkforceBuilder:
         return self.create_agent_with_memory_fix(
             agent_name="enhanced_content_generation",
             system_message=system_message,
-            tools=tools
+            tools=tools,
+            agent_role="Content Generation Agent"  # NEW: Add role for WebSocket
         )
     
     def create_qa_agent(self) -> ChatAgent:
-        """Create Enhanced QA Agent with memory fixes."""
+        """Create Enhanced QA Agent with memory fixes and WebSocket support."""
         
         system_message = f"""You are the Enhanced Quality Assurance Agent for project {self.project_id}.
 
@@ -270,11 +379,12 @@ class EnhancedWorkforceBuilder:
         return self.create_agent_with_memory_fix(
             agent_name="enhanced_qa",
             system_message=system_message,
-            tools=tools
+            tools=tools,
+            agent_role="Quality Assurance Agent"  # NEW: Add role for WebSocket
         )
     
     def create_coordinator_agent(self) -> ChatAgent:
-        """Create Enhanced Coordinator Agent with memory fixes."""
+        """Create Enhanced Coordinator Agent with memory fixes and WebSocket support."""
         
         system_message = f"""You are the Enhanced Coordinator Agent for project {self.project_id}.
 
@@ -304,20 +414,40 @@ class EnhancedWorkforceBuilder:
         return self.create_agent_with_memory_fix(
             agent_name="enhanced_coordinator",
             system_message=system_message,
-            token_limit=150000  # Extra capacity for coordination
+            token_limit=150000,  # Extra capacity for coordination
+            agent_role="Coordinator Agent"  # NEW: Add role for WebSocket
         )
     
     def build_enhanced_workforce(self) -> Workforce:
         """
-        Build the complete enhanced workforce with memory fixes.
+        Build the complete enhanced workforce with memory fixes and WebSocket support.
+        
+        MODIFIED: Now includes WebSocket integration for all agents
+        Citation: Extended based on requirements from enhanced_process.py which needs
+        real-time agent message broadcasting to frontend
         
         Returns:
-            Workforce with all agents having proper memory limits
+            Workforce with all agents having proper memory limits and WebSocket support
         """
         logger.info(f"🏗️ Building Enhanced Workforce for {self.project_id}")
         
+        # NEW: Broadcast workforce building start if interceptor available
+        if self.websocket_interceptor:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(
+                        self.websocket_interceptor.intercept_message(
+                            message={"content": "Initializing specialized agents..."},
+                            agent_type="System",
+                            stage="initialization"
+                        )
+                    )
+            except Exception as e:
+                logger.debug(f"Could not send initialization message: {e}")
+        
         try:
-            # Create all agents with memory fixes
+            # Create all agents with memory fixes and WebSocket wrapping
             style_agent = self.create_style_analysis_agent()
             planning_agent = self.create_content_planning_agent()
             generation_agent = self.create_content_generation_agent()
@@ -358,7 +488,26 @@ class EnhancedWorkforceBuilder:
             # Apply global memory fix to catch any missed objects
             patch_all_system_memory(self.token_limit)
             
-            logger.info("✅ Enhanced Workforce built successfully with memory fixes")
+            # NEW: Store WebSocket interceptor reference in workforce
+            workforce.websocket_interceptor = self.websocket_interceptor
+            
+            logger.info("✅ Enhanced Workforce built successfully with memory fixes and WebSocket support")
+            
+            # NEW: Broadcast completion if interceptor available
+            if self.websocket_interceptor:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(
+                            self.websocket_interceptor.intercept_message(
+                                message={"content": "Workforce initialized with 4 specialized agents"},
+                                agent_type="System",
+                                stage="initialization"
+                            )
+                        )
+                except Exception as e:
+                    logger.debug(f"Could not send completion message: {e}")
+            
             return workforce
             
         except Exception as e:
@@ -393,18 +542,27 @@ class EnhancedWorkforceBuilder:
             logger.error(f"❌ Workforce memory validation error: {e}")
             return False
 
-def create_enhanced_workforce(project_id: str, token_limit: int = 100000) -> Workforce:
+def create_enhanced_workforce(
+    project_id: str, 
+    token_limit: int = 100000,
+    websocket_interceptor=None  # NEW: Add WebSocket interceptor parameter
+) -> Workforce:
     """
-    Convenience function to create an enhanced workforce with memory fixes.
+    Convenience function to create an enhanced workforce with memory fixes and WebSocket support.
+    
+    MODIFIED: Added websocket_interceptor parameter
+    Citation: Extended based on enhanced_process.py which needs to pass WebSocket
+    interceptor to enable real-time agent message broadcasting
     
     Args:
         project_id: Project identifier
         token_limit: Token limit for all agents (default 100K)
+        websocket_interceptor: Optional WebSocket interceptor for real-time updates (NEW)
         
     Returns:
-        Workforce with memory-fixed agents
+        Workforce with memory-fixed agents and optional WebSocket support
     """
-    builder = EnhancedWorkforceBuilder(project_id, token_limit)
+    builder = EnhancedWorkforceBuilder(project_id, token_limit, websocket_interceptor)
     workforce = builder.build_enhanced_workforce()
     
     # Validate memory configuration
