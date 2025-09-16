@@ -1,460 +1,505 @@
-// src/components/workflow/AgentProgressDisplay.tsx
+// frontend/src/components/workflow/AgentProgressDisplay.tsx
+// Real-time agent progress and workflow stage display component
+
 import React, { useState, useEffect } from 'react';
-import { Bot, CheckCircle, Clock, AlertTriangle, Zap, FileText, Palette, PenTool, Search } from 'lucide-react';
+import {
+  Bot,
+  Clock,
+  CheckCircle,
+  AlertCircle,
+  Loader2,
+  Zap,
+  Brain,
+  FileText,
+  Edit3,
+  Shield,
+  TrendingUp,
+  Activity,
+  Pause,
+  Play,
+  ChevronRight,
+  ChevronDown,
+  Info
+} from 'lucide-react';
 
 interface AgentProgressDisplayProps {
-  workflowId: string;
-  onCheckpointRequired: (checkpointId: string, data: any) => void;
+  currentStage: string;
+  activeAgents: string[];
+  workflowStatus: 'running' | 'paused' | 'completed' | 'error';
+  onCheckpointApproval?: (approved: boolean, feedback?: string) => void;
 }
 
-interface AgentStage {
+interface WorkflowStage {
   id: string;
   name: string;
+  description: string;
   agent: string;
   icon: React.ComponentType<any>;
-  color: string;
-  status: 'pending' | 'active' | 'completed' | 'failed';
-  progress: number;
-  message?: string;
+  status: 'pending' | 'active' | 'completed' | 'error' | 'skipped';
+  progress?: number;
+  startTime?: string;
+  endTime?: string;
   output?: string;
-  timestamp?: string;
 }
 
-interface CheckpointData {
+interface AgentInfo {
   id: string;
-  type: string;
-  title: string;
-  description: string;
-  data: any;
-  status: 'pending' | 'approved' | 'rejected';
+  name: string;
+  role: string;
+  color: string;
+  icon: React.ComponentType<any>;
+  isActive: boolean;
+  currentTask?: string;
+  messagesCount: number;
 }
 
-export default function AgentProgressDisplay({ workflowId, onCheckpointRequired }: AgentProgressDisplayProps) {
-  const [stages, setStages] = useState<AgentStage[]>([
+// Checkpoint Approval Component
+export const CheckpointApproval: React.FC<{
+  checkpoint: {
+    id: string;
+    title: string;
+    description: string;
+    content?: string;
+  };
+  onApprove: (feedback?: string) => void;
+  onReject: (feedback?: string) => void;
+}> = ({ checkpoint, onApprove, onReject }) => {
+  const [feedback, setFeedback] = useState('');
+  const [showDetails, setShowDetails] = useState(false);
+
+  return (
+    <div className="bg-yellow-900/20 border border-yellow-600/30 rounded-lg p-4">
+      <div className="flex items-start gap-3 mb-3">
+        <AlertCircle className="w-5 h-5 text-yellow-500 mt-0.5" />
+        <div className="flex-1">
+          <h4 className="font-medium text-yellow-300">{checkpoint.title}</h4>
+          <p className="text-sm text-gray-300 mt-1">{checkpoint.description}</p>
+        </div>
+      </div>
+
+      {checkpoint.content && (
+        <div className="mb-3">
+          <button
+            onClick={() => setShowDetails(!showDetails)}
+            className="flex items-center gap-2 text-sm text-yellow-400 hover:text-yellow-300 transition-colors"
+          >
+            {showDetails ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+            View Content Preview
+          </button>
+          {showDetails && (
+            <div className="mt-2 p-3 bg-gray-800 rounded-lg max-h-40 overflow-y-auto">
+              <pre className="text-xs text-gray-300 whitespace-pre-wrap">{checkpoint.content}</pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="space-y-3">
+        <textarea
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          placeholder="Add feedback (optional)..."
+          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-400 text-sm resize-none"
+          rows={2}
+        />
+        <div className="flex gap-3">
+          <button
+            onClick={() => onApprove(feedback)}
+            className="flex-1 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+          >
+            <CheckCircle className="w-4 h-4" />
+            Approve
+          </button>
+          <button
+            onClick={() => onReject(feedback)}
+            className="flex-1 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center justify-center gap-2"
+          >
+            <AlertCircle className="w-4 h-4" />
+            Request Changes
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Main Component
+const AgentProgressDisplay: React.FC<AgentProgressDisplayProps> = ({
+  currentStage,
+  activeAgents,
+  workflowStatus,
+  onCheckpointApproval
+}) => {
+  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
+  const [showStageDetails, setShowStageDetails] = useState(true);
+
+  // Define workflow stages
+  const workflowStages: WorkflowStage[] = [
     {
-      id: 'document_processing',
-      name: 'Document Processing',
-      agent: 'Document Processor',
-      icon: FileText,
-      color: 'from-blue-500 to-blue-600',
-      status: 'pending',
-      progress: 0
+      id: 'initialization',
+      name: 'Initialization',
+      description: 'Setting up workflow and loading project context',
+      agent: 'coordinator',
+      icon: Zap,
+      status: currentStage === 'Initializing' ? 'active' : 
+              ['style_analysis', 'content_planning', 'content_generation', 'editing_qa', 'completion'].includes(currentStage) ? 'completed' : 'pending'
     },
     {
       id: 'style_analysis',
       name: 'Style Analysis',
-      agent: 'Style Analysis Agent',
-      icon: Palette,
-      color: 'from-purple-500 to-purple-600',
-      status: 'pending',
-      progress: 0
+      description: 'Analyzing brand voice and content requirements',
+      agent: 'style_analysis',
+      icon: Brain,
+      status: currentStage === 'style_analysis' ? 'active' : 
+              ['content_planning', 'content_generation', 'editing_qa', 'completion'].includes(currentStage) ? 'completed' : 'pending'
     },
     {
       id: 'content_planning',
       name: 'Content Planning',
-      agent: 'Content Planning Agent',
-      icon: Search,
-      color: 'from-indigo-500 to-indigo-600',
-      status: 'pending',
-      progress: 0
+      description: 'Creating content structure and outline',
+      agent: 'content_planning',
+      icon: FileText,
+      status: currentStage === 'content_planning' ? 'active' : 
+              ['content_generation', 'editing_qa', 'completion'].includes(currentStage) ? 'completed' : 'pending'
     },
     {
       id: 'content_generation',
       name: 'Content Generation',
-      agent: 'Content Generation Agent',
-      icon: PenTool,
-      color: 'from-green-500 to-green-600',
-      status: 'pending',
-      progress: 0
+      description: 'Writing the actual content',
+      agent: 'content_generation',
+      icon: Edit3,
+      status: currentStage === 'content_generation' ? 'active' : 
+              ['editing_qa', 'completion'].includes(currentStage) ? 'completed' : 'pending'
     },
     {
-      id: 'quality_assurance',
-      name: 'Quality Assurance',
-      agent: 'QA Agent',
+      id: 'editing_qa',
+      name: 'Editing & QA',
+      description: 'Review, editing, and quality assurance',
+      agent: 'editing_qa',
+      icon: Shield,
+      status: currentStage === 'editing_qa' ? 'active' : 
+              currentStage === 'completion' ? 'completed' : 'pending'
+    },
+    {
+      id: 'completion',
+      name: 'Finalization',
+      description: 'Finalizing and delivering content',
+      agent: 'coordinator',
       icon: CheckCircle,
-      color: 'from-orange-500 to-orange-600',
-      status: 'pending',
-      progress: 0
+      status: currentStage === 'completion' ? 'active' : 'pending'
     }
-  ]);
+  ];
 
-  const [currentCheckpoint, setCurrentCheckpoint] = useState<CheckpointData | null>(null);
-  const [websocket, setWebsocket] = useState<WebSocket | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
-
-  useEffect(() => {
-    // Establish WebSocket connection
-    const ws = new WebSocket(`ws://localhost:8000/api/v1/ws/workflows/${workflowId}`);
-    
-    ws.onopen = () => {
-      setConnectionStatus('connected');
-      console.log('WebSocket connected to workflow:', workflowId);
-    };
-
-    ws.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      handleWebSocketMessage(message);
-    };
-
-    ws.onclose = () => {
-      setConnectionStatus('disconnected');
-      console.log('WebSocket disconnected');
-      
-      // Attempt to reconnect after 3 seconds
-      setTimeout(() => {
-        setConnectionStatus('connecting');
-      }, 3000);
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setConnectionStatus('disconnected');
-    };
-
-    setWebsocket(ws);
-
-    return () => {
-      ws.close();
-    };
-  }, [workflowId]);
-
-  const handleWebSocketMessage = (message: any) => {
-    switch (message.type) {
-      case 'stage_update':
-        updateStageProgress(message.stage, message.progress, message.message);
-        break;
-        
-      case 'checkpoint_required':
-        handleCheckpointRequired(message);
-        break;
-        
-      case 'agent_output':
-        updateStageOutput(message.stage, message.output);
-        break;
-        
-      case 'workflow_completed':
-        markAllStagesCompleted();
-        break;
-        
-      case 'workflow_failed':
-        markWorkflowFailed(message.error);
-        break;
-    }
-  };
-
-  const updateStageProgress = (stageId: string, progress: number, message?: string) => {
-    setStages(prevStages => 
-      prevStages.map(stage => {
-        if (stage.id === stageId) {
-          return {
-            ...stage,
-            status: progress >= 100 ? 'completed' : 'active',
-            progress,
-            message,
-            timestamp: new Date().toLocaleTimeString()
-          };
-        }
-        // Mark previous stages as completed
-        const stageIndex = prevStages.findIndex(s => s.id === stageId);
-        const currentIndex = prevStages.findIndex(s => s.id === stage.id);
-        if (currentIndex < stageIndex && stage.status !== 'completed') {
-          return {
-            ...stage,
-            status: 'completed',
-            progress: 100
-          };
-        }
-        return stage;
-      })
-    );
-  };
-
-  const updateStageOutput = (stageId: string, output: string) => {
-    setStages(prevStages =>
-      prevStages.map(stage =>
-        stage.id === stageId
-          ? { ...stage, output }
-          : stage
-      )
-    );
-  };
-
-  const handleCheckpointRequired = (message: any) => {
-    const checkpoint: CheckpointData = {
-      id: message.checkpoint_id,
-      type: message.checkpoint_data.type,
-      title: message.checkpoint_data.title,
-      description: message.checkpoint_data.description,
-      data: message.checkpoint_data,
-      status: 'pending'
-    };
-    
-    setCurrentCheckpoint(checkpoint);
-    onCheckpointRequired(checkpoint.id, checkpoint.data);
-  };
-
-  const markAllStagesCompleted = () => {
-    setStages(prevStages =>
-      prevStages.map(stage => ({
-        ...stage,
-        status: 'completed',
-        progress: 100
-      }))
-    );
-  };
-
-  const markWorkflowFailed = (error: string) => {
-    setStages(prevStages => {
-      const activeStageIndex = prevStages.findIndex(s => s.status === 'active');
-      return prevStages.map((stage, index) => ({
-        ...stage,
-        status: index === activeStageIndex ? 'failed' : stage.status,
-        message: index === activeStageIndex ? `Failed: ${error}` : stage.message
-      }));
-    });
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'completed':
-        return <CheckCircle className="w-5 h-5 text-green-500" />;
-      case 'active':
-        return <div className="w-5 h-5 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />;
-      case 'failed':
-        return <AlertTriangle className="w-5 h-5 text-red-500" />;
-      default:
-        return <Clock className="w-5 h-5 text-gray-400" />;
+  // Define agent information
+  const agentInfoMap: { [key: string]: AgentInfo } = {
+    'coordinator': {
+      id: 'coordinator',
+      name: 'Workflow Coordinator',
+      role: 'Orchestrates the entire workflow',
+      color: 'from-blue-500 to-blue-600',
+      icon: Zap,
+      isActive: activeAgents.includes('coordinator'),
+      currentTask: currentStage === 'Initializing' ? 'Setting up workflow' : 
+                   currentStage === 'completion' ? 'Finalizing content' : undefined,
+      messagesCount: 0
+    },
+    'style_analysis': {
+      id: 'style_analysis',
+      name: 'Style Analyst',
+      role: 'Analyzes brand voice and style',
+      color: 'from-purple-500 to-purple-600',
+      icon: Brain,
+      isActive: activeAgents.includes('style_analysis'),
+      currentTask: currentStage === 'style_analysis' ? 'Analyzing brand guidelines' : undefined,
+      messagesCount: 0
+    },
+    'content_planning': {
+      id: 'content_planning',
+      name: 'Content Planner',
+      role: 'Creates content structure',
+      color: 'from-indigo-500 to-indigo-600',
+      icon: FileText,
+      isActive: activeAgents.includes('content_planning'),
+      currentTask: currentStage === 'content_planning' ? 'Building content outline' : undefined,
+      messagesCount: 0
+    },
+    'content_generation': {
+      id: 'content_generation',
+      name: 'Content Creator',
+      role: 'Writes the actual content',
+      color: 'from-green-500 to-green-600',
+      icon: Edit3,
+      isActive: activeAgents.includes('content_generation') || activeAgents.includes('Content Creator'),
+      currentTask: currentStage === 'content_generation' ? 'Writing content' : undefined,
+      messagesCount: 0
+    },
+    'editing_qa': {
+      id: 'editing_qa',
+      name: 'Editor & QA',
+      role: 'Reviews and polishes content',
+      color: 'from-yellow-500 to-yellow-600',
+      icon: Shield,
+      isActive: activeAgents.includes('editing_qa'),
+      currentTask: currentStage === 'editing_qa' ? 'Reviewing content quality' : undefined,
+      messagesCount: 0
+    },
+    'Content Strategist': {
+      id: 'content_strategist',
+      name: 'Content Strategist',
+      role: 'Strategic content planning',
+      color: 'from-pink-500 to-pink-600',
+      icon: TrendingUp,
+      isActive: activeAgents.includes('Content Strategist'),
+      currentTask: undefined,
+      messagesCount: 0
     }
   };
 
-  const getConnectionStatusIndicator = () => {
-    switch (connectionStatus) {
-      case 'connected':
-        return <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />;
-      case 'connecting':
-        return <div className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />;
-      default:
-        return <div className="w-2 h-2 bg-red-500 rounded-full" />;
-    }
+  // Get active stage progress
+  const getStageProgress = (stage: WorkflowStage): number => {
+    if (stage.status === 'completed') return 100;
+    if (stage.status === 'active') return 50; // Could be enhanced with real progress
+    return 0;
   };
+
+  // Calculate overall progress
+  const overallProgress = Math.round(
+    workflowStages.reduce((acc, stage) => acc + getStageProgress(stage), 0) / workflowStages.length
+  );
 
   return (
-    <div className="bg-gray-800 rounded-xl p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h3 className="text-xl font-semibold text-white mb-1">Agent Workflow Progress</h3>
-          <p className="text-gray-400">Real-time multi-agent collaboration</p>
+    <div className="space-y-4">
+      {/* Overall Progress */}
+      <div className="bg-gray-800 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-white font-semibold">Workflow Progress</h3>
+          <span className="text-sm text-gray-400">{overallProgress}%</span>
         </div>
         
-        <div className="flex items-center gap-2">
-          {getConnectionStatusIndicator()}
-          <span className="text-sm text-gray-400">
-            {connectionStatus === 'connected' ? 'Live' : 
-             connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}
-          </span>
-        </div>
-      </div>
-
-      {/* Progress Overview */}
-      <div className="mb-8">
-        <div className="flex items-center justify-between text-sm text-gray-400 mb-2">
-          <span>Overall Progress</span>
-          <span>
-            {Math.round(stages.reduce((acc, stage) => acc + stage.progress, 0) / stages.length)}%
-          </span>
-        </div>
-        <div className="w-full bg-gray-700 rounded-full h-2">
+        <div className="bg-gray-700 rounded-full h-2 overflow-hidden mb-3">
           <div 
-            className="bg-gradient-to-r from-orange-500 to-violet-600 h-2 rounded-full transition-all duration-500"
-            style={{ width: `${stages.reduce((acc, stage) => acc + stage.progress, 0) / stages.length}%` }}
+            className="bg-gradient-to-r from-orange-500 to-violet-600 h-full transition-all duration-500"
+            style={{ width: `${overallProgress}%` }}
           />
         </div>
+
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-gray-400">Current Stage:</span>
+          <span className="text-orange-400 font-medium">{currentStage}</span>
+        </div>
+
+        <div className="flex items-center justify-between text-sm mt-1">
+          <span className="text-gray-400">Status:</span>
+          <div className="flex items-center gap-2">
+            {workflowStatus === 'running' && (
+              <>
+                <Activity className="w-4 h-4 text-green-400 animate-pulse" />
+                <span className="text-green-400">Running</span>
+              </>
+            )}
+            {workflowStatus === 'paused' && (
+              <>
+                <Pause className="w-4 h-4 text-yellow-400" />
+                <span className="text-yellow-400">Paused</span>
+              </>
+            )}
+            {workflowStatus === 'completed' && (
+              <>
+                <CheckCircle className="w-4 h-4 text-blue-400" />
+                <span className="text-blue-400">Completed</span>
+              </>
+            )}
+            {workflowStatus === 'error' && (
+              <>
+                <AlertCircle className="w-4 h-4 text-red-400" />
+                <span className="text-red-400">Error</span>
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Agent Stages */}
-      <div className="space-y-4">
-        {stages.map((stage, index) => {
-          const Icon = stage.icon;
-          const isActive = stage.status === 'active';
-          const isCompleted = stage.status === 'completed';
-          const isFailed = stage.status === 'failed';
+      {/* Workflow Stages */}
+      <div className="bg-gray-800 rounded-xl p-4">
+        <button
+          onClick={() => setShowStageDetails(!showStageDetails)}
+          className="w-full flex items-center justify-between mb-3"
+        >
+          <h3 className="text-white font-semibold">Workflow Stages</h3>
+          {showStageDetails ? (
+            <ChevronDown className="w-4 h-4 text-gray-400" />
+          ) : (
+            <ChevronRight className="w-4 h-4 text-gray-400" />
+          )}
+        </button>
 
-          return (
-            <div 
-              key={stage.id}
-              className={`rounded-lg border transition-all duration-500 ${
-                isActive 
-                  ? 'bg-gradient-to-r from-orange-500/10 to-violet-600/10 border-orange-500/50'
-                  : isCompleted
-                    ? 'bg-green-900/20 border-green-500/50'
-                    : isFailed
-                      ? 'bg-red-900/20 border-red-500/50'
-                      : 'bg-gray-700/50 border-gray-600'
-              }`}
-            >
-              <div className="p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 rounded-lg bg-gradient-to-r ${stage.color} flex items-center justify-center`}>
-                      <Icon className="w-5 h-5 text-white" />
-                    </div>
-                    <div>
-                      <h4 className="font-medium text-white">{stage.name}</h4>
-                      <p className="text-sm text-gray-400">{stage.agent}</p>
-                    </div>
-                  </div>
-                  
-                  <div className="flex items-center gap-3">
-                    {stage.timestamp && (
-                      <span className="text-xs text-gray-500">{stage.timestamp}</span>
+        {showStageDetails && (
+          <div className="space-y-2">
+            {workflowStages.map((stage, index) => {
+              const Icon = stage.icon;
+              return (
+                <div 
+                  key={stage.id}
+                  className={`relative flex items-center gap-3 p-3 rounded-lg transition-all ${
+                    stage.status === 'active' 
+                      ? 'bg-gradient-to-r from-orange-500/20 to-violet-600/20 border border-orange-500/30' 
+                      : 'bg-gray-700/50'
+                  }`}
+                >
+                  {/* Connection Line */}
+                  {index < workflowStages.length - 1 && (
+                    <div className={`absolute left-7 top-12 w-0.5 h-8 ${
+                      stage.status === 'completed' ? 'bg-green-500' : 'bg-gray-600'
+                    }`} />
+                  )}
+
+                  {/* Stage Icon */}
+                  <div className={`relative flex items-center justify-center w-8 h-8 rounded-full ${
+                    stage.status === 'completed' ? 'bg-green-500' :
+                    stage.status === 'active' ? 'bg-gradient-to-r from-orange-500 to-violet-600' :
+                    stage.status === 'error' ? 'bg-red-500' :
+                    'bg-gray-600'
+                  }`}>
+                    {stage.status === 'completed' ? (
+                      <CheckCircle className="w-4 h-4 text-white" />
+                    ) : stage.status === 'active' ? (
+                      <Loader2 className="w-4 h-4 text-white animate-spin" />
+                    ) : stage.status === 'error' ? (
+                      <AlertCircle className="w-4 h-4 text-white" />
+                    ) : (
+                      <Icon className="w-4 h-4 text-gray-300" />
                     )}
-                    {getStatusIcon(stage.status)}
+                  </div>
+
+                  {/* Stage Info */}
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <h4 className={`font-medium ${
+                        stage.status === 'active' ? 'text-orange-400' :
+                        stage.status === 'completed' ? 'text-green-400' :
+                        stage.status === 'error' ? 'text-red-400' :
+                        'text-gray-300'
+                      }`}>
+                        {stage.name}
+                      </h4>
+                      {stage.status === 'active' && stage.progress !== undefined && (
+                        <span className="text-xs text-gray-400">{stage.progress}%</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-400 mt-0.5">{stage.description}</p>
                   </div>
                 </div>
-
-                {/* Progress Bar */}
-                {stage.status === 'active' && (
-                  <div className="mb-3">
-                    <div className="flex justify-between text-xs text-gray-400 mb-1">
-                      <span>Progress</span>
-                      <span>{stage.progress}%</span>
-                    </div>
-                    <div className="w-full bg-gray-600 rounded-full h-1.5">
-                      <div 
-                        className={`bg-gradient-to-r ${stage.color} h-1.5 rounded-full transition-all duration-300`}
-                        style={{ width: `${stage.progress}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* Current Message */}
-                {stage.message && (
-                  <div className="bg-gray-700 rounded-lg p-3 mb-3">
-                    <p className="text-sm text-gray-300">{stage.message}</p>
-                  </div>
-                )}
-
-                {/* Agent Output */}
-                {stage.output && (
-                  <div className="bg-gray-900 rounded-lg p-3 border-l-4 border-blue-500">
-                    <p className="text-xs text-blue-400 mb-1">Agent Output:</p>
-                    <p className="text-sm text-gray-300 leading-relaxed">{stage.output}</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Current Checkpoint */}
-      {currentCheckpoint && currentCheckpoint.status === 'pending' && (
-        <div className="mt-6 bg-gradient-to-r from-yellow-900/20 to-orange-900/20 border border-yellow-500/50 rounded-lg p-4">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="w-6 h-6 text-yellow-500 mt-1" />
-            <div className="flex-1">
-              <h4 className="font-medium text-yellow-300 mb-1">Checkpoint Required</h4>
-              <h5 className="text-white font-medium mb-2">{currentCheckpoint.title}</h5>
-              <p className="text-gray-300 text-sm leading-relaxed">{currentCheckpoint.description}</p>
-            </div>
+              );
+            })}
           </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Checkpoint Approval Component
-interface CheckpointApprovalProps {
-  checkpoint: CheckpointData;
-  onApprove: (checkpointId: string, feedback: string) => void;
-  onReject: (checkpointId: string, feedback: string) => void;
-}
-
-export function CheckpointApproval({ checkpoint, onApprove, onReject }: CheckpointApprovalProps) {
-  const [feedback, setFeedback] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const handleApprove = async () => {
-    setIsSubmitting(true);
-    await onApprove(checkpoint.id, feedback);
-    setIsSubmitting(false);
-  };
-
-  const handleReject = async () => {
-    setIsSubmitting(true);
-    await onReject(checkpoint.id, feedback);
-    setIsSubmitting(false);
-  };
-
-  return (
-    <div className="bg-gray-800 rounded-xl p-6 border border-yellow-500/50">
-      <div className="flex items-start gap-3 mb-4">
-        <div className="w-12 h-12 bg-gradient-to-r from-yellow-500 to-orange-500 rounded-lg flex items-center justify-center">
-          <AlertTriangle className="w-6 h-6 text-white" />
-        </div>
-        <div>
-          <h3 className="text-lg font-semibold text-white">{checkpoint.title}</h3>
-          <p className="text-gray-400">Checkpoint ID: {checkpoint.id}</p>
-        </div>
+        )}
       </div>
 
-      <div className="bg-gray-700 rounded-lg p-4 mb-4">
-        <p className="text-gray-300 leading-relaxed">{checkpoint.description}</p>
-      </div>
-
-      {/* Checkpoint Data Display */}
-      {checkpoint.data && (
-        <div className="bg-gray-900 rounded-lg p-4 mb-4">
-          <h4 className="text-sm font-medium text-gray-300 mb-2">Content for Review:</h4>
-          <div className="max-h-64 overflow-y-auto">
-            <pre className="text-sm text-gray-400 whitespace-pre-wrap">
-              {JSON.stringify(checkpoint.data, null, 2)}
-            </pre>
-          </div>
-        </div>
-      )}
-
-      {/* Feedback Input */}
-      <div className="mb-4">
-        <label className="block text-sm font-medium text-gray-300 mb-2">
-          Feedback (Optional)
-        </label>
-        <textarea
-          value={feedback}
-          onChange={(e) => setFeedback(e.target.value)}
-          rows={3}
-          className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500"
-          placeholder="Provide feedback or instructions for the agents..."
-        />
-      </div>
-
-      {/* Action Buttons */}
-      <div className="flex gap-3">
-        <button
-          onClick={handleApprove}
-          disabled={isSubmitting}
-          className="flex-1 px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg font-medium hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center justify-center gap-2"
-        >
-          {isSubmitting ? (
-            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-          ) : (
-            <CheckCircle className="w-4 h-4" />
-          )}
-          Approve & Continue
-        </button>
+      {/* Active Agents */}
+      <div className="bg-gray-800 rounded-xl p-4">
+        <h3 className="text-white font-semibold mb-3">Active Agents</h3>
         
-        <button
-          onClick={handleReject}
-          disabled={isSubmitting}
-          className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center gap-2"
-        >
-          <AlertTriangle className="w-4 h-4" />
-          Request Changes
-        </button>
+        {activeAgents.length === 0 ? (
+          <p className="text-sm text-gray-400">No agents active yet</p>
+        ) : (
+          <div className="space-y-2">
+            {activeAgents.map(agentId => {
+              const agent = agentInfoMap[agentId] || {
+                id: agentId,
+                name: agentId,
+                role: 'AI Agent',
+                color: 'from-gray-500 to-gray-600',
+                icon: Bot,
+                isActive: true,
+                messagesCount: 0
+              };
+              
+              const Icon = agent.icon;
+              const isExpanded = expandedAgent === agentId;
+
+              return (
+                <div 
+                  key={agentId}
+                  className="bg-gray-700/50 rounded-lg overflow-hidden"
+                >
+                  <button
+                    onClick={() => setExpandedAgent(isExpanded ? null : agentId)}
+                    className="w-full flex items-center gap-3 p-3 hover:bg-gray-700/70 transition-colors"
+                  >
+                    <div className={`w-8 h-8 rounded-full bg-gradient-to-r ${agent.color} flex items-center justify-center`}>
+                      <Icon className="w-4 h-4 text-white" />
+                    </div>
+                    
+                    <div className="flex-1 text-left">
+                      <h4 className="text-sm font-medium text-white">{agent.name}</h4>
+                      {agent.currentTask && (
+                        <p className="text-xs text-gray-400">{agent.currentTask}</p>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {agent.isActive && (
+                        <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                      )}
+                      {isExpanded ? (
+                        <ChevronDown className="w-4 h-4 text-gray-400" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-400" />
+                      )}
+                    </div>
+                  </button>
+
+                  {isExpanded && (
+                    <div className="px-3 pb-3 border-t border-gray-600">
+                      <div className="mt-2 space-y-1">
+                        <div className="flex justify-between text-xs">
+                          <span className="text-gray-400">Role:</span>
+                          <span className="text-gray-300">{agent.role}</span>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                          <span className="text-gray-400">Status:</span>
+                          <span className="text-green-400">Active</span>
+                        </div>
+                        {agent.currentTask && (
+                          <div className="flex justify-between text-xs">
+                            <span className="text-gray-400">Current Task:</span>
+                            <span className="text-gray-300">{agent.currentTask}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Workflow Info */}
+      <div className="bg-gray-800 rounded-xl p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <Info className="w-4 h-4 text-gray-400" />
+          <h3 className="text-white font-semibold">Workflow Info</h3>
+        </div>
+        
+        <div className="space-y-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-gray-400">Type:</span>
+            <span className="text-gray-300">Multi-Agent Content Creation</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-400">Agents:</span>
+            <span className="text-gray-300">{activeAgents.length} active</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-400">Checkpoints:</span>
+            <span className="text-gray-300">Enabled</span>
+          </div>
+        </div>
       </div>
     </div>
   );
-}
+};
+
+export default AgentProgressDisplay;

@@ -1,169 +1,257 @@
 // frontend/src/components/WorkflowPage.tsx
-// FIXED VERSION - Properly integrates ChatWorkflowInterface
+// Enhanced version with proper API integration based on backend schemas
 
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { 
-  ArrowLeft, 
-  Zap, 
-  FileText, 
-  MessageCircle, 
+import {
+  ArrowLeft,
+  Zap,
+  FileText,
+  MessageCircle,
   Settings,
   Loader2,
   AlertCircle,
   CheckCircle,
+  Clock,
   Play,
+  Pause,
+  StopCircle,
   Users
 } from 'lucide-react';
-import { apiService } from '../services/api';
+import { 
+  apiService, 
+  Project, 
+  WorkflowResponse, 
+  WorkflowCreateRequest 
+} from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import ChatWorkflowInterface from './workflow/ChatWorkflowInterface';
 
-interface Project {
-  id: string;
-  name: string;
-  description?: string;
-  client_name?: string;
-}
-
-interface WorkflowExecution {
-  workflow_id: string;
-  project_id: string;
+// Local interface for workflow configuration form
+interface WorkflowConfig {
   title: string;
-  content_type: string;
-  status: string;
-  current_stage?: string;
-  progress?: number;
-  final_content?: string;
-  created_at: string;
-  completed_at?: string;
+  contentType: string;
+  initialDraft: string;
+  useProjectDocuments: boolean;
 }
 
-type WorkflowState = 'setup' | 'running' | 'completed' | 'error';
+type WorkflowState = 'setup' | 'starting' | 'running' | 'paused' | 'completed' | 'error';
 
 const WorkflowPage: React.FC = () => {
-  const { projectId } = useParams<{ projectId: string }>();
+  const { projectId, workflowId: urlWorkflowId } = useParams<{ projectId: string; workflowId?: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
-  
-  const [project, setProject] = useState<Project | null>(null);
-  const [workflowState, setWorkflowState] = useState<WorkflowState>('setup');
-  const [currentWorkflow, setCurrentWorkflow] = useState<WorkflowExecution | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState('');
 
-  // Setup form state
-  const [workflowConfig, setWorkflowConfig] = useState({
+  // State management
+  const [workflowState, setWorkflowState] = useState<WorkflowState>('setup');
+  const [currentWorkflow, setCurrentWorkflow] = useState<WorkflowResponse | null>(null);
+  const [workflowConfig, setWorkflowConfig] = useState<WorkflowConfig>({
     title: '',
     contentType: 'article',
     initialDraft: '',
     useProjectDocuments: true
   });
+  const [project, setProject] = useState<Project | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string>('');
+  const [activeWorkflows, setActiveWorkflows] = useState<WorkflowResponse[]>([]);
 
+  // Content type options
+  const contentTypes = [
+    { value: 'article', label: 'Article' },
+    { value: 'blog_post', label: 'Blog Post' },
+    { value: 'email', label: 'Email' },
+    { value: 'social_media', label: 'Social Media Post' },
+    { value: 'marketing_copy', label: 'Marketing Copy' },
+    { value: 'technical_docs', label: 'Technical Documentation' },
+    { value: 'report', label: 'Report' },
+    { value: 'proposal', label: 'Business Proposal' }
+  ];
+
+  // Load project and check for active workflows
   useEffect(() => {
     if (projectId) {
       loadProjectData();
     }
   }, [projectId]);
 
+  // Handle URL workflow ID - load existing workflow
+  useEffect(() => {
+    if (urlWorkflowId && projectId) {
+      loadExistingWorkflow(urlWorkflowId);
+    }
+  }, [urlWorkflowId, projectId]);
+
   const loadProjectData = async () => {
     if (!projectId) return;
 
     try {
       setIsLoading(true);
+      setError('');
+
+      // Load project data
       const projectData = await apiService.getProject(projectId);
       setProject(projectData);
-      
-      // Check for active workflows
-      await checkActiveWorkflow();
-    } catch (error: any) {
-      console.error('Failed to load project data:', error);
-      setError('Failed to load project data');
+
+      // Only check for active workflows if no specific workflow ID in URL
+      if (!urlWorkflowId) {
+        await checkActiveWorkflows();
+      }
+    } catch (err: any) {
+      console.error('Failed to load project data:', err);
+      setError('Failed to load project data. Please try again.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const checkActiveWorkflow = async () => {
+  const checkActiveWorkflows = async () => {
     if (!projectId) return;
 
     try {
-      const activeWorkflows = await apiService.getActiveWorkflows(projectId);
+      // Use the listWorkflows API with proper parameters
+      const workflows = await apiService.listWorkflows({
+        project_id: projectId,
+        status: 'running'
+      });
       
-      if (activeWorkflows && activeWorkflows.length > 0) {
-        const workflow = activeWorkflows[0];
-        setCurrentWorkflow(workflow);
-        
-        switch (workflow.status) {
-          case 'running':
-          case 'paused':
-            setWorkflowState('running');
-            break;
-          case 'completed':
-            setWorkflowState('completed');
-            break;
-          case 'error':
-          case 'failed':
-            setWorkflowState('error');
-            break;
-          default:
-            setWorkflowState('setup');
-        }
+      setActiveWorkflows(workflows);
+      
+      // If there are active workflows, show them first
+      if (workflows.length > 0) {
+        // User can choose to resume or start new
+        setWorkflowState('setup');
       } else {
         setWorkflowState('setup');
       }
     } catch (error) {
       console.warn('Failed to check active workflows:', error);
+      // If the endpoint fails, just proceed to setup
       setWorkflowState('setup');
     }
   };
 
-  const handleStartWorkflow = async () => {
-    if (!projectId || !workflowConfig.title.trim()) {
-      setError('Please fill in all required fields');
-      return;
-    }
-
+  const loadExistingWorkflow = async (workflowId: string) => {
     try {
       setIsLoading(true);
-      setError('');
-
-      // Create workflow execution
-      const workflowExecution = await apiService.createWorkflowExecution({
-        project_id: projectId,
-        title: workflowConfig.title,
-        content_type: workflowConfig.contentType,
-        initial_draft: workflowConfig.initialDraft || undefined,
-        use_project_documents: workflowConfig.useProjectDocuments
-      });
-
-      setCurrentWorkflow(workflowExecution);
-      setWorkflowState('running');
-    } catch (error: any) {
-      console.error('Failed to start workflow:', error);
-      setError(error.message || 'Failed to start workflow');
+      // Use getWorkflowStatus to load existing workflow
+      const workflow = await apiService.getWorkflowStatus(workflowId);
+      setCurrentWorkflow(workflow);
+      
+      // Determine state based on workflow status
+      switch (workflow.status) {
+        case 'running':
+        case 'in_progress':
+          setWorkflowState('running');
+          break;
+        case 'paused':
+          setWorkflowState('paused');
+          break;
+        case 'completed':
+          setWorkflowState('completed');
+          break;
+        case 'failed':
+        case 'error':
+          setWorkflowState('error');
+          setError(workflow.message || 'Workflow encountered an error');
+          break;
+        default:
+          setWorkflowState('running');
+      }
+    } catch (err: any) {
+      console.error('Failed to load workflow:', err);
+      setError('Failed to load workflow. It may have been completed or deleted.');
+      setWorkflowState('error');
     } finally {
       setIsLoading(false);
     }
   };
 
+  const handleStartWorkflow = async () => {
+    if (!projectId || !workflowConfig.title.trim()) {
+      setError('Please provide a title for your content');
+      return;
+    }
+
+    try {
+      setWorkflowState('starting');
+      setError('');
+
+      // Create the workflow using the proper API endpoint
+      const workflowRequest: WorkflowCreateRequest = {
+        project_id: projectId,
+        title: workflowConfig.title,
+        content_type: workflowConfig.contentType,
+        initial_draft: workflowConfig.initialDraft || undefined,
+        use_project_documents: workflowConfig.useProjectDocuments,
+        chat_id: undefined // Will be created automatically if needed
+      };
+
+      const workflow = await apiService.startWorkflow(workflowRequest);
+
+      // Store the workflow data
+      setCurrentWorkflow(workflow);
+      setWorkflowState('running');
+
+      // Update URL to include workflow ID
+      navigate(`/workflow/${projectId}/${workflow.workflow_id}`, { replace: true });
+    } catch (err: any) {
+      console.error('Failed to start workflow:', err);
+      setError(err.message || 'Failed to start workflow. Please try again.');
+      setWorkflowState('setup');
+    }
+  };
+
+  const handleResumeWorkflow = (workflow: WorkflowResponse) => {
+    setCurrentWorkflow(workflow);
+    setWorkflowState('running');
+    navigate(`/workflow/${projectId}/${workflow.workflow_id}`);
+  };
+
   const handleWorkflowComplete = (result: any) => {
-    setCurrentWorkflow(prev => prev ? {
-      ...prev,
-      status: 'completed',
-      final_content: result.final_content,
-      completed_at: new Date().toISOString()
-    } : null);
-    
     setWorkflowState('completed');
+    if (currentWorkflow) {
+      setCurrentWorkflow({
+        ...currentWorkflow,
+        status: 'completed',
+        final_content: result?.final_content || result?.content
+      });
+    }
+    console.log('Workflow completed:', result);
+  };
+
+  const handlePauseWorkflow = async () => {
+    if (!currentWorkflow) return;
+
+    try {
+      // Note: pauseWorkflow might not be implemented in backend yet
+      // For now, just update local state
+      setWorkflowState('paused');
+    } catch (err: any) {
+      console.error('Failed to pause workflow:', err);
+      setError('Failed to pause workflow');
+    }
+  };
+
+  const handleCancelWorkflow = async () => {
+    if (!currentWorkflow) return;
+
+    if (!window.confirm('Are you sure you want to cancel this workflow? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      await apiService.cancelWorkflow(currentWorkflow.workflow_id);
+      setWorkflowState('setup');
+      navigate(`/project/${projectId}`);
+    } catch (err: any) {
+      console.error('Failed to cancel workflow:', err);
+      setError('Failed to cancel workflow');
+    }
   };
 
   const handleBackToProject = () => {
-    if (projectId) {
-      navigate(`/project/${projectId}`);
-    } else {
-      navigate('/dashboard');
-    }
+    navigate(`/project/${projectId}`);
   };
 
   const handleStartNewWorkflow = () => {
@@ -176,52 +264,21 @@ const WorkflowPage: React.FC = () => {
       initialDraft: '',
       useProjectDocuments: true
     });
+    // Clear workflow ID from URL
+    navigate(`/workflow/${projectId}`);
   };
 
+  // Loading state
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
         <div className="text-center">
-          <Loader2 className="w-8 h-8 text-orange-500 animate-spin mx-auto mb-4" />
-          <p className="text-white">Loading workflow...</p>
+          <Loader2 className="w-12 h-12 animate-spin text-orange-500 mx-auto mb-4" />
+          <p className="text-gray-300">Loading workflow...</p>
         </div>
       </div>
     );
   }
-
-  if (error && workflowState !== 'error') {
-    return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-center">
-          <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-          <p className="text-red-400 mb-4">{error}</p>
-          <div className="space-x-3">
-            <button
-              onClick={handleBackToProject}
-              className="px-6 py-3 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
-            >
-              Back to Project
-            </button>
-            <button
-              onClick={() => setError('')}
-              className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
-            >
-              Try Again
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const contentTypes = [
-    { value: 'article', label: 'Article' },
-    { value: 'blog_post', label: 'Blog Post' },
-    { value: 'email', label: 'Email' },
-    { value: 'social_media', label: 'Social Media' },
-    { value: 'marketing_copy', label: 'Marketing Copy' },
-    { value: 'technical_docs', label: 'Technical Documentation' },
-  ];
 
   return (
     <div className="min-h-screen bg-gray-900">
@@ -231,17 +288,19 @@ const WorkflowPage: React.FC = () => {
           <div className="flex items-center gap-4">
             <button
               onClick={handleBackToProject}
-              className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
+              className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
+              title="Back to Project"
             >
-              <ArrowLeft className="w-5 h-5" />
-              Back to Project
+              <ArrowLeft className="w-5 h-5 text-gray-300" />
             </button>
-            <div className="w-px h-6 bg-gray-600" />
             <div>
               <h1 className="text-xl font-semibold text-white">
-                {workflowState === 'setup' ? 'Setup Content Workflow' : 
+                {workflowState === 'setup' ? 'Setup AI Workflow' :
+                 workflowState === 'starting' ? 'Starting Workflow...' :
                  workflowState === 'running' ? 'AI Workflow in Progress' :
-                 workflowState === 'completed' ? 'Workflow Completed' : 'Workflow Error'}
+                 workflowState === 'paused' ? 'Workflow Paused' :
+                 workflowState === 'completed' ? 'Workflow Completed' : 
+                 'Workflow Error'}
               </h1>
               {project && (
                 <p className="text-sm text-gray-400">
@@ -250,13 +309,32 @@ const WorkflowPage: React.FC = () => {
               )}
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            {workflowState === 'running' && (
-              <div className="flex items-center gap-2 text-green-400">
-                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-                <span className="text-sm">Live</span>
-              </div>
+
+          {/* Status and Controls */}
+          <div className="flex items-center gap-4">
+            {workflowState === 'running' && currentWorkflow && (
+              <>
+                <div className="flex items-center gap-2 text-green-400">
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  <span className="text-sm">Live</span>
+                </div>
+                <button
+                  onClick={handlePauseWorkflow}
+                  className="px-3 py-1.5 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors flex items-center gap-2"
+                >
+                  <Pause className="w-4 h-4" />
+                  Pause
+                </button>
+                <button
+                  onClick={handleCancelWorkflow}
+                  className="px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center gap-2"
+                >
+                  <StopCircle className="w-4 h-4" />
+                  Cancel
+                </button>
+              </>
             )}
+            
             <div className="flex items-center gap-2 text-gray-400">
               <Users className="w-4 h-4" />
               <span className="text-sm">{user?.first_name || user?.email}</span>
@@ -266,8 +344,44 @@ const WorkflowPage: React.FC = () => {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 p-6">
-        {/* Setup State */}
+      <div className="p-6">
+        {/* Show active workflows if any exist */}
+        {workflowState === 'setup' && activeWorkflows.length > 0 && (
+          <div className="max-w-4xl mx-auto mb-6">
+            <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+              <h2 className="text-lg font-semibold text-white mb-4">Active Workflows</h2>
+              <div className="space-y-3">
+                {activeWorkflows.map((workflow) => (
+                  <div
+                    key={workflow.workflow_id}
+                    className="bg-gray-700 rounded-lg p-4 flex items-center justify-between"
+                  >
+                    <div>
+                      <h3 className="font-medium text-white">{workflow.title}</h3>
+                      <p className="text-sm text-gray-400">
+                        Stage: {workflow.current_stage || 'Processing'}
+                      </p>
+                      {workflow.created_at && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          Started: {new Date(workflow.created_at).toLocaleString()}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => handleResumeWorkflow(workflow)}
+                      className="px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 flex items-center gap-2"
+                    >
+                      <Play className="w-4 h-4" />
+                      Resume
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Setup State - Configuration Form */}
         {workflowState === 'setup' && (
           <div className="max-w-2xl mx-auto">
             <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
@@ -291,8 +405,8 @@ const WorkflowPage: React.FC = () => {
                     type="text"
                     value={workflowConfig.title}
                     onChange={(e) => setWorkflowConfig(prev => ({ ...prev, title: e.target.value }))}
-                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500"
-                    placeholder="e.g., 'AI Revolution in Healthcare'"
+                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500"
+                    placeholder="e.g., 'The Future of AI in Healthcare'"
                     required
                   />
                 </div>
@@ -305,7 +419,7 @@ const WorkflowPage: React.FC = () => {
                   <select
                     value={workflowConfig.contentType}
                     onChange={(e) => setWorkflowConfig(prev => ({ ...prev, contentType: e.target.value }))}
-                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-orange-500"
+                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500"
                   >
                     {contentTypes.map(type => (
                       <option key={type.value} value={type.value}>
@@ -318,20 +432,20 @@ const WorkflowPage: React.FC = () => {
                 {/* Initial Draft */}
                 <div>
                   <label className="block text-sm font-medium text-gray-300 mb-2">
-                    Initial Draft (Optional)
+                    Initial Draft or Requirements (Optional)
                   </label>
                   <textarea
                     value={workflowConfig.initialDraft}
                     onChange={(e) => setWorkflowConfig(prev => ({ ...prev, initialDraft: e.target.value }))}
                     rows={4}
-                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500"
-                    placeholder="Provide any initial content, outline, or requirements..."
+                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500"
+                    placeholder="Provide any initial content, outline, or specific requirements..."
                   />
                 </div>
 
                 {/* Options */}
                 <div className="space-y-3">
-                  <label className="flex items-center gap-3">
+                  <label className="flex items-center gap-3 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={workflowConfig.useProjectDocuments}
@@ -342,9 +456,11 @@ const WorkflowPage: React.FC = () => {
                   </label>
                 </div>
 
+                {/* Error Display */}
                 {error && (
-                  <div className="p-4 bg-red-900/20 border border-red-700 rounded-lg">
-                    <p className="text-red-400 text-sm">{error}</p>
+                  <div className="p-4 bg-red-900/20 border border-red-600/30 rounded-lg flex items-center gap-3">
+                    <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+                    <p className="text-red-300">{error}</p>
                   </div>
                 )}
 
@@ -359,20 +475,11 @@ const WorkflowPage: React.FC = () => {
                   </button>
                   <button
                     type="submit"
-                    disabled={isLoading || !workflowConfig.title.trim()}
+                    disabled={!workflowConfig.title.trim()}
                     className="flex-1 px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center justify-center gap-2"
                   >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Starting Workflow...
-                      </>
-                    ) : (
-                      <>
-                        <Play className="w-4 h-4" />
-                        Start AI Workflow
-                      </>
-                    )}
+                    <Play className="w-4 h-4" />
+                    Start AI Workflow
                   </button>
                 </div>
               </form>
@@ -380,7 +487,18 @@ const WorkflowPage: React.FC = () => {
           </div>
         )}
 
-        {/* Running State - Use ChatWorkflowInterface */}
+        {/* Starting state */}
+        {workflowState === 'starting' && (
+          <div className="flex items-center justify-center h-64">
+            <div className="text-center">
+              <Loader2 className="w-12 h-12 animate-spin text-orange-500 mx-auto mb-4" />
+              <p className="text-lg text-gray-300">Starting workflow...</p>
+              <p className="text-sm text-gray-500 mt-2">Initializing AI agents</p>
+            </div>
+          </div>
+        )}
+
+        {/* Running state - Pass workflow ID to ChatWorkflowInterface */}
         {workflowState === 'running' && currentWorkflow && (
           <ChatWorkflowInterface
             workflowId={currentWorkflow.workflow_id}
@@ -389,7 +507,25 @@ const WorkflowPage: React.FC = () => {
           />
         )}
 
-        {/* Completed State */}
+        {/* Paused state */}
+        {workflowState === 'paused' && (
+          <div className="flex items-center justify-center h-64">
+            <div className="text-center">
+              <Clock className="w-16 h-16 text-yellow-500 mx-auto mb-4" />
+              <h2 className="text-xl font-semibold text-white mb-2">Workflow Paused</h2>
+              <p className="text-gray-300 mb-6">Your workflow has been paused</p>
+              <button
+                onClick={() => setWorkflowState('running')}
+                className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 flex items-center gap-2 mx-auto"
+              >
+                <Play className="w-5 h-5" />
+                Resume Workflow
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Completed state */}
         {workflowState === 'completed' && currentWorkflow && (
           <div className="max-w-4xl mx-auto">
             <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
@@ -407,7 +543,7 @@ const WorkflowPage: React.FC = () => {
                 <div className="mb-6">
                   <h3 className="text-lg font-medium text-white mb-3">Generated Content:</h3>
                   <div className="bg-gray-900 rounded-lg p-4 max-h-96 overflow-y-auto">
-                    <pre className="text-gray-300 whitespace-pre-wrap">{currentWorkflow.final_content}</pre>
+                    <pre className="text-gray-300 whitespace-pre-wrap font-sans">{currentWorkflow.final_content}</pre>
                   </div>
                 </div>
               )}
@@ -432,25 +568,25 @@ const WorkflowPage: React.FC = () => {
 
         {/* Error State */}
         {workflowState === 'error' && (
-          <div className="max-w-2xl mx-auto text-center">
-            <div className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
-              <AlertCircle className="w-8 h-8 text-white" />
-            </div>
-            <h2 className="text-2xl font-bold mb-2">Workflow Failed</h2>
-            <p className="text-gray-400 mb-6">{error || 'An error occurred during content creation'}</p>
-            <div className="flex gap-4 justify-center">
-              <button
-                onClick={handleBackToProject}
-                className="px-6 py-3 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
-              >
-                Back to Project
-              </button>
-              <button
-                onClick={handleStartNewWorkflow}
-                className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
-              >
-                Try Again
-              </button>
+          <div className="max-w-2xl mx-auto">
+            <div className="bg-gray-800 rounded-xl p-6 border border-gray-700 text-center">
+              <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
+              <h2 className="text-xl font-semibold text-white mb-2">Workflow Error</h2>
+              <p className="text-gray-300 mb-6">{error || 'An error occurred during the workflow'}</p>
+              <div className="flex gap-3 justify-center">
+                <button
+                  onClick={handleBackToProject}
+                  className="px-6 py-3 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                >
+                  Back to Project
+                </button>
+                <button
+                  onClick={handleStartNewWorkflow}
+                  className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300"
+                >
+                  Try Again
+                </button>
+              </div>
             </div>
           </div>
         )}

@@ -1,7 +1,7 @@
 // frontend/src/components/workflow/ChatWorkflowInterface.tsx
-// FIXED VERSION - Properly handles chat interface and agent interactions
+// Enhanced version with proper backend integration and human input handling
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Send,
   Bot,
@@ -11,22 +11,22 @@ import {
   AlertCircle,
   Zap,
   MessageCircle,
-  Settings,
   Download,
-  Pause,
-  Play,
-  StopCircle,
-  Users,
   Brain,
   Copy,
-  ExternalLink,
-  AlertTriangle
+  AlertTriangle,
+  WifiOff,
+  Wifi,
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
-import { apiService } from '../../services/api';
+import { apiService, WorkflowResponse, CheckpointResponse } from '../../services/api';
+import AgentProgressDisplay from './AgentProgressDisplay';
 
+// Message types based on backend WebSocket message types
 interface WorkflowMessage {
   id: string;
-  type: 'agent' | 'human' | 'system' | 'checkpoint';
+  type: 'agent' | 'user' | 'system' | 'checkpoint' | 'human_input';
   sender: string;
   content: string;
   timestamp: string;
@@ -35,9 +35,20 @@ interface WorkflowMessage {
     stage?: string;
     workflow_id?: string;
     checkpoint_id?: string;
+    request_id?: string;
+    question_type?: string;
+    options?: string[];
     requires_approval?: boolean;
     message_type?: string;
   };
+}
+
+interface HumanInputRequest {
+  request_id: string;
+  question: string;
+  question_type: 'text' | 'yes_no' | 'multiple_choice' | 'approval';
+  options?: string[];
+  timeout?: number;
 }
 
 interface CheckpointData {
@@ -46,6 +57,7 @@ interface CheckpointData {
   description: string;
   status: 'pending' | 'approved' | 'rejected';
   data: any;
+  content_preview?: string;
 }
 
 interface ChatWorkflowInterfaceProps {
@@ -59,218 +71,391 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   projectId,
   onWorkflowComplete
 }) => {
+  // State management
   const [messages, setMessages] = useState<WorkflowMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [workflowStatus, setWorkflowStatus] = useState<'running' | 'paused' | 'completed' | 'error'>('running');
   const [currentStage, setCurrentStage] = useState<string>('Initializing');
   const [activeAgents, setActiveAgents] = useState<string[]>([]);
   const [pendingCheckpoint, setPendingCheckpoint] = useState<CheckpointData | null>(null);
+  const [pendingHumanInput, setPendingHumanInput] = useState<HumanInputRequest | null>(null);
+  const [humanInputResponse, setHumanInputResponse] = useState<string>('');
   const [isConnected, setIsConnected] = useState(false);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [finalContent, setFinalContent] = useState<string>('');
   const [selectedStage, setSelectedStage] = useState<string>('all');
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [workflowData, setWorkflowData] = useState<WorkflowResponse | null>(null);
+  
+  // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // WebSocket connection for real-time updates
-  useEffect(() => {
-    const connectWebSocket = () => {
-      try {
-        const ws = apiService.createWorkflowWebSocket(workflowId);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          setIsConnected(true);
-          console.log('🔌 Connected to workflow WebSocket');
-          addSystemMessage('🚀 Connected to AI workflow. Agents are starting up...');
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            handleWebSocketMessage(data);
-          } catch (error) {
-            console.error('Error parsing WebSocket message:', error);
-          }
-        };
-
-        ws.onclose = (event) => {
-          setIsConnected(false);
-          console.log('❌ Workflow WebSocket disconnected:', event.code);
-          
-          // Only attempt to reconnect if it wasn't a normal closure
-          if (event.code !== 1000 && workflowStatus !== 'completed') {
-            addSystemMessage('⚠️ Connection lost. Attempting to reconnect...');
-            setTimeout(connectWebSocket, 3000);
-          }
-        };
-
-        ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          setIsConnected(false);
-          addSystemMessage('❌ Connection error. Please check your network.');
-        };
-
-      } catch (error) {
-        console.error('Failed to create WebSocket connection:', error);
-        setIsConnected(false);
-        addSystemMessage('❌ Failed to connect to workflow. Please refresh the page.');
-      }
-    };
-
-    connectWebSocket();
-
-    // Cleanup on unmount
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Component unmounting');
-      }
-    };
-  }, [workflowId, workflowStatus]);
-
-  const addSystemMessage = (content: string) => {
+  // Add system message helper
+  const addSystemMessage = useCallback((content: string) => {
     const message: WorkflowMessage = {
-      id: `sys-${Date.now()}`,
+      id: `sys-${Date.now()}-${Math.random()}`,
       type: 'system',
-      sender: 'System',
       content,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      sender: 'System'
     };
     setMessages(prev => [...prev, message]);
-  };
+  }, []);
 
-  const handleWebSocketMessage = (data: any) => {
-    console.log('📨 Received WebSocket message:', data);
+  // Add agent message helper
+  const addAgentMessage = useCallback((content: string, agentType?: string, stage?: string) => {
+    const message: WorkflowMessage = {
+      id: `agent-${Date.now()}-${Math.random()}`,
+      type: 'agent',
+      content,
+      timestamp: new Date().toISOString(),
+      sender: agentType || 'AI Agent',
+      metadata: {
+        agent_type: agentType,
+        stage: stage,
+        workflow_id: workflowId
+      }
+    };
+    setMessages(prev => [...prev, message]);
+  }, [workflowId]);
+
+  // Handle WebSocket messages based on backend message types
+  const handleWebSocketMessage = useCallback((data: any) => {
+    console.log('📨 WebSocket message received:', data.type, data);
 
     switch (data.type) {
-      case 'agent_message':
-        const agentMessage: WorkflowMessage = {
-          id: data.data.id || `agent-${Date.now()}`,
-          type: 'agent',
-          sender: data.data.agent_type || 'AI Agent',
-          content: data.data.message_content || data.data.content || '',
-          timestamp: data.timestamp || new Date().toISOString(),
-          metadata: {
-            agent_type: data.data.agent_type,
-            stage: data.data.stage,
-            workflow_id: data.data.workflow_id,
-            message_type: data.data.message_type
-          }
-        };
-        setMessages(prev => [...prev, agentMessage]);
-        
-        // Update active agents
-        if (data.data.agent_type && !activeAgents.includes(data.data.agent_type)) {
-          setActiveAgents(prev => [...prev, data.data.agent_type]);
+      case 'connection_established':
+        setIsConnected(true);
+        setReconnectAttempts(0);
+        addSystemMessage(`✅ Connected to workflow (ID: ${data.workflow_id})`);
+        // Request initial status
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'get_status' }));
         }
         break;
 
+      case 'workflow_status':
+        const status = data.status;
+        if (status) {
+          setWorkflowStatus(status.status === 'in_progress' ? 'running' : status.status);
+          if (status.current_stage) {
+            setCurrentStage(status.current_stage);
+          }
+        }
+        break;
+
+      case 'workflow_started':
+        setWorkflowStatus('running');
+        addSystemMessage('🚀 Workflow started successfully');
+        break;
+
       case 'workflow_stage_update':
-        setCurrentStage(data.data.stage || 'Unknown Stage');
-        addSystemMessage(`🔄 Stage Update: ${data.data.stage}`);
+        const stage = data.data?.stage || data.stage;
+        if (stage) {
+          setCurrentStage(stage);
+          if (data.data?.message) {
+            addSystemMessage(`📍 ${stage}: ${data.data.message}`);
+          }
+        }
+        break;
+
+      case 'agent_message':
+        const agentContent = data.data?.message_content || data.data?.content || data.content || '';
+        const agentType = data.data?.agent_type || data.agent_type || data.role;
+        const messageStage = data.data?.stage || data.stage;
+        
+        if (agentContent) {
+          addAgentMessage(agentContent, agentType, messageStage);
+          
+          // Track active agents
+          if (agentType && !activeAgents.includes(agentType)) {
+            setActiveAgents(prev => [...prev, agentType]);
+          }
+        }
+        break;
+
+      case 'agent_output':
+        // Handle console output from agents
+        if (data.content && data.content.trim()) {
+          const agentRole = data.agent_role || data.role || 'Agent';
+          addAgentMessage(data.content, agentRole, data.stage);
+        }
+        break;
+
+      case 'human_input_required':
+        // Handle human input request from CAMEL agents
+        const inputRequest: HumanInputRequest = {
+          request_id: data.request_id,
+          question: data.question,
+          question_type: data.question_type || 'text',
+          options: data.options,
+          timeout: data.timeout
+        };
+        setPendingHumanInput(inputRequest);
+        setWorkflowStatus('paused');
+        addSystemMessage(`❓ Input needed: ${data.question}`);
         break;
 
       case 'checkpoint_required':
+        // Handle checkpoint that needs approval
         const checkpoint: CheckpointData = {
-          id: data.data.checkpoint_id,
-          title: data.data.title || 'Review Required',
-          description: data.data.description || 'Please review the following content.',
+          id: data.data?.checkpoint_id || data.checkpoint_id,
+          title: data.data?.title || data.title || 'Review Required',
+          description: data.data?.description || data.description || 'Please review and approve to continue',
           status: 'pending',
-          data: data.data.data || {}
+          data: data.data?.checkpoint_data || data.data || {},
+          content_preview: data.data?.content_preview
         };
         setPendingCheckpoint(checkpoint);
-        addSystemMessage(`⏸️ Checkpoint reached: ${checkpoint.title}`);
+        setWorkflowStatus('paused');
+        addSystemMessage(`🔍 Checkpoint: ${checkpoint.title}`);
         break;
 
       case 'workflow_completed':
         setWorkflowStatus('completed');
-        setFinalContent(data.data.final_content || '');
-        addSystemMessage('✅ Workflow completed successfully!');
-        
+        const content = data.data?.final_content || data.final_content || '';
+        if (content) {
+          setFinalContent(content);
+        }
+        addSystemMessage('🎉 Workflow completed successfully!');
         if (onWorkflowComplete) {
-          onWorkflowComplete(data.data);
+          onWorkflowComplete(data.data || { final_content: content });
         }
         break;
 
       case 'workflow_error':
         setWorkflowStatus('error');
-        addSystemMessage(`❌ Workflow error: ${data.data.error || 'Unknown error occurred'}`);
+        const errorMsg = data.data?.error || data.error || data.message || 'Unknown error occurred';
+        addSystemMessage(`❌ Error: ${errorMsg}`);
         break;
 
-      case 'system_message':
-        addSystemMessage(data.data.message_content || data.data.content || '');
+      case 'response_acknowledged':
+        // Human response was received by backend
+        console.log('Response acknowledged:', data.request_id);
+        break;
+
+      case 'pong':
+        // Heartbeat response
+        console.log('💓 Pong received');
         break;
 
       default:
         console.log('Unknown message type:', data.type);
     }
-  };
+  }, [addSystemMessage, addAgentMessage, activeAgents, workflowId, onWorkflowComplete]);
 
-  const sendMessage = async () => {
-    if (!inputMessage.trim() || !isConnected) return;
-
-    const userMessage: WorkflowMessage = {
-      id: `user-${Date.now()}`,
-      type: 'human',
-      sender: 'You',
-      content: inputMessage,
-      timestamp: new Date().toISOString()
-    };
-
-    setMessages(prev => [...prev, userMessage]);
+  // WebSocket connection management
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log('WebSocket already connected');
+      return;
+    }
 
     try {
-      // Send message to backend
-      await apiService.sendWorkflowMessage(workflowId, {
-        content: inputMessage,
-        type: 'human_feedback'
-      });
+      setIsReconnecting(true);
+      const ws = apiService.createWorkflowWebSocket(workflowId);
+      wsRef.current = ws;
 
-      setInputMessage('');
+      ws.onopen = () => {
+        setIsConnected(true);
+        setIsReconnecting(false);
+        setReconnectAttempts(0);
+        console.log('🔌 Connected to workflow WebSocket');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleWebSocketMessage(data);
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
+        }
+      };
+
+      ws.onclose = (event) => {
+        setIsConnected(false);
+        console.log('❌ WebSocket disconnected:', event.code, event.reason);
+        
+        // Clear ping interval
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current);
+        }
+        
+        // Attempt to reconnect if not a normal closure and workflow is still running
+        if (event.code !== 1000 && workflowStatus === 'running' && reconnectAttempts < 5) {
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
+          addSystemMessage(`⚠️ Connection lost. Reconnecting in ${delay / 1000}s...`);
+          
+          reconnectTimeoutRef.current = setTimeout(() => {
+            setReconnectAttempts(prev => prev + 1);
+            connectWebSocket();
+          }, delay);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setIsConnected(false);
+        setIsReconnecting(false);
+      };
+
+      // Setup ping interval to keep connection alive
+      pingIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000); // Ping every 30 seconds
+
     } catch (error) {
-      console.error('Failed to send message:', error);
-      addSystemMessage('❌ Failed to send message. Please try again.');
+      console.error('Failed to create WebSocket:', error);
+      setIsReconnecting(false);
+      addSystemMessage('❌ Failed to connect to workflow');
+    }
+  }, [workflowId, workflowStatus, reconnectAttempts, handleWebSocketMessage, addSystemMessage]);
+
+  // Initialize WebSocket connection
+  useEffect(() => {
+    connectWebSocket();
+
+    // Load workflow status via API as backup
+    apiService.getWorkflowStatus(workflowId)
+      .then(workflow => {
+        setWorkflowData(workflow);
+        if (workflow.current_stage) {
+          setCurrentStage(workflow.current_stage);
+        }
+      })
+      .catch(err => console.warn('Failed to load workflow status:', err));
+
+    // Cleanup on unmount
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'Component unmounting');
+      }
+    };
+  }, [connectWebSocket, workflowId]);
+
+  // Handle human input response for CAMEL agents
+  const sendHumanResponse = async () => {
+    if (!pendingHumanInput || !humanInputResponse.trim()) return;
+
+    try {
+      // Send via WebSocket (primary method for CAMEL bridge)
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'human_response',
+          request_id: pendingHumanInput.request_id,
+          response: humanInputResponse,
+          workflow_id: workflowId
+        }));
+        
+        addSystemMessage(`✅ Response sent: ${humanInputResponse}`);
+        setPendingHumanInput(null);
+        setHumanInputResponse('');
+        setWorkflowStatus('running');
+      } else {
+        throw new Error('WebSocket not connected');
+      }
+    } catch (error) {
+      console.error('Failed to send human response:', error);
+      addSystemMessage('❌ Failed to send response. Please check connection.');
     }
   };
 
+  // Handle multiple choice selection
+  const handleMultipleChoiceResponse = (choice: string) => {
+    setHumanInputResponse(choice);
+    // Auto-send for multiple choice
+    if (wsRef.current?.readyState === WebSocket.OPEN && pendingHumanInput) {
+      wsRef.current.send(JSON.stringify({
+        type: 'human_response',
+        request_id: pendingHumanInput.request_id,
+        response: choice,
+        workflow_id: workflowId
+      }));
+      
+      addSystemMessage(`✅ Selected: ${choice}`);
+      setPendingHumanInput(null);
+      setHumanInputResponse('');
+      setWorkflowStatus('running');
+    }
+  };
+
+  // Handle checkpoint approval
   const handleCheckpointApproval = async (approved: boolean, feedback?: string) => {
     if (!pendingCheckpoint) return;
 
     try {
-      await apiService.respondToCheckpoint(workflowId, pendingCheckpoint.id, {
-        approved,
-        feedback
-      });
-
+      // Use the proper API endpoint
+      if (approved) {
+        await apiService.approveCheckpoint(pendingCheckpoint.id, {
+          feedback: feedback || ''
+        });
+        addSystemMessage(`✅ Checkpoint approved${feedback ? `: ${feedback}` : ''}`);
+      } else {
+        await apiService.rejectCheckpoint(pendingCheckpoint.id, {
+          feedback: feedback || ''
+        });
+        addSystemMessage(`❌ Checkpoint rejected${feedback ? `: ${feedback}` : ''}`);
+      }
+      
       setPendingCheckpoint(null);
-      addSystemMessage(
-        approved 
-          ? '✅ Checkpoint approved. Workflow continuing...' 
-          : '🔄 Checkpoint rejected. Agents will revise and try again...'
-      );
+      setWorkflowStatus('running');
     } catch (error) {
       console.error('Failed to respond to checkpoint:', error);
       addSystemMessage('❌ Failed to respond to checkpoint. Please try again.');
     }
   };
 
+  // Handle manual reconnection
+  const handleReconnect = () => {
+    setReconnectAttempts(0);
+    connectWebSocket();
+  };
+
+  // Copy content to clipboard
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     addSystemMessage('📋 Content copied to clipboard!');
   };
 
-  // Agent types and their colors
-  const agentColors: { [key: string]: string } = {
-    'coordinator': 'from-blue-500 to-blue-600',
-    'style_analysis': 'from-purple-500 to-purple-600',
-    'content_planning': 'from-indigo-500 to-indigo-600',
-    'content_generation': 'from-green-500 to-green-600',
-    'editing_qa': 'from-yellow-500 to-yellow-600',
-    'default': 'from-gray-500 to-gray-600'
+  // Send user message (for general workflow communication)
+  const sendUserMessage = async () => {
+    if (!inputMessage.trim() || !isConnected) return;
+
+    const userMessage: WorkflowMessage = {
+      id: `user-${Date.now()}`,
+      type: 'user',
+      sender: 'You',
+      content: inputMessage,
+      timestamp: new Date().toISOString()
+    };
+
+    setMessages(prev => [...prev, userMessage]);
+    setInputMessage('');
+
+    // Send via WebSocket
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'user_message',
+        content: inputMessage,
+        workflow_id: workflowId
+      }));
+    }
   };
 
   // Filter messages by stage
@@ -279,249 +464,344 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     : messages.filter(msg => 
         msg.metadata?.stage === selectedStage || 
         msg.type === 'system' || 
-        msg.type === 'human'
+        msg.type === 'user'
       );
 
+  // Agent colors for visual distinction
+  const agentColors: { [key: string]: string } = {
+    'coordinator': 'from-blue-500 to-blue-600',
+    'style_analysis': 'from-purple-500 to-purple-600',
+    'content_planning': 'from-indigo-500 to-indigo-600',
+    'content_generation': 'from-green-500 to-green-600',
+    'editing_qa': 'from-yellow-500 to-yellow-600',
+    'Content Creator': 'from-green-500 to-green-600',
+    'Content Strategist': 'from-purple-500 to-purple-600',
+    'default': 'from-gray-500 to-gray-600'
+  };
+
   // Available stages for filtering
-  const stages = [
-    { id: 'all', label: 'All Messages', color: 'from-gray-500 to-gray-600' },
-    { id: 'document_processing', label: 'Document Processing', color: 'from-blue-500 to-blue-600' },
-    { id: 'style_analysis', label: 'Style Analysis', color: 'from-purple-500 to-purple-600' },
-    { id: 'content_planning', label: 'Content Planning', color: 'from-indigo-500 to-indigo-600' },
-    { id: 'content_generation', label: 'Content Generation', color: 'from-green-500 to-green-600' },
-    { id: 'editing_qa', label: 'Editing & QA', color: 'from-yellow-500 to-yellow-600' },
-  ];
+  const stages = Array.from(new Set(messages
+    .map(m => m.metadata?.stage)
+    .filter(Boolean)
+  ));
 
   return (
-    <div className="flex h-full bg-gray-900">
-      {/* Sidebar */}
-      <div className="w-80 bg-gray-800 border-r border-gray-700 flex flex-col">
-        {/* Sidebar Header */}
-        <div className="p-4 border-b border-gray-700">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-violet-600 rounded-lg flex items-center justify-center">
-              <Brain className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h3 className="font-semibold text-white">AI Workflow</h3>
-              <p className="text-xs text-gray-400">Multi-Agent Chat</p>
-            </div>
-          </div>
-          
-          {/* Status Indicator */}
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${
-              workflowStatus === 'running' ? 'bg-green-400 animate-pulse' :
-              workflowStatus === 'completed' ? 'bg-blue-400' :
-              workflowStatus === 'error' ? 'bg-red-400' : 'bg-gray-400'
-            }`} />
-            <span className="text-sm text-gray-300">
-              {workflowStatus === 'running' ? `Running: ${currentStage}` :
-               workflowStatus === 'completed' ? 'Completed' :
-               workflowStatus === 'error' ? 'Error' : 'Initializing'}
-            </span>
-          </div>
-        </div>
-
-        {/* Stage Filter */}
-        <div className="p-4 border-b border-gray-700">
-          <h3 className="text-sm font-medium text-gray-300 mb-3">
-            {selectedStage === 'all' ? 'Project Chat' : 'Chat Sessions'}
-          </h3>
-          
-          <div className="space-y-2 mb-6">
-            {stages.map((stage) => (
-              <button
-                key={stage.id}
-                onClick={() => setSelectedStage(stage.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-300 ${
-                  selectedStage === stage.id
-                    ? 'bg-gradient-to-r from-orange-500/20 to-violet-600/20 text-orange-500 border border-orange-500/30'
-                    : 'text-gray-300 hover:text-white hover:bg-gray-700'
-                }`}
-              >
-                <div className={`w-3 h-3 rounded-full bg-gradient-to-r ${stage.color}`} />
-                <span className="text-sm">{stage.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Active Agents */}
-        <div className="p-4 border-b border-gray-700">
-          <h4 className="text-sm font-medium text-gray-300 mb-3">Active Agents</h4>
-          <div className="space-y-2">
-            {activeAgents.length > 0 ? (
-              activeAgents.map((agent) => (
-                <div key={agent} className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full bg-gradient-to-r ${agentColors[agent] || agentColors.default}`} />
-                  <span className="text-sm text-gray-400 capitalize">{agent.replace('_', ' ')}</span>
-                </div>
-              ))
-            ) : (
-              <p className="text-xs text-gray-500">No active agents</p>
-            )}
-          </div>
-        </div>
-
-        {/* Connection Status */}
-        <div className="mt-auto p-4 border-t border-gray-700">
-          <div className="flex items-center gap-2 text-xs">
-            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
-            <span className="text-gray-400">
-              {isConnected ? 'Connected' : 'Disconnected'}
-            </span>
-          </div>
-        </div>
-      </div>
-
+    <div className="flex h-[calc(100vh-200px)] gap-6">
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {filteredMessages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex gap-3 ${msg.type === 'human' ? 'justify-end' : 'justify-start'}`}
-            >
-              {msg.type !== 'human' && (
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                  msg.type === 'agent' ? `bg-gradient-to-r ${agentColors[msg.metadata?.agent_type || 'default']}` : 'bg-gray-500'
-                }`}>
-                  {msg.type === 'agent' ? (
-                    <Bot className="w-4 h-4 text-white" />
-                  ) : (
-                    <Clock className="w-4 h-4 text-white" />
-                  )}
-                </div>
+      <div className="flex-1 flex flex-col bg-gray-800 rounded-xl">
+        {/* Chat Header */}
+        <div className="bg-gray-700 rounded-t-xl px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              {isConnected ? (
+                <Wifi className="w-5 h-5 text-green-500" />
+              ) : isReconnecting ? (
+                <RefreshCw className="w-5 h-5 text-yellow-500 animate-spin" />
+              ) : (
+                <WifiOff className="w-5 h-5 text-red-500" />
               )}
-              
-              <div className={`max-w-2xl ${msg.type === 'human' ? 'bg-gradient-to-r from-orange-500 to-violet-600' : 'bg-gray-800'} rounded-lg p-4`}>
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-sm font-medium text-white">{msg.sender}</span>
-                  {msg.metadata?.stage && (
-                    <span className="text-xs bg-gray-700 text-gray-300 px-2 py-1 rounded">
-                      {msg.metadata.stage.replace('_', ' ')}
-                    </span>
-                  )}
-                  <span className="text-xs text-gray-400 ml-auto">
-                    {new Date(msg.timestamp).toLocaleTimeString()}
-                  </span>
-                </div>
-                <div className="text-gray-100 whitespace-pre-wrap">{msg.content}</div>
-              </div>
-
-              {msg.type === 'human' && (
-                <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
-                  <User className="w-4 h-4 text-white" />
-                </div>
-              )}
+              <span className="text-sm text-gray-300">
+                {isConnected ? 'Connected' : isReconnecting ? 'Reconnecting...' : 'Disconnected'}
+              </span>
             </div>
-          ))}
+            <div className="h-4 w-px bg-gray-600" />
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${
+                workflowStatus === 'running' ? 'bg-green-500 animate-pulse' :
+                workflowStatus === 'paused' ? 'bg-yellow-500' :
+                workflowStatus === 'completed' ? 'bg-blue-500' :
+                'bg-red-500'
+              }`} />
+              <span className="text-sm text-gray-300 capitalize">{workflowStatus}</span>
+            </div>
+            <div className="h-4 w-px bg-gray-600" />
+            <span className="text-sm text-gray-400">{currentStage}</span>
+          </div>
+          
+          {!isConnected && !isReconnecting && (
+            <button
+              onClick={handleReconnect}
+              className="px-3 py-1 bg-orange-600 text-white text-sm rounded-lg hover:bg-orange-700 transition-colors flex items-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Reconnect
+            </button>
+          )}
+        </div>
+
+        {/* Messages Area */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {filteredMessages.length === 0 ? (
+            <div className="text-center py-12">
+              <Brain className="w-12 h-12 text-gray-600 mx-auto mb-4" />
+              <p className="text-gray-400">Workflow is initializing...</p>
+              <p className="text-sm text-gray-500 mt-2">Agent messages will appear here</p>
+            </div>
+          ) : (
+            filteredMessages.map((message) => (
+              <div
+                key={message.id}
+                className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div className={`max-w-[70%] ${
+                  message.type === 'user' 
+                    ? 'bg-gradient-to-r from-orange-500 to-violet-600 text-white' 
+                    : message.type === 'system'
+                    ? 'bg-gray-700 text-gray-300'
+                    : message.type === 'checkpoint'
+                    ? 'bg-yellow-900/30 border border-yellow-600/30 text-yellow-300'
+                    : 'bg-gray-700 text-white'
+                } rounded-lg p-4`}>
+                  <div className="flex items-start gap-3">
+                    {message.type === 'agent' && <Bot className="w-5 h-5 mt-1 flex-shrink-0" />}
+                    {message.type === 'user' && <User className="w-5 h-5 mt-1 flex-shrink-0" />}
+                    {message.type === 'system' && <Zap className="w-5 h-5 mt-1 flex-shrink-0" />}
+                    
+                    <div className="flex-1">
+                      {message.sender && (
+                        <p className="text-xs font-medium mb-1 opacity-80">{message.sender}</p>
+                      )}
+                      <p className="whitespace-pre-wrap">{message.content}</p>
+                      {message.metadata?.stage && (
+                        <p className="text-xs mt-2 opacity-60">Stage: {message.metadata.stage}</p>
+                      )}
+                      <p className="text-xs mt-2 opacity-60">
+                        {new Date(message.timestamp).toLocaleTimeString()}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Checkpoint Approval */}
-        {pendingCheckpoint && (
+        {/* Human Input Request UI */}
+        {pendingHumanInput && (
           <div className="border-t border-gray-700 p-4 bg-yellow-900/20">
-            <div className="max-w-2xl mx-auto">
-              <div className="flex items-center gap-2 mb-3">
-                <AlertTriangle className="w-5 h-5 text-yellow-400" />
-                <h4 className="font-medium text-white">{pendingCheckpoint.title}</h4>
-              </div>
-              <p className="text-gray-300 text-sm mb-4">{pendingCheckpoint.description}</p>
-              
-              {pendingCheckpoint.data && (
-                <div className="bg-gray-900 rounded-lg p-3 mb-4 max-h-32 overflow-y-auto">
-                  <pre className="text-xs text-gray-400 whitespace-pre-wrap">
-                    {JSON.stringify(pendingCheckpoint.data, null, 2)}
-                  </pre>
-                </div>
-              )}
-              
+            <div className="mb-3">
+              <p className="text-yellow-300 font-medium mb-2 flex items-center gap-2">
+                <AlertCircle className="w-5 h-5" />
+                Response Required
+              </p>
+              <p className="text-gray-300">{pendingHumanInput.question}</p>
+            </div>
+            
+            {/* Yes/No Questions */}
+            {pendingHumanInput.question_type === 'yes_no' ? (
               <div className="flex gap-3">
                 <button
-                  onClick={() => handleCheckpointApproval(true)}
-                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
+                  onClick={() => handleMultipleChoiceResponse('yes')}
+                  className="flex-1 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
                 >
-                  <CheckCircle className="w-4 h-4" />
-                  Approve
+                  Yes
                 </button>
                 <button
-                  onClick={() => handleCheckpointApproval(false)}
-                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center gap-2"
+                  onClick={() => handleMultipleChoiceResponse('no')}
+                  className="flex-1 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
                 >
-                  <AlertTriangle className="w-4 h-4" />
-                  Request Changes
+                  No
                 </button>
               </div>
+            ) : pendingHumanInput.question_type === 'multiple_choice' && pendingHumanInput.options ? (
+              // Multiple Choice Questions
+              <div className="space-y-2">
+                {pendingHumanInput.options.map((option, index) => (
+                  <button
+                    key={index}
+                    onClick={() => handleMultipleChoiceResponse(option)}
+                    className="w-full py-2 px-4 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors text-left"
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              // Text Input Questions
+              <div className="flex gap-3">
+                <input
+                  type="text"
+                  value={humanInputResponse}
+                  onChange={(e) => setHumanInputResponse(e.target.value)}
+                  placeholder="Type your response..."
+                  className="flex-1 px-4 py-2 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  onKeyPress={(e) => e.key === 'Enter' && sendHumanResponse()}
+                  autoFocus
+                />
+                <button
+                  onClick={sendHumanResponse}
+                  disabled={!humanInputResponse.trim()}
+                  className="px-6 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Send
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Checkpoint Approval UI */}
+        {pendingCheckpoint && (
+          <div className="border-t border-gray-700 p-4 bg-blue-900/20">
+            <div className="mb-3">
+              <p className="text-blue-300 font-medium mb-2 flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5" />
+                Checkpoint Review
+              </p>
+              <p className="text-white font-semibold">{pendingCheckpoint.title}</p>
+              <p className="text-gray-300 mt-1">{pendingCheckpoint.description}</p>
+            </div>
+            
+            {pendingCheckpoint.content_preview && (
+              <div className="bg-gray-900 rounded-lg p-3 mb-4 max-h-32 overflow-y-auto">
+                <pre className="text-xs text-gray-400 whitespace-pre-wrap">
+                  {pendingCheckpoint.content_preview}
+                </pre>
+              </div>
+            )}
+            
+            <div className="flex gap-3">
+              <button
+                onClick={() => handleCheckpointApproval(true)}
+                className="flex-1 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+              >
+                <CheckCircle className="w-5 h-5" />
+                Approve
+              </button>
+              <button
+                onClick={() => handleCheckpointApproval(false)}
+                className="flex-1 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center justify-center gap-2"
+              >
+                <AlertCircle className="w-5 h-5" />
+                Request Changes
+              </button>
             </div>
           </div>
         )}
 
-        {/* Input Area */}
-        {workflowStatus === 'running' && !pendingCheckpoint && (
+        {/* Regular Input Area */}
+        {workflowStatus === 'running' && !pendingHumanInput && !pendingCheckpoint && (
           <div className="border-t border-gray-700 p-4">
             <div className="flex gap-3">
               <input
                 type="text"
                 value={inputMessage}
                 onChange={(e) => setInputMessage(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                placeholder={isConnected ? "Send feedback to agents..." : "Connecting..."}
+                placeholder="Send a message to the workflow..."
+                className="flex-1 px-4 py-3 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500"
                 disabled={!isConnected}
-                className="flex-1 px-4 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-orange-500 disabled:opacity-50"
+                onKeyPress={(e) => e.key === 'Enter' && sendUserMessage()}
               />
               <button
-                onClick={sendMessage}
-                disabled={!inputMessage.trim() || !isConnected}
-                className="px-4 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={sendUserMessage}
+                disabled={!isConnected || !inputMessage.trim()}
+                className="px-6 py-3 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg font-medium hover:from-orange-600 hover:to-violet-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
-                <Send className="w-4 h-4" />
+                <Send className="w-5 h-5" />
+                Send
               </button>
             </div>
-            
-            {!isConnected && (
-              <p className="text-xs text-red-400 mt-2">
-                Connection lost. Attempting to reconnect...
-              </p>
-            )}
           </div>
         )}
 
-        {/* Completion Actions */}
+        {/* Completion UI */}
         {workflowStatus === 'completed' && (
           <div className="border-t border-gray-700 p-4 bg-green-900/20">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2 text-green-400">
                 <CheckCircle className="w-5 h-5" />
                 <span className="font-medium">Workflow Completed Successfully!</span>
               </div>
-              <div className="flex gap-3">
-                {finalContent && (
-                  <button 
-                    onClick={() => copyToClipboard(finalContent)}
-                    className="flex items-center gap-2 px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors"
-                  >
-                    <Copy className="w-4 h-4" />
-                    Copy Content
-                  </button>
-                )}
-                <button className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-orange-500 to-violet-600 text-white rounded-lg hover:from-orange-600 hover:to-violet-700 transition-all duration-300">
-                  <Zap className="w-4 h-4" />
-                  Start New Workflow
+              {finalContent && (
+                <button 
+                  onClick={() => copyToClipboard(finalContent)}
+                  className="px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition-colors flex items-center gap-2"
+                >
+                  <Copy className="w-4 h-4" />
+                  Copy Content
                 </button>
-              </div>
+              )}
             </div>
             
             {finalContent && (
-              <div className="mt-4 p-4 bg-gray-800 rounded-lg">
+              <div className="bg-gray-800 rounded-lg p-4">
                 <h4 className="font-medium text-white mb-2">Generated Content:</h4>
-                <div className="text-sm text-gray-300 bg-gray-900 p-3 rounded max-h-40 overflow-y-auto">
-                  <pre className="whitespace-pre-wrap">{finalContent}</pre>
+                <div className="bg-gray-900 p-3 rounded max-h-60 overflow-y-auto">
+                  <pre className="text-sm text-gray-300 whitespace-pre-wrap">{finalContent}</pre>
                 </div>
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* Side Panel */}
+      <div className="w-80 space-y-4">
+        {/* Agent Progress Display */}
+        <AgentProgressDisplay
+          currentStage={currentStage}
+          activeAgents={activeAgents}
+          workflowStatus={workflowStatus}
+        />
+
+        {/* Stage Filter */}
+        {stages.length > 0 && (
+          <div className="bg-gray-800 rounded-xl p-4">
+            <h3 className="text-white font-semibold mb-3">Filter by Stage</h3>
+            <select
+              value={selectedStage}
+              onChange={(e) => setSelectedStage(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500"
+            >
+              <option value="all">All Stages</option>
+              {stages.map(stage => (
+                <option key={stage} value={stage}>{stage}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Active Agents List */}
+        {activeAgents.length > 0 && (
+          <div className="bg-gray-800 rounded-xl p-4">
+            <h3 className="text-white font-semibold mb-3">Active Agents</h3>
+            <div className="space-y-2">
+              {activeAgents.map(agent => (
+                <div key={agent} className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full bg-gradient-to-r ${agentColors[agent] || agentColors.default}`} />
+                  <span className="text-sm text-gray-300">{agent}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Workflow Info */}
+        {workflowData && (
+          <div className="bg-gray-800 rounded-xl p-4">
+            <h3 className="text-white font-semibold mb-3">Workflow Info</h3>
+            <div className="space-y-2 text-sm">
+              <div>
+                <span className="text-gray-400">Title:</span>
+                <p className="text-gray-300">{workflowData.title}</p>
+              </div>
+              <div>
+                <span className="text-gray-400">Type:</span>
+                <p className="text-gray-300">{workflowData.content_type}</p>
+              </div>
+              {workflowData.progress !== undefined && (
+                <div>
+                  <span className="text-gray-400">Progress:</span>
+                  <div className="mt-1 bg-gray-700 rounded-full h-2">
+                    <div 
+                      className="bg-gradient-to-r from-orange-500 to-violet-600 h-2 rounded-full transition-all"
+                      style={{ width: `${workflowData.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
