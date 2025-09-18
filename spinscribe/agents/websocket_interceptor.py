@@ -60,7 +60,7 @@ class AgentRole(Enum):
     EDITOR = "Editor"
     TASK_PLANNER = "Task Planner"
     COORDINATOR = "Coordinator"
-    CHECKPOINT_MANAGER = "Checkpoint Manager"  # Added for checkpoint handling
+    CHECKPOINT_MANAGER = "Checkpoint Manager"
     UNKNOWN = "Unknown Agent"
 
 
@@ -116,6 +116,7 @@ class WebSocketMessageInterceptor:
     ) -> None:
         """
         Intercept and broadcast a CAMEL agent message.
+        FIXED: Using message_content field consistently
         
         Args:
             message: CAMEL BaseMessage or dict containing message data
@@ -130,7 +131,6 @@ class WebSocketMessageInterceptor:
             # Extract message content based on type
             if CAMEL_AVAILABLE and BaseMessage and isinstance(message, BaseMessage):
                 content = message.content
-                # FIXED: Use role_name if available, otherwise use agent_type
                 role = getattr(message, 'role_name', agent_type)
                 message_info = getattr(message, 'info', {})
             elif isinstance(message, dict):
@@ -148,21 +148,21 @@ class WebSocketMessageInterceptor:
             # Identify agent role
             agent_role = self._identify_agent_role(agent_type)
             
-            # Build message payload
+            # CRITICAL FIX: Build message payload with message_content field
             message_data = {
                 "agent_type": agent_type,
                 "agent_role": agent_role.value,
-                "content": content,
+                "message_content": content,  # CHANGED from "content" to "message_content"
                 "role": role,
                 "message_type": message_type.value,
                 "stage": stage or self._infer_stage(content),
                 "sequence_number": self.message_count,
                 "timestamp": current_time.isoformat(),
                 "elapsed_time": (current_time - self.start_time).total_seconds(),
+                "workflow_id": self.workflow_id,
                 "metadata": {
                     **(metadata or {}),
                     **message_info,
-                    "workflow_id": self.workflow_id,
                     "chat_id": self.chat_id
                 }
             }
@@ -221,6 +221,7 @@ class WebSocketMessageInterceptor:
             "total_messages": self.message_count,
             "duration": (datetime.now(timezone.utc) - self.start_time).total_seconds(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "workflow_id": self.workflow_id,
             "metadata": metadata or {}
         }
         
@@ -318,6 +319,7 @@ class WebSocketMessageInterceptor:
     async def _send_to_chat(self, message_data: Dict[str, Any]) -> None:
         """
         Send agent message to associated chat.
+        FIXED: Using message_content field
         
         Args:
             message_data: Message data to send to chat
@@ -326,17 +328,17 @@ class WebSocketMessageInterceptor:
             return
         
         try:
-            # Format for chat display
+            # Format for chat display with message_content field
             chat_message = {
+                "type": "agent_message",
                 "sender_type": "agent",
                 "agent_type": message_data["agent_type"],
-                "message_content": message_data["content"],
+                "message_content": message_data["message_content"],  # Use message_content
                 "message_type": "agent_update",
-                "metadata": {
-                    "stage": message_data["stage"],
-                    "workflow_id": self.workflow_id,
-                    "timestamp": message_data["timestamp"]
-                }
+                "stage": message_data["stage"],
+                "workflow_id": self.workflow_id,
+                "timestamp": message_data["timestamp"],
+                "metadata": message_data.get("metadata", {})
             }
             
             # Use bridge method if available
@@ -366,7 +368,6 @@ class WebSocketMessageInterceptor:
             if "Question:" in content:
                 question = content.split("Question:")[1].strip()
             
-            # FIXED: Use get() with default value for safe dictionary access
             agent_requesting = message_data.get("agent_type", "Unknown Agent")
             stage = message_data.get("stage", "unknown")
             timestamp = message_data.get("timestamp", datetime.now(timezone.utc).isoformat())
@@ -390,7 +391,6 @@ class WebSocketMessageInterceptor:
                 await self.bridge.broadcast_to_workflow(self.workflow_id, interaction_data)
                 
                 if self.chat_id and hasattr(self.bridge, 'broadcast_to_chat'):
-                    # FIXED: Use get() for safe access
                     agent_role = message_data.get('agent_role', 'Agent')
                     await self.bridge.broadcast_to_chat(self.chat_id, {
                         **interaction_data,
@@ -409,6 +409,7 @@ class WebSocketMessageInterceptor:
     ) -> None:
         """
         Handle checkpoint approval requests.
+        FIXED: Using checkpoint_required type instead of checkpoint_approval_required
         
         Args:
             content: Checkpoint content
@@ -417,7 +418,6 @@ class WebSocketMessageInterceptor:
         try:
             checkpoint_id = f"checkpoint_{uuid.uuid4().hex[:8]}"
             
-            # FIXED: Safe dictionary access using get() with defaults
             agent_type = message_data.get("agent_type", "Checkpoint Manager")
             agent_role = message_data.get("agent_role", "Checkpoint Manager")
             stage = message_data.get("stage", "checkpoint_approval")
@@ -425,53 +425,65 @@ class WebSocketMessageInterceptor:
             
             # Handle different checkpoint data structures
             if "checkpoint_data" in message_data:
-                # If checkpoint_data is provided, extract from it
                 checkpoint_info = message_data.get("checkpoint_data", {})
                 title = checkpoint_info.get("title", f"Approval needed from {agent_role}")
-                description = checkpoint_info.get("description", "")
+                description = checkpoint_info.get("description", "Please review and approve")
                 priority = checkpoint_info.get("priority", "medium")
-                checkpoint_type = checkpoint_info.get("checkpoint_type", "unknown")
-                # Override checkpoint_id if provided
+                checkpoint_type = checkpoint_info.get("checkpoint_type", "review")
                 checkpoint_id = checkpoint_info.get("checkpoint_id", checkpoint_id)
+                content_preview = checkpoint_info.get("content", content)[:500]
             else:
-                # Build from message_data directly
                 title = message_data.get("title", f"Approval needed from {agent_role}")
-                description = message_data.get("description", "")
+                description = message_data.get("description", "Please review and approve")
                 priority = message_data.get("priority", "medium")
-                checkpoint_type = message_data.get("checkpoint_type", "unknown")
+                checkpoint_type = message_data.get("checkpoint_type", "review")
+                content_preview = content[:500] if content else ""
             
+            # CRITICAL FIX: Use "checkpoint_required" type for frontend compatibility
             checkpoint_data = {
-                "type": "checkpoint_approval_required",
+                "type": "checkpoint_required",  # CHANGED from "checkpoint_approval_required"
                 "checkpoint_id": checkpoint_id,
                 "title": title,
                 "description": description,
-                "content": content,
+                "content_preview": content_preview,  # Add content preview for UI display
+                "status": "pending",  # Add status field
                 "agent_type": agent_type,
-                "agent_role": agent_role,  # Include agent_role in the checkpoint data
+                "agent_role": agent_role,
                 "stage": stage,
                 "priority": priority,
                 "checkpoint_type": checkpoint_type,
                 "workflow_id": self.workflow_id,
-                "chat_id": self.chat_id,
                 "timestamp": timestamp,
                 "requires_approval": True
             }
             
-            # Broadcast checkpoint
+            # Broadcast checkpoint using the bridge's dedicated method
             if self.bridge:
                 if hasattr(self.bridge, 'broadcast_checkpoint_notification'):
+                    # Pass the checkpoint data without the type field (method will add it)
                     await self.bridge.broadcast_checkpoint_notification(
                         workflow_id=self.workflow_id,
-                        checkpoint_data=checkpoint_data
+                        checkpoint_data={
+                            "checkpoint_id": checkpoint_id,
+                            "title": title,
+                            "description": description,
+                            "content": content_preview,
+                            "status": "pending",
+                            "agent_type": agent_type,
+                            "agent_role": agent_role,
+                            "stage": stage,
+                            "priority": priority,
+                            "checkpoint_type": checkpoint_type
+                        }
                     )
                 else:
+                    # Fallback to direct broadcast
                     await self.bridge.broadcast_to_workflow(self.workflow_id, checkpoint_data)
             
             logger.info(f"🛑 Checkpoint created: {checkpoint_id}")
             
         except Exception as e:
             logger.error(f"Error handling checkpoint: {e}", exc_info=True)
-            # Don't re-raise the error to prevent breaking the workflow
     
     async def intercept_checkpoint(self, checkpoint_data: Dict[str, Any]) -> None:
         """
@@ -482,7 +494,6 @@ class WebSocketMessageInterceptor:
             checkpoint_data: Dictionary containing checkpoint information
         """
         try:
-            # FIXED: Safe extraction with defaults
             agent_role = checkpoint_data.get('agent_role', 'Checkpoint Manager')
             agent_type = checkpoint_data.get('agent_type', 'Checkpoint Manager')
             content = checkpoint_data.get('content', '')
@@ -551,7 +562,6 @@ class WebSocketMessageInterceptor:
         """
         breakdown = {}
         for msg in self.agent_message_history:
-            # FIXED: Safe dictionary access with default value
             agent = msg.get("agent_role", "Unknown")
             breakdown[agent] = breakdown.get(agent, 0) + 1
         return breakdown
