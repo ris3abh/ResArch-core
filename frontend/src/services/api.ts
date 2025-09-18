@@ -607,6 +607,127 @@ class ApiService {
   // WEBSOCKET METHODS
   // ========================================
 
+  private handleWebSocketReconnection(workflowId: string, wsUrl: string, attemptNumber: number): void {
+    const maxReconnectAttempts = 5;
+    const nextAttempt = attemptNumber + 1;
+    
+    if (nextAttempt > maxReconnectAttempts) {
+      console.error(`❌ Max reconnection attempts reached for workflow ${workflowId}`);
+      window.dispatchEvent(new CustomEvent('websocket-failed', { 
+        detail: { workflowId, reason: 'Max reconnection attempts exceeded' }
+      }));
+      return;
+    }
+    
+    // Calculate exponential backoff delay
+    const delay = Math.min(1000 * Math.pow(2, attemptNumber), 30000);
+    
+    console.log(`🔄 Reconnecting WebSocket for workflow ${workflowId} (attempt ${nextAttempt}/${maxReconnectAttempts}) in ${delay}ms...`);
+    
+    setTimeout(() => {
+      // Check if a connection hasn't already been re-established
+      const existing = this.activeWebSockets.get(workflowId);
+      if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+        console.log(`✅ WebSocket already reconnected for workflow ${workflowId}`);
+        return;
+      }
+      
+      // Create new WebSocket connection
+      const ws = new WebSocket(wsUrl);
+      this.activeWebSockets.set(workflowId, ws);
+      
+      let connectionTimeout: NodeJS.Timeout | null = null;
+      let heartbeatInterval: NodeJS.Timeout | null = null;
+      
+      // Set connection timeout
+      connectionTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          console.error(`⏱️ Reconnection timeout for workflow ${workflowId}`);
+          ws.close(1006, 'Connection timeout');
+          this.handleWebSocketReconnection(workflowId, wsUrl, nextAttempt);
+        }
+      }, 10000);
+      
+      ws.onopen = () => {
+        console.log(`✅ WebSocket reconnected for workflow ${workflowId}`);
+        
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
+        
+        // Set up heartbeat
+        heartbeatInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+          } else {
+            if (heartbeatInterval) {
+              clearInterval(heartbeatInterval);
+              heartbeatInterval = null;
+            }
+          }
+        }, 25000);
+        
+        // Notify successful reconnection
+        window.dispatchEvent(new CustomEvent('websocket-reconnected', { 
+          detail: { workflowId }
+        }));
+        
+        // Request current status
+        ws.send(JSON.stringify({ type: 'get_status' }));
+      };
+      
+      ws.onerror = (error) => {
+        console.error(`❌ Reconnection error for workflow ${workflowId}:`, error);
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+      };
+      
+      ws.onclose = (event) => {
+        console.log(`🔌 Reconnection closed for workflow ${workflowId}. Code: ${event.code}`);
+        
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+        
+        if (this.activeWebSockets.get(workflowId) === ws) {
+          this.activeWebSockets.delete(workflowId);
+          
+          // Continue reconnection attempts for abnormal closures
+          if (event.code !== 1000 && event.code !== 1001 && nextAttempt < maxReconnectAttempts) {
+            this.handleWebSocketReconnection(workflowId, wsUrl, nextAttempt);
+          }
+        }
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log(`📨 Reconnected message for workflow ${workflowId}:`, data.type);
+          
+          if (data.type === 'pong') {
+            console.log(`💓 Heartbeat acknowledged for workflow ${workflowId}`);
+          } else if (data.type === 'heartbeat') {
+            ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+          }
+        } catch (error) {
+          console.error('Failed to parse WebSocket message:', error);
+        }
+      };
+    }, delay);
+  }
+
   createWorkflowWebSocket(workflowId: string): WebSocket {
     // Check if there's already an active connection
     const existing = this.activeWebSockets.get(workflowId);
@@ -630,20 +751,88 @@ class ApiService {
     // Store the connection immediately to prevent duplicates
     this.activeWebSockets.set(workflowId, ws);
     
+    // Connection timeout handling
+    let connectionTimeout: NodeJS.Timeout | null = null;
+    let heartbeatInterval: NodeJS.Timeout | null = null;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    
+    // Set connection timeout (10 seconds to establish connection)
+    connectionTimeout = setTimeout(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        console.error(`⏱️ WebSocket connection timeout for workflow ${workflowId}`);
+        ws.close(1006, 'Connection timeout');
+        // Trigger reconnection
+        this.handleWebSocketReconnection(workflowId, wsUrl, 0);
+      }
+    }, 10000);
+    
     // Set up event handlers
     ws.onopen = () => {
       console.log(`✅ WebSocket connected for workflow ${workflowId}`);
+      
+      // Clear connection timeout
+      if (connectionTimeout) {
+        clearTimeout(connectionTimeout);
+        connectionTimeout = null;
+      }
+      
+      // Reset reconnect attempts
+      reconnectAttempts = 0;
+      
+      // Set up heartbeat mechanism
+      heartbeatInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+          console.log(`💓 Heartbeat sent for workflow ${workflowId}`);
+        } else {
+          // Connection lost, clear interval
+          if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+          }
+        }
+      }, 25000); // Send heartbeat every 25 seconds
+      
+      // Send initial status request
+      ws.send(JSON.stringify({ type: 'get_status' }));
     };
     
     ws.onerror = (error) => {
       console.error(`❌ WebSocket error for workflow ${workflowId}:`, error);
+      
+      // Clear timeouts and intervals
+      if (connectionTimeout) {
+        clearTimeout(connectionTimeout);
+        connectionTimeout = null;
+      }
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
     };
     
     ws.onclose = (event) => {
       console.log(`🔌 WebSocket closed for workflow ${workflowId}. Code: ${event.code}, Reason: ${event.reason}`);
+      
+      // Clear timeouts and intervals
+      if (connectionTimeout) {
+        clearTimeout(connectionTimeout);
+        connectionTimeout = null;
+      }
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
+      
       // Only remove from map if this is still the active connection
       if (this.activeWebSockets.get(workflowId) === ws) {
         this.activeWebSockets.delete(workflowId);
+        
+        // Handle reconnection for abnormal closures
+        if (event.code !== 1000 && event.code !== 1001 && reconnectAttempts < maxReconnectAttempts) {
+          this.handleWebSocketReconnection(workflowId, wsUrl, reconnectAttempts);
+        }
       }
     };
     
@@ -652,9 +841,13 @@ class ApiService {
         const data = JSON.parse(event.data);
         console.log(`📨 Message received for workflow ${workflowId}:`, data.type);
         
-        // Handle heartbeat
-        if (data.type === 'heartbeat') {
-          ws.send(JSON.stringify({ type: 'pong' }));
+        // Handle heartbeat response
+        if (data.type === 'pong') {
+          console.log(`💓 Heartbeat acknowledged for workflow ${workflowId}`);
+        }
+        // Auto-respond to server heartbeat
+        else if (data.type === 'heartbeat') {
+          ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
         }
       } catch (error) {
         console.error('Failed to parse WebSocket message:', error);
@@ -701,8 +894,11 @@ class ApiService {
     return ws;
   }
 
-  // Add a method to setup keep-alive for WebSockets
+  /**
+ * @deprecated Heartbeat is now automatically set up in createWorkflowWebSocket
+ */
   setupWebSocketKeepAlive(ws: WebSocket, interval: number = 25000): NodeJS.Timer {
+    console.warn('setupWebSocketKeepAlive is deprecated. Heartbeat is automatically configured.');
     return setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' }));
@@ -713,8 +909,10 @@ class ApiService {
   closeWorkflowWebSocket(workflowId: string): void {
     const ws = this.activeWebSockets.get(workflowId);
     if (ws) {
+      // Clear any associated intervals/timeouts by closing gracefully
       ws.close(1000, 'Closing connection');
       this.activeWebSockets.delete(workflowId);
+      console.log(`✅ WebSocket connection closed for workflow ${workflowId}`);
     }
   }
 

@@ -66,10 +66,24 @@ class CAMELWorkflowService:
                 "documents": project_documents
             }
             
-            # Wait for WebSocket connection using public workflow_id
-            connected = await self._wait_for_websocket_connection(workflow_id)
+            # Wait for WebSocket connection with extended timeout and retry logic
+            connected = await self._wait_for_websocket_connection(
+                workflow_id, 
+                timeout=10,  # Increased timeout
+                retry_interval=0.5  # Check every 500ms
+            )
+            
             if not connected:
                 logger.warning(f"No WebSocket connected for workflow {workflow_id}, continuing anyway")
+                # Send a notification that workflow is proceeding without real-time updates
+                if self.websocket_manager and hasattr(self.websocket_manager, 'broadcast_workflow_update'):
+                    await self.websocket_manager.broadcast_workflow_update(workflow_id, {
+                        "type": "workflow_warning",
+                        "message": "Workflow proceeding without real-time connection. Refresh page to see updates.",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+            else:
+                logger.info(f"✅ WebSocket connection established for workflow {workflow_id}")
             
             # Update status to running
             await self._update_workflow_status(db, execution_id, "running", "content_creation")
@@ -90,21 +104,117 @@ class CAMELWorkflowService:
             await self._update_workflow_status(db, execution_id, "failed", error_details=str(e))
             raise
     
-    async def _wait_for_websocket_connection(self, workflow_id: str) -> bool:
-        """Wait for WebSocket client to connect (with timeout)"""
-        if not self.websocket_manager:
-            return False
+    async def _wait_for_websocket_connection(self, workflow_id: str, timeout: int = 10, retry_interval: float = 0.5) -> bool:
+        """
+        Wait for WebSocket connection with retry logic and extended timeout.
         
-        logger.info(f"Waiting for WebSocket connection for workflow {workflow_id}...")
+        Args:
+            workflow_id: The workflow ID to wait for connection
+            timeout: Maximum time to wait in seconds (default: 10)
+            retry_interval: Time between connection checks in seconds (default: 0.5)
+            
+        Returns:
+            bool: True if connected, False if timeout reached
+        """
+        start_time = asyncio.get_event_loop().time()
+        attempt = 0
+        max_attempts = int(timeout / retry_interval)
         
-        # Wait up to 5 seconds for connection
-        for i in range(10):
-            if hasattr(self.websocket_manager, 'workflow_connections'):
-                if workflow_id in self.websocket_manager.workflow_connections:
-                    if self.websocket_manager.workflow_connections[workflow_id]:
-                        logger.info(f"WebSocket connected for workflow {workflow_id}")
-                        return True
-            await asyncio.sleep(0.5)
+        logger.info(f"⏳ Waiting for WebSocket connection for workflow {workflow_id}")
+        logger.info(f"   Timeout: {timeout}s, Check interval: {retry_interval}s, Max attempts: {max_attempts}")
+        
+        while attempt < max_attempts:
+            attempt += 1
+            elapsed = asyncio.get_event_loop().time() - start_time
+            
+            # Log each attempt for debugging
+            logger.debug(f"   Attempt {attempt}/{max_attempts} - Elapsed: {elapsed:.1f}s")
+            
+            # Check if websocket_manager exists
+            if not self.websocket_manager:
+                logger.warning(f"   WebSocket manager not available on attempt {attempt}")
+                await asyncio.sleep(retry_interval)
+                continue
+                
+            # Check for active connections
+            try:
+                # Multiple ways to check for connection depending on manager implementation
+                is_connected = False
+                
+                # Method 1: Check workflow_connections directly
+                if hasattr(self.websocket_manager, 'workflow_connections'):
+                    connections = self.websocket_manager.workflow_connections.get(workflow_id, set())
+                    if connections:
+                        is_connected = True
+                        logger.info(f"   ✅ Found {len(connections)} workflow connection(s)")
+                
+                # Method 2: Check has_workflow_connection method
+                elif hasattr(self.websocket_manager, 'has_workflow_connection'):
+                    is_connected = await self.websocket_manager.has_workflow_connection(workflow_id)
+                    if is_connected:
+                        logger.info(f"   ✅ Workflow connection confirmed via has_workflow_connection")
+                
+                # Method 3: Check active_connections with workflow prefix
+                elif hasattr(self.websocket_manager, 'active_connections'):
+                    # Look for connections with workflow ID in the connection ID
+                    for conn_id in self.websocket_manager.active_connections:
+                        if workflow_id in conn_id:
+                            is_connected = True
+                            logger.info(f"   ✅ Found connection with ID containing workflow: {conn_id}")
+                            break
+                
+                # Method 4: Check _connections (private attribute fallback)
+                elif hasattr(self.websocket_manager, '_connections'):
+                    for conn_id, conn_data in self.websocket_manager._connections.items():
+                        if isinstance(conn_data, dict) and conn_data.get('resource_id') == workflow_id:
+                            is_connected = True
+                            logger.info(f"   ✅ Found connection in _connections: {conn_id}")
+                            break
+                
+                if is_connected:
+                    logger.info(f"🎉 WebSocket connected for workflow {workflow_id} after {elapsed:.1f}s ({attempt} attempts)")
+                    
+                    # Send initial status update to confirm connection
+                    if hasattr(self.websocket_manager, 'broadcast_to_workflow'):
+                        try:
+                            await self.websocket_manager.broadcast_to_workflow(workflow_id, {
+                                "type": "workflow_connection_confirmed",
+                                "status": "connected",
+                                "message": "Workflow service connected successfully",
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            })
+                        except Exception as e:
+                            logger.debug(f"Could not send connection confirmation: {e}")
+                    
+                    return True
+                
+                # Log why connection wasn't found
+                if attempt % 5 == 0:  # Log every 5 attempts to avoid spam
+                    logger.debug(f"   No connection found yet for workflow {workflow_id}")
+                    
+            except Exception as e:
+                logger.error(f"   Error checking connection on attempt {attempt}: {e}")
+                # Don't fail immediately on errors, continue trying
+            
+            # Wait before next attempt
+            await asyncio.sleep(retry_interval)
+        
+        # Timeout reached
+        total_elapsed = asyncio.get_event_loop().time() - start_time
+        logger.warning(f"⚠️ WebSocket connection timeout for workflow {workflow_id} after {total_elapsed:.1f}s and {attempt} attempts")
+        
+        # Log diagnostic information
+        if self.websocket_manager:
+            try:
+                # Try to get connection stats for debugging
+                if hasattr(self.websocket_manager, 'get_connection_stats'):
+                    stats = await self.websocket_manager.get_connection_stats()
+                    logger.info(f"   Current WebSocket stats: {stats}")
+                elif hasattr(self.websocket_manager, 'active_connections'):
+                    total_connections = len(self.websocket_manager.active_connections)
+                    logger.info(f"   Total active connections: {total_connections}")
+            except Exception as e:
+                logger.debug(f"   Could not get connection stats: {e}")
         
         return False
     
@@ -145,6 +255,8 @@ class CAMELWorkflowService:
                 # Extract chat_id if available
                 if hasattr(workflow_execution, 'chat_id'):
                     chat_id = str(workflow_execution.chat_id)
+                elif hasattr(workflow_execution, 'chat_instance_id'):
+                    chat_id = str(workflow_execution.chat_instance_id)
                 
                 # Create the interceptor using public workflow_id
                 websocket_interceptor = WebSocketMessageInterceptor(

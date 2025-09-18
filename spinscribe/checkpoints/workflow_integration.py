@@ -1,7 +1,7 @@
 # File: spinscribe/checkpoints/workflow_integration.py
 """
 Complete WorkflowCheckpointIntegration implementation for integrating checkpoints into workflows.
-Fixes the timeout issue by implementing proper async waiting with polling and auto-approval fallback.
+Fixes checkpoint message type compatibility and ensures proper WebSocket message format.
 """
 
 import logging
@@ -28,7 +28,8 @@ class WorkflowCheckpointIntegration:
         workflow_id: str = None,
         enable_checkpoints: bool = True,
         enable_async: bool = True,
-        checkpoint_manager: CheckpointManager = None
+        checkpoint_manager: CheckpointManager = None,
+        websocket_bridge: Optional[Any] = None  # Added for WebSocket communication
     ):
         """
         Initialize workflow checkpoint integration.
@@ -39,6 +40,7 @@ class WorkflowCheckpointIntegration:
             enable_checkpoints: Whether to enable checkpoints
             enable_async: Whether to use async operations
             checkpoint_manager: Optional checkpoint manager instance
+            websocket_bridge: Optional WebSocket bridge for real-time updates
         """
         self.checkpoint_manager = checkpoint_manager or get_checkpoint_manager()
         self.project_id = project_id
@@ -47,6 +49,7 @@ class WorkflowCheckpointIntegration:
         self.enable_async = enable_async
         self.active_checkpoints = {}
         self.created_checkpoints = []
+        self.websocket_bridge = websocket_bridge  # Store WebSocket bridge reference
         logger.info(f"✅ WorkflowCheckpointIntegration initialized for project {project_id}, workflow {self.workflow_id}")
     
     async def request_approval(
@@ -109,6 +112,18 @@ class WorkflowCheckpointIntegration:
         }
         self.created_checkpoints.append(checkpoint_id)
         
+        # Send WebSocket notification with correct type and structure
+        if self.websocket_bridge:
+            await self._send_checkpoint_websocket_notification(
+                checkpoint_id=checkpoint_id,
+                checkpoint_type=checkpoint_type,
+                title=title,
+                description=description or f"Approval required for {title}",
+                content=content,
+                priority=priority,
+                timeout_seconds=actual_timeout_seconds
+            )
+        
         # Display checkpoint information with curl command for testing
         logger.info(f"""
 🔴 CHECKPOINT {len(self.created_checkpoints)}: {title.upper()}
@@ -159,6 +174,10 @@ Content Preview:
             'auto_approved': response.get('reviewer_id') == 'system' if response else False
         }
         
+        # Send resolution notification via WebSocket
+        if self.websocket_bridge:
+            await self._send_checkpoint_resolution_notification(checkpoint_id, result)
+        
         # Clean up
         if checkpoint_id in self.active_checkpoints:
             del self.active_checkpoints[checkpoint_id]
@@ -173,6 +192,100 @@ Content Preview:
             logger.warning(f"⏱️ Checkpoint {checkpoint_id} timed out - auto-approved to continue")
         
         return result
+    
+    async def _send_checkpoint_websocket_notification(
+        self,
+        checkpoint_id: str,
+        checkpoint_type: CheckpointType,
+        title: str,
+        description: str,
+        content: str,
+        priority: Priority,
+        timeout_seconds: int
+    ):
+        """
+        Send checkpoint notification via WebSocket with correct message type.
+        CRITICAL: Must use 'checkpoint_required' type for frontend compatibility.
+        """
+        if not self.websocket_bridge:
+            return
+        
+        try:
+            # Create message with correct type for frontend
+            checkpoint_message = {
+                "type": "checkpoint_required",  # FIXED: Use correct type expected by frontend
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_type": checkpoint_type.value,
+                "title": title,
+                "description": description,
+                "content_preview": content[:500] + ("..." if len(content) > 500 else ""),  # Added content_preview field
+                "full_content": content,  # Include full content for detailed review
+                "priority": priority.value,
+                "timeout_seconds": timeout_seconds,
+                "workflow_id": self.workflow_id,
+                "project_id": self.project_id,
+                "timestamp": datetime.now().isoformat(),
+                "requires_approval": True,
+                "metadata": {
+                    "checkpoint_number": len(self.created_checkpoints),
+                    "total_checkpoints": len(self.created_checkpoints)
+                }
+            }
+            
+            # Send via WebSocket bridge
+            if hasattr(self.websocket_bridge, 'send_checkpoint_required'):
+                await self.websocket_bridge.send_checkpoint_required(
+                    workflow_id=self.workflow_id,
+                    checkpoint_data=checkpoint_message
+                )
+            elif hasattr(self.websocket_bridge, 'broadcast_to_workflow'):
+                await self.websocket_bridge.broadcast_to_workflow(
+                    self.workflow_id,
+                    checkpoint_message
+                )
+            elif hasattr(self.websocket_bridge, 'send_message'):
+                await self.websocket_bridge.send_message(checkpoint_message)
+            
+            logger.debug(f"✅ Sent checkpoint WebSocket notification for {checkpoint_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send checkpoint WebSocket notification: {e}")
+            # Don't fail the checkpoint process if WebSocket fails
+    
+    async def _send_checkpoint_resolution_notification(
+        self,
+        checkpoint_id: str,
+        result: Dict[str, Any]
+    ):
+        """Send checkpoint resolution notification via WebSocket."""
+        if not self.websocket_bridge:
+            return
+        
+        try:
+            resolution_message = {
+                "type": "checkpoint_resolved",  # Resolution notification type
+                "checkpoint_id": checkpoint_id,
+                "workflow_id": self.workflow_id,
+                "approved": result['approved'],
+                "decision": result['decision'],
+                "feedback": result.get('feedback'),
+                "auto_approved": result.get('auto_approved', False),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Send via WebSocket bridge
+            if hasattr(self.websocket_bridge, 'broadcast_to_workflow'):
+                await self.websocket_bridge.broadcast_to_workflow(
+                    self.workflow_id,
+                    resolution_message
+                )
+            elif hasattr(self.websocket_bridge, 'send_message'):
+                await self.websocket_bridge.send_message(resolution_message)
+            
+            logger.debug(f"✅ Sent checkpoint resolution notification for {checkpoint_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send checkpoint resolution notification: {e}")
     
     async def _wait_for_approval_async(
         self,
@@ -205,6 +318,10 @@ Content Preview:
             if not halfway_reminder_sent and elapsed > timeout_seconds / 2:
                 logger.warning(f"⏰ Checkpoint {checkpoint_id} waiting for {elapsed:.0f}s - timeout in {timeout_seconds - elapsed:.0f}s")
                 halfway_reminder_sent = True
+                
+                # Send WebSocket reminder
+                if self.websocket_bridge:
+                    await self._send_checkpoint_reminder(checkpoint_id, timeout_seconds - elapsed)
             
             if not reminder_sent and elapsed > timeout_seconds * 0.75:
                 logger.warning(f"⚠️ Checkpoint {checkpoint_id} will auto-approve in {timeout_seconds - elapsed:.0f}s")
@@ -224,6 +341,30 @@ Content Preview:
         )
         
         return "approve"
+    
+    async def _send_checkpoint_reminder(self, checkpoint_id: str, time_remaining: float):
+        """Send checkpoint timeout reminder via WebSocket."""
+        if not self.websocket_bridge:
+            return
+        
+        try:
+            reminder_message = {
+                "type": "checkpoint_reminder",
+                "checkpoint_id": checkpoint_id,
+                "workflow_id": self.workflow_id,
+                "time_remaining_seconds": int(time_remaining),
+                "message": f"Checkpoint will auto-approve in {int(time_remaining)} seconds",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            if hasattr(self.websocket_bridge, 'broadcast_to_workflow'):
+                await self.websocket_bridge.broadcast_to_workflow(
+                    self.workflow_id,
+                    reminder_message
+                )
+            
+        except Exception as e:
+            logger.debug(f"Could not send checkpoint reminder: {e}")
     
     # Convenience methods for creating specific checkpoint types
     async def create_and_wait_for_checkpoint(
@@ -247,6 +388,11 @@ Content Preview:
             priority=priority,
             timeout_seconds=timeout
         )
+    
+    def set_websocket_bridge(self, websocket_bridge):
+        """Set or update the WebSocket bridge for real-time notifications."""
+        self.websocket_bridge = websocket_bridge
+        logger.info(f"WebSocket bridge {'updated' if websocket_bridge else 'removed'} for workflow {self.workflow_id}")
     
     def create_style_checkpoint(
         self,

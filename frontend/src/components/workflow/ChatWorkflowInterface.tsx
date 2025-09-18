@@ -1,6 +1,6 @@
 // frontend/src/components/workflow/ChatWorkflowInterface.tsx
 // Enhanced version with proper backend integration and human input handling
-// FIXED: WebSocket connection management to prevent multiple connections
+// FIXED: WebSocket connection management and message type compatibility
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -59,6 +59,10 @@ interface CheckpointData {
   status: 'pending' | 'approved' | 'rejected';
   data: any;
   content_preview?: string;
+  full_content?: string;
+  checkpoint_type?: string;
+  priority?: string;
+  timeout_seconds?: number;
 }
 
 interface ChatWorkflowInterfaceProps {
@@ -98,6 +102,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   const isConnectingRef = useRef(false);
   const hasInitializedRef = useRef(false);
   const workflowIdRef = useRef(workflowId);
+  const maxReconnectAttempts = 5;
   
   // Update workflowId ref when prop changes
   useEffect(() => {
@@ -137,11 +142,9 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     setMessages(prev => [...prev, message]);
   }, []);
 
-  // Stable WebSocket message handler
-  // Stable WebSocket message handler
+  // Enhanced WebSocket message handler with proper type handling
   const handleWebSocketMessage = useCallback((data: any) => {
     console.log('📨 WebSocket message received:', data.type, data);
-    console.log('Full message data:', JSON.stringify(data, null, 2)); // DEBUG: See full message structure
 
     switch (data.type) {
       case 'connection_established':
@@ -181,22 +184,12 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         break;
 
       case 'agent_message':
-      case 'agent_communication':  // Added alternate type
-      case 'agent_output':         // Moved here to handle together
-        // Log what we're receiving for debugging
-        console.log('Agent message raw data:', {
-          type: data.type,
-          content: data.data?.message_content || data.data?.content || data.content || data.message,
-          agent: data.data?.agent_type || data.agent_type || data.role || data.agent_role,
-          stage: data.data?.stage || data.stage,
-          hasData: !!data.data,
-          dataKeys: data.data ? Object.keys(data.data) : [],
-          topLevelKeys: Object.keys(data)
-        });
-        
-        // Try multiple possible content fields
+      case 'agent_communication':
+      case 'agent_output':
+        // FIXED: Prioritize message_content field as per requirements
         const agentContent = 
-          data.data?.message_content || 
+          data.data?.message_content ||  // Check message_content FIRST
+          data.message_content ||
           data.data?.content || 
           data.content || 
           data.message ||
@@ -204,7 +197,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
           data.text ||
           '';
           
-        // Try multiple possible agent type fields
+        // Try multiple possible agent type fields with null checking
         const agentType = 
           data.data?.agent_type || 
           data.agent_type || 
@@ -217,7 +210,8 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
           
         const messageStage = data.data?.stage || data.stage || currentStage;
         
-        if (agentContent && agentContent.trim()) {
+        // Add null checking for nested data structures
+        if (agentContent && typeof agentContent === 'string' && agentContent.trim()) {
           console.log('Adding agent message:', { content: agentContent, agent: agentType, stage: messageStage });
           addAgentMessage(agentContent, agentType, messageStage);
           
@@ -230,8 +224,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
               return prev;
             });
           }
-        } else {
-          console.warn('Agent message had no content:', data);
         }
         break;
 
@@ -249,21 +241,57 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         addSystemMessage(`❓ Input needed: ${data.question}`);
         break;
 
+      // FIXED: Add case for checkpoint_approval_required
+      case 'checkpoint_approval_required':
       case 'checkpoint_required':
-      case 'checkpoint':  // Added alternate type
-        // Handle checkpoint that needs approval
+      case 'checkpoint':
+        // Handle checkpoint that needs approval - ensure proper null checking
         console.log('Checkpoint data received:', data);
-        const checkpoint: CheckpointData = {
-          id: data.data?.checkpoint_id || data.checkpoint_id || data.id,
-          title: data.data?.title || data.title || 'Review Required',
-          description: data.data?.description || data.description || 'Please review and approve to continue',
-          status: 'pending',
-          data: data.data?.checkpoint_data || data.data || {},
-          content_preview: data.data?.content_preview || data.content_preview
-        };
-        setPendingCheckpoint(checkpoint);
-        setWorkflowStatus('paused');
-        addSystemMessage(`🔍 Checkpoint: ${checkpoint.title}`);
+        
+        // Extract checkpoint data with comprehensive null checking
+        const checkpointId = data.checkpoint_id || data.data?.checkpoint_id || data.id;
+        const checkpointTitle = data.title || data.data?.title || 'Review Required';
+        const checkpointDescription = data.description || data.data?.description || 'Please review and approve to continue';
+        const contentPreview = data.content_preview || data.data?.content_preview;
+        const fullContent = data.full_content || data.data?.full_content || data.content || data.data?.content;
+        
+        if (checkpointId) {
+          const checkpoint: CheckpointData = {
+            id: checkpointId,
+            title: checkpointTitle,
+            description: checkpointDescription,
+            status: 'pending',
+            data: data.data || data,
+            content_preview: contentPreview,
+            full_content: fullContent,
+            checkpoint_type: data.checkpoint_type || data.data?.checkpoint_type,
+            priority: data.priority || data.data?.priority,
+            timeout_seconds: data.timeout_seconds || data.data?.timeout_seconds
+          };
+          
+          setPendingCheckpoint(checkpoint);
+          setWorkflowStatus('paused');
+          addSystemMessage(`🔍 Checkpoint: ${checkpoint.title}`);
+        } else {
+          console.warn('Checkpoint received without ID:', data);
+        }
+        break;
+
+      case 'checkpoint_resolved':
+        // Handle checkpoint resolution
+        if (pendingCheckpoint && data.checkpoint_id === pendingCheckpoint.id) {
+          setPendingCheckpoint(null);
+          setWorkflowStatus('running');
+          const statusText = data.approved ? '✅ Approved' : '❌ Rejected';
+          addSystemMessage(`Checkpoint ${statusText}: ${data.feedback || 'No feedback'}`);
+        }
+        break;
+
+      case 'checkpoint_reminder':
+        // Handle checkpoint timeout reminder
+        if (data.time_remaining_seconds) {
+          addSystemMessage(`⏰ Checkpoint will auto-approve in ${data.time_remaining_seconds} seconds`);
+        }
         break;
 
       case 'workflow_completed':
@@ -284,6 +312,16 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         addSystemMessage(`❌ Error: ${errorMsg}`);
         break;
 
+      case 'workflow_warning':
+        // Handle workflow warning messages
+        addSystemMessage(`⚠️ ${data.message || 'Workflow warning'}`);
+        break;
+
+      case 'workflow_connection_confirmed':
+        // Handle workflow connection confirmation
+        addSystemMessage(`✅ ${data.message || 'Workflow connection confirmed'}`);
+        break;
+
       case 'response_acknowledged':
         // Human response was received by backend
         console.log('Response acknowledged:', data.request_id);
@@ -294,7 +332,13 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         console.log('💓 Pong received');
         break;
 
-      // Add catch-all for workflow updates
+      case 'heartbeat':
+        // Respond to heartbeat with pong
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'pong' }));
+        }
+        break;
+
       case 'workflow_update':
         console.log('Workflow update:', data);
         if (data.status) {
@@ -308,46 +352,36 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         }
         break;
 
-      // Catch message types that might be coming through differently
       case 'message':
-        console.log('Generic message received:', data);
-        // Try to determine if it's from an agent
+        // Generic message handler
         if (data.sender_type === 'agent' || data.role || data.agent_type) {
-          const content = data.content || data.message || data.text || '';
+          const content = data.message_content || data.content || data.message || data.text || '';
           const agent = data.agent_type || data.role || data.sender || 'Agent';
           if (content) {
             addAgentMessage(content, agent, data.stage || currentStage);
           }
-        } else {
-          // Otherwise add as system message
-          const content = data.content || data.message || data.text;
-          if (content) {
-            addSystemMessage(content);
-          }
+        } else if (data.content || data.message || data.text) {
+          addSystemMessage(data.content || data.message || data.text);
         }
         break;
 
       default:
-        console.log('Unknown message type:', data.type);
-        console.log('Full unknown message:', JSON.stringify(data, null, 2));
-        
-        // Try to handle unknown message types that might contain content
-        if (data.message || data.content || data.text) {
-          const content = data.message || data.content || data.text;
+        console.log('Unknown message type:', data.type, 'Full message:', data);
+        // Try to extract content from unknown message types
+        if (data.message || data.content || data.text || data.message_content) {
+          const content = data.message_content || data.message || data.content || data.text;
           if (data.agent_type || data.role || data.sender_type === 'agent') {
-            // It's likely an agent message
             addAgentMessage(content, data.agent_type || data.role || 'Agent', data.stage || currentStage);
           } else {
-            // Add as system message
             addSystemMessage(`📬 ${content}`);
           }
         }
     }
-  }, [addSystemMessage, addAgentMessage, onWorkflowComplete, currentStage]);
+  }, [addSystemMessage, addAgentMessage, onWorkflowComplete, currentStage, pendingCheckpoint]);
 
-  // Stable WebSocket connection function
+  // Enhanced WebSocket connection with retry logic and proper state management
   const connectWebSocket = useCallback(() => {
-    // Check if already connected or connecting
+    // Prevent multiple concurrent connections
     if (wsRef.current && (
       wsRef.current.readyState === WebSocket.OPEN || 
       wsRef.current.readyState === WebSocket.CONNECTING
@@ -356,7 +390,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       return;
     }
 
-    // Prevent concurrent connection attempts
     if (isConnectingRef.current) {
       console.log('Connection already in progress');
       return;
@@ -367,13 +400,13 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     try {
       setIsReconnecting(true);
       
-      // Clean up any existing connection first
+      // Clean up existing connection
       if (wsRef.current) {
         wsRef.current.close(1000, 'Creating new connection');
         wsRef.current = null;
       }
       
-      // Clear existing ping interval
+      // Clear existing intervals
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current);
         pingIntervalRef.current = null;
@@ -389,7 +422,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         setReconnectAttempts(0);
         console.log('🔌 Connected to workflow WebSocket');
         
-        // Setup ping interval after connection is established
+        // Setup heartbeat ping interval
         pingIntervalRef.current = setInterval(() => {
           if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: 'ping' }));
@@ -411,33 +444,27 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         setIsConnected(false);
         console.log('❌ WebSocket disconnected:', event.code, event.reason);
         
-        // Clear ping interval
+        // Clear intervals
         if (pingIntervalRef.current) {
           clearInterval(pingIntervalRef.current);
           pingIntervalRef.current = null;
         }
         
-        // Only reconnect on abnormal closure
-        if (event.code !== 1000 && event.code !== 1001) {
-          // Use functional setState to avoid stale closures
-          setWorkflowStatus(prevStatus => {
-            if (prevStatus === 'running') {
-              setReconnectAttempts(prevAttempts => {
-                if (prevAttempts < 5) {
-                  const delay = Math.min(1000 * Math.pow(2, prevAttempts), 10000);
-                  addSystemMessage(`⚠️ Connection lost. Reconnecting in ${delay / 1000}s...`);
-                  
-                  reconnectTimeoutRef.current = setTimeout(() => {
-                    connectWebSocket();
-                  }, delay);
-                  
-                  return prevAttempts + 1;
-                }
-                return prevAttempts;
-              });
-            }
-            return prevStatus;
-          });
+        // Implement exponential backoff reconnection
+        if (event.code !== 1000 && event.code !== 1001 && reconnectAttempts < maxReconnectAttempts) {
+          const nextAttempt = reconnectAttempts + 1;
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+          
+          console.log(`Reconnect attempt ${nextAttempt}/${maxReconnectAttempts} in ${delay}ms`);
+          addSystemMessage(`⚠️ Connection lost. Reconnecting in ${delay / 1000}s...`);
+          
+          setReconnectAttempts(nextAttempt);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connectWebSocket();
+          }, delay);
+        } else if (reconnectAttempts >= maxReconnectAttempts) {
+          setIsReconnecting(false);
+          addSystemMessage('❌ Maximum reconnection attempts reached. Please refresh the page.');
         }
       };
 
@@ -454,9 +481,9 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       setIsReconnecting(false);
       addSystemMessage('❌ Failed to connect to workflow');
     }
-  }, [handleWebSocketMessage, addSystemMessage]);
+  }, [handleWebSocketMessage, addSystemMessage, reconnectAttempts]);
 
-  // Initialize WebSocket connection only once per workflow
+  // Initialize WebSocket connection with proper cleanup
   useEffect(() => {
     // Check if workflow ID has changed
     const workflowChanged = workflowIdRef.current !== workflowId;
@@ -511,7 +538,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     if (!pendingHumanInput || !humanInputResponse.trim()) return;
 
     try {
-      // Send via WebSocket (primary method for CAMEL bridge)
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'human_response',
@@ -536,7 +562,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   // Handle multiple choice selection
   const handleMultipleChoiceResponse = (choice: string) => {
     setHumanInputResponse(choice);
-    // Auto-send for multiple choice
     if (wsRef.current?.readyState === WebSocket.OPEN && pendingHumanInput) {
       wsRef.current.send(JSON.stringify({
         type: 'human_response',
@@ -552,20 +577,19 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     }
   };
 
-  // Handle checkpoint approval
+  // Handle checkpoint approval with feedback
   const handleCheckpointApproval = async (approved: boolean, feedback?: string) => {
     if (!pendingCheckpoint) return;
 
     try {
-      // Use the proper API endpoint
       if (approved) {
         await apiService.approveCheckpoint(pendingCheckpoint.id, {
-          feedback: feedback || ''
+          feedback: feedback || 'Approved'
         });
         addSystemMessage(`✅ Checkpoint approved${feedback ? `: ${feedback}` : ''}`);
       } else {
         await apiService.rejectCheckpoint(pendingCheckpoint.id, {
-          feedback: feedback || ''
+          feedback: feedback || 'Changes requested'
         });
         addSystemMessage(`❌ Checkpoint rejected${feedback ? `: ${feedback}` : ''}`);
       }
@@ -591,7 +615,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     addSystemMessage('📋 Content copied to clipboard!');
   };
 
-  // Send user message (for general workflow communication)
+  // Send user message
   const sendUserMessage = async () => {
     if (!inputMessage.trim() || !isConnected) return;
 
@@ -606,7 +630,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     setMessages(prev => [...prev, userMessage]);
     setInputMessage('');
 
-    // Send via WebSocket
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'user_message',
@@ -634,6 +657,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     'editing_qa': 'from-yellow-500 to-yellow-600',
     'Content Creator': 'from-green-500 to-green-600',
     'Content Strategist': 'from-purple-500 to-purple-600',
+    'Quality Assurance': 'from-orange-500 to-orange-600',
     'default': 'from-gray-500 to-gray-600'
   };
 
@@ -676,7 +700,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
             <span className="text-sm text-gray-400">{currentStage}</span>
           </div>
           
-          {!isConnected && !isReconnecting && (
+          {!isConnected && !isReconnecting && reconnectAttempts >= maxReconnectAttempts && (
             <button
               onClick={handleReconnect}
               className="px-3 py-1 bg-orange-600 text-white text-sm rounded-lg hover:bg-orange-700 transition-colors flex items-center gap-2"
@@ -746,7 +770,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
               <p className="text-gray-300">{pendingHumanInput.question}</p>
             </div>
             
-            {/* Yes/No Questions */}
             {pendingHumanInput.question_type === 'yes_no' ? (
               <div className="flex gap-3">
                 <button
@@ -763,7 +786,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
                 </button>
               </div>
             ) : pendingHumanInput.question_type === 'multiple_choice' && pendingHumanInput.options ? (
-              // Multiple Choice Questions
               <div className="space-y-2">
                 {pendingHumanInput.options.map((option, index) => (
                   <button
@@ -776,7 +798,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
                 ))}
               </div>
             ) : (
-              // Text Input Questions
               <div className="flex gap-3">
                 <input
                   type="text"
@@ -799,22 +820,39 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
           </div>
         )}
 
-        {/* Checkpoint Approval UI */}
+        {/* Enhanced Checkpoint Approval UI - FIXED: Shows when checkpoint data is received */}
         {pendingCheckpoint && (
           <div className="border-t border-gray-700 p-4 bg-blue-900/20">
             <div className="mb-3">
               <p className="text-blue-300 font-medium mb-2 flex items-center gap-2">
                 <AlertTriangle className="w-5 h-5" />
                 Checkpoint Review
+                {pendingCheckpoint.priority && (
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    pendingCheckpoint.priority === 'high' ? 'bg-red-600' :
+                    pendingCheckpoint.priority === 'medium' ? 'bg-yellow-600' :
+                    'bg-green-600'
+                  }`}>
+                    {pendingCheckpoint.priority.toUpperCase()}
+                  </span>
+                )}
               </p>
               <p className="text-white font-semibold">{pendingCheckpoint.title}</p>
               <p className="text-gray-300 mt-1">{pendingCheckpoint.description}</p>
+              {pendingCheckpoint.checkpoint_type && (
+                <p className="text-sm text-gray-400 mt-1">Type: {pendingCheckpoint.checkpoint_type}</p>
+              )}
+              {pendingCheckpoint.timeout_seconds && (
+                <p className="text-sm text-yellow-400 mt-1">
+                  Auto-approves in {pendingCheckpoint.timeout_seconds} seconds
+                </p>
+              )}
             </div>
             
-            {pendingCheckpoint.content_preview && (
-              <div className="bg-gray-900 rounded-lg p-3 mb-4 max-h-32 overflow-y-auto">
+            {(pendingCheckpoint.content_preview || pendingCheckpoint.full_content) && (
+              <div className="bg-gray-900 rounded-lg p-3 mb-4 max-h-48 overflow-y-auto">
                 <pre className="text-xs text-gray-400 whitespace-pre-wrap">
-                  {pendingCheckpoint.content_preview}
+                  {pendingCheckpoint.content_preview || pendingCheckpoint.full_content}
                 </pre>
               </div>
             )}
