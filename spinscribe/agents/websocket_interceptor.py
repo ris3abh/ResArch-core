@@ -60,6 +60,7 @@ class AgentRole(Enum):
     EDITOR = "Editor"
     TASK_PLANNER = "Task Planner"
     COORDINATOR = "Coordinator"
+    CHECKPOINT_MANAGER = "Checkpoint Manager"  # Added for checkpoint handling
     UNKNOWN = "Unknown Agent"
 
 
@@ -129,8 +130,9 @@ class WebSocketMessageInterceptor:
             # Extract message content based on type
             if CAMEL_AVAILABLE and BaseMessage and isinstance(message, BaseMessage):
                 content = message.content
-                role = message.role_name if hasattr(message, 'role_name') else agent_type
-                message_info = message.info if hasattr(message, 'info') else {}
+                # FIXED: Use role_name if available, otherwise use agent_type
+                role = getattr(message, 'role_name', agent_type)
+                message_info = getattr(message, 'info', {})
             elif isinstance(message, dict):
                 content = message.get('content', '')
                 role = message.get('role', agent_type)
@@ -195,7 +197,7 @@ class WebSocketMessageInterceptor:
             self.last_message_time = current_time
             
         except Exception as e:
-            logger.error(f"❌ Error intercepting message: {e}")
+            logger.error(f"❌ Error intercepting message: {e}", exc_info=True)
             await self._broadcast_error(str(e), agent_type)
     
     async def intercept_completion(
@@ -269,7 +271,9 @@ class WebSocketMessageInterceptor:
         """
         agent_type_lower = agent_type.lower()
         
-        if "content" in agent_type_lower and "creator" in agent_type_lower:
+        if "checkpoint" in agent_type_lower:
+            return AgentRole.CHECKPOINT_MANAGER
+        elif "content" in agent_type_lower and "creator" in agent_type_lower:
             return AgentRole.CONTENT_CREATOR
         elif "strategist" in agent_type_lower:
             return AgentRole.CONTENT_STRATEGIST
@@ -362,15 +366,20 @@ class WebSocketMessageInterceptor:
             if "Question:" in content:
                 question = content.split("Question:")[1].strip()
             
+            # FIXED: Use get() with default value for safe dictionary access
+            agent_requesting = message_data.get("agent_type", "Unknown Agent")
+            stage = message_data.get("stage", "unknown")
+            timestamp = message_data.get("timestamp", datetime.now(timezone.utc).isoformat())
+            
             interaction_data = {
                 "type": "human_input_required",
                 "request_id": request_id,
                 "question": question,
-                "agent_requesting": message_data["agent_type"],
-                "stage": message_data["stage"],
+                "agent_requesting": agent_requesting,
+                "stage": stage,
                 "workflow_id": self.workflow_id,
                 "chat_id": self.chat_id,
-                "timestamp": message_data["timestamp"]
+                "timestamp": timestamp
             }
             
             # Store pending request
@@ -381,15 +390,17 @@ class WebSocketMessageInterceptor:
                 await self.bridge.broadcast_to_workflow(self.workflow_id, interaction_data)
                 
                 if self.chat_id and hasattr(self.bridge, 'broadcast_to_chat'):
+                    # FIXED: Use get() for safe access
+                    agent_role = message_data.get('agent_role', 'Agent')
                     await self.bridge.broadcast_to_chat(self.chat_id, {
                         **interaction_data,
-                        "message_content": f"🤔 {message_data['agent_role']} needs your input: {question}"
+                        "message_content": f"🤔 {agent_role} needs your input: {question}"
                     })
             
             logger.info(f"❓ Human interaction requested: {request_id}")
             
         except Exception as e:
-            logger.error(f"Error handling human interaction: {e}")
+            logger.error(f"Error handling human interaction: {e}", exc_info=True)
     
     async def _handle_checkpoint_request(
         self,
@@ -406,16 +417,43 @@ class WebSocketMessageInterceptor:
         try:
             checkpoint_id = f"checkpoint_{uuid.uuid4().hex[:8]}"
             
+            # FIXED: Safe dictionary access using get() with defaults
+            agent_type = message_data.get("agent_type", "Checkpoint Manager")
+            agent_role = message_data.get("agent_role", "Checkpoint Manager")
+            stage = message_data.get("stage", "checkpoint_approval")
+            timestamp = message_data.get("timestamp", datetime.now(timezone.utc).isoformat())
+            
+            # Handle different checkpoint data structures
+            if "checkpoint_data" in message_data:
+                # If checkpoint_data is provided, extract from it
+                checkpoint_info = message_data.get("checkpoint_data", {})
+                title = checkpoint_info.get("title", f"Approval needed from {agent_role}")
+                description = checkpoint_info.get("description", "")
+                priority = checkpoint_info.get("priority", "medium")
+                checkpoint_type = checkpoint_info.get("checkpoint_type", "unknown")
+                # Override checkpoint_id if provided
+                checkpoint_id = checkpoint_info.get("checkpoint_id", checkpoint_id)
+            else:
+                # Build from message_data directly
+                title = message_data.get("title", f"Approval needed from {agent_role}")
+                description = message_data.get("description", "")
+                priority = message_data.get("priority", "medium")
+                checkpoint_type = message_data.get("checkpoint_type", "unknown")
+            
             checkpoint_data = {
                 "type": "checkpoint_approval_required",
                 "checkpoint_id": checkpoint_id,
-                "title": f"Approval needed from {message_data['agent_role']}",
+                "title": title,
+                "description": description,
                 "content": content,
-                "agent_type": message_data["agent_type"],
-                "stage": message_data["stage"],
+                "agent_type": agent_type,
+                "agent_role": agent_role,  # Include agent_role in the checkpoint data
+                "stage": stage,
+                "priority": priority,
+                "checkpoint_type": checkpoint_type,
                 "workflow_id": self.workflow_id,
                 "chat_id": self.chat_id,
-                "timestamp": message_data["timestamp"],
+                "timestamp": timestamp,
                 "requires_approval": True
             }
             
@@ -432,7 +470,37 @@ class WebSocketMessageInterceptor:
             logger.info(f"🛑 Checkpoint created: {checkpoint_id}")
             
         except Exception as e:
-            logger.error(f"Error handling checkpoint: {e}")
+            logger.error(f"Error handling checkpoint: {e}", exc_info=True)
+            # Don't re-raise the error to prevent breaking the workflow
+    
+    async def intercept_checkpoint(self, checkpoint_data: Dict[str, Any]) -> None:
+        """
+        Public method to handle checkpoint creation and broadcast.
+        This is called from external code when checkpoints are created.
+        
+        Args:
+            checkpoint_data: Dictionary containing checkpoint information
+        """
+        try:
+            # FIXED: Safe extraction with defaults
+            agent_role = checkpoint_data.get('agent_role', 'Checkpoint Manager')
+            agent_type = checkpoint_data.get('agent_type', 'Checkpoint Manager')
+            content = checkpoint_data.get('content', '')
+            
+            # Build message_data with safe defaults
+            message_data = {
+                "agent_type": agent_type,
+                "agent_role": agent_role,
+                "stage": "checkpoint_approval",
+                "checkpoint_data": checkpoint_data,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+            # Delegate to the internal handler
+            await self._handle_checkpoint_request(content, message_data)
+            
+        except Exception as e:
+            logger.error(f"Error in intercept_checkpoint: {e}", exc_info=True)
     
     async def _broadcast_error(self, error_msg: str, agent_type: str) -> None:
         """
@@ -450,7 +518,10 @@ class WebSocketMessageInterceptor:
                 "workflow_id": self.workflow_id,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
-            await self.bridge.broadcast_to_workflow(self.workflow_id, error_data)
+            try:
+                await self.bridge.broadcast_to_workflow(self.workflow_id, error_data)
+            except Exception as e:
+                logger.error(f"Failed to broadcast error: {e}")
     
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -460,12 +531,13 @@ class WebSocketMessageInterceptor:
             Dictionary of statistics
         """
         current_time = datetime.now(timezone.utc)
+        duration = (current_time - self.start_time).total_seconds()
         return {
             "workflow_id": self.workflow_id,
             "chat_id": self.chat_id,
             "total_messages": self.message_count,
-            "duration_seconds": (current_time - self.start_time).total_seconds(),
-            "messages_per_minute": self.message_count / max(1, (current_time - self.start_time).total_seconds() / 60),
+            "duration_seconds": duration,
+            "messages_per_minute": self.message_count / max(1, duration / 60),
             "pending_human_inputs": len(self.pending_human_inputs),
             "agent_breakdown": self._get_agent_breakdown()
         }
@@ -479,6 +551,7 @@ class WebSocketMessageInterceptor:
         """
         breakdown = {}
         for msg in self.agent_message_history:
+            # FIXED: Safe dictionary access with default value
             agent = msg.get("agent_role", "Unknown")
             breakdown[agent] = breakdown.get(agent, 0) + 1
         return breakdown
@@ -491,11 +564,14 @@ class WebSocketMessageInterceptor:
         logger.info(f"📊 Interceptor cleanup - {stats['total_messages']} messages in {stats['duration_seconds']:.1f}s")
         
         if self.bridge and self.workflow_id:
-            await self.bridge.broadcast_to_workflow(self.workflow_id, {
-                "type": "interceptor_stats",
-                "stats": stats,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
+            try:
+                await self.bridge.broadcast_to_workflow(self.workflow_id, {
+                    "type": "interceptor_stats",
+                    "stats": stats,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Failed to broadcast cleanup stats: {e}")
 
 
 # Helper function for easy integration

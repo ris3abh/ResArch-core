@@ -608,14 +608,27 @@ class ApiService {
   // ========================================
 
   createWorkflowWebSocket(workflowId: string): WebSocket {
+    // Check if there's already an active connection
+    const existing = this.activeWebSockets.get(workflowId);
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+      console.log('🔌 Returning existing WebSocket connection for workflow:', workflowId);
+      return existing;
+    }
+    
     // Close existing connection if any
-    this.closeWorkflowWebSocket(workflowId);
+    if (existing) {
+      existing.close(1000, 'Creating new connection');
+      this.activeWebSockets.delete(workflowId);
+    }
     
     const token = localStorage.getItem('spinscribe_token');
     const wsUrl = `ws://localhost:8000/api/v1/ws/workflows/${workflowId}${token ? `?token=${token}` : ''}`;
-    console.log('🔌 Creating workflow WebSocket connection:', wsUrl);
+    console.log('🔌 Creating new workflow WebSocket connection:', wsUrl);
     
     const ws = new WebSocket(wsUrl);
+    
+    // Store the connection immediately to prevent duplicates
+    this.activeWebSockets.set(workflowId, ws);
     
     // Set up event handlers
     ws.onopen = () => {
@@ -628,7 +641,10 @@ class ApiService {
     
     ws.onclose = (event) => {
       console.log(`🔌 WebSocket closed for workflow ${workflowId}. Code: ${event.code}, Reason: ${event.reason}`);
-      this.activeWebSockets.delete(workflowId);
+      // Only remove from map if this is still the active connection
+      if (this.activeWebSockets.get(workflowId) === ws) {
+        this.activeWebSockets.delete(workflowId);
+      }
     };
     
     ws.onmessage = (event) => {
@@ -644,9 +660,6 @@ class ApiService {
         console.error('Failed to parse WebSocket message:', error);
       }
     };
-    
-    // Store the connection
-    this.activeWebSockets.set(workflowId, ws);
     
     return ws;
   }

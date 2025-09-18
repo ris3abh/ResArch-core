@@ -220,34 +220,39 @@ class WebSocketManager:
                 if dead_conn_id in self.connection_metadata:
                     del self.connection_metadata[dead_conn_id]
     
-    async def send_to_workflow(self, workflow_id: str, message: dict):
-        """Send workflow update to all subscribers."""
-        workflow_id = str(workflow_id)
-        if workflow_id in self.workflow_connections:
-            dead_connections = set()
-            
-            for connection_id in list(self.workflow_connections[workflow_id]):
-                if connection_id in self.active_connections:
-                    try:
-                        websocket = self.active_connections[connection_id]
-                        await websocket.send_text(json.dumps(message))
-                        logger.debug(f"Sent message to workflow {workflow_id} connection {connection_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to send to workflow {workflow_id}: {str(e)}")
-                        dead_connections.add(connection_id)
-                else:
-                    logger.debug(f"Connection {connection_id} not in active connections")
-                    dead_connections.add(connection_id)
-            
-            # Clean up dead connections
-            for dead_conn_id in dead_connections:
-                self.workflow_connections[workflow_id].discard(dead_conn_id)
-                if dead_conn_id in self.active_connections:
-                    del self.active_connections[dead_conn_id]
-                if dead_conn_id in self.connection_metadata:
-                    del self.connection_metadata[dead_conn_id]
-        else:
-            logger.debug(f"No connections for workflow {workflow_id}")
+    async def send_to_workflow(self, workflow_id: str, message: Dict[str, Any]):
+        """Send message to all connections subscribed to a workflow."""
+        if workflow_id not in self.workflow_connections:
+            return
+        
+        dead_connections = set()
+        for connection_id in list(self.workflow_connections[workflow_id]):
+            try:
+                websocket = self.active_connections.get(connection_id)
+                if websocket:
+                    # Check if WebSocket is still open before sending
+                    if hasattr(websocket, 'client_state'):
+                        from starlette.websockets import WebSocketState
+                        if websocket.client_state != WebSocketState.CONNECTED:
+                            dead_connections.add(connection_id)
+                            continue
+                            
+                    await websocket.send_json(message)
+                    logger.debug(f"✅ Sent to workflow {workflow_id} via {connection_id}")
+            except Exception as e:
+                # Don't log every failure - just mark for cleanup
+                dead_connections.add(connection_id)
+        
+        # Clean up dead connections
+        for conn_id in dead_connections:
+            self.workflow_connections[workflow_id].discard(conn_id)
+            if conn_id in self.active_connections:
+                del self.active_connections[conn_id]
+            if conn_id in self.connection_metadata:
+                del self.connection_metadata[conn_id]
+        
+        if dead_connections:
+            logger.info(f"Cleaned up {len(dead_connections)} dead connections for workflow {workflow_id}")
     
     async def broadcast_agent_message(self, workflow_id: str, agent_message: dict):
         """

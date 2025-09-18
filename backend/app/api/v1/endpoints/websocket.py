@@ -1,13 +1,14 @@
-# backend/app/api/v1/endpoints/websocket.py
 """
-Enhanced WebSocket endpoints with human interaction support for CAMEL workflows
+Enhanced WebSocket endpoints with detailed debugging
 """
 import json
 import logging
 import asyncio
+import traceback
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from starlette.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -105,20 +106,35 @@ async def handle_websocket_message(workflow_id: str, data: Dict[Any, Any], webso
 
 
 @router.websocket("/workflows/{workflow_id}")
-async def workflow_websocket(websocket: WebSocket, workflow_id: str):
+async def workflow_websocket(websocket: WebSocket, workflow_id: str, token: Optional[str] = Query(None)):
     """WebSocket endpoint for real-time workflow updates and human interaction."""
     
+    logger.info(f"[1] WebSocket connection attempt for workflow {workflow_id}")
+    logger.info(f"[1a] WebSocket state before accept: {websocket.client_state if hasattr(websocket, 'client_state') else 'unknown'}")
+    logger.info(f"[1b] Client info: {websocket.client if hasattr(websocket, 'client') else 'unknown'}")
+    
     # Accept the connection FIRST, before any other operations
-    await websocket.accept()
-    logger.info(f"WebSocket accepted for workflow {workflow_id}")
+    try:
+        await websocket.accept()
+        logger.info(f"[2] WebSocket accepted for workflow {workflow_id}")
+        logger.info(f"[2a] WebSocket state after accept: {websocket.client_state if hasattr(websocket, 'client_state') else 'unknown'}")
+    except Exception as e:
+        logger.error(f"[2-ERROR] Failed to accept WebSocket: {e}")
+        logger.error(f"[2-ERROR] Traceback: {traceback.format_exc()}")
+        return
+    
+    # Add small delay to ensure client is ready
+    await asyncio.sleep(0.1)
     
     if not websocket_manager:
+        logger.error("[3] WebSocket manager not available")
         await websocket.close(code=1011, reason="WebSocket manager not available")
         return
     
     connection_id = None
     try:
         # Now register with manager (WITHOUT calling accept again)
+        logger.info(f"[4] Registering connection with manager")
         connection_id = await websocket_manager.connect_accepted(
             websocket=websocket,
             connection_type="workflow",
@@ -126,25 +142,50 @@ async def workflow_websocket(websocket: WebSocket, workflow_id: str):
             user_id="anonymous"
         )
         
-        logger.info(f"Connection registered with ID: {connection_id}")
+        logger.info(f"[5] Connection registered with ID: {connection_id}")
         
-        # Send connection confirmation
+        # Check WebSocket state before sending
+        if hasattr(websocket, 'client_state'):
+            logger.info(f"[5a] WebSocket state before send: {websocket.client_state}")
+        if hasattr(websocket, 'application_state'):
+            logger.info(f"[5b] WebSocket app state: {websocket.application_state}")
+        
+        # Send connection confirmation with detailed error handling
         try:
-            await websocket.send_json({
+            # Check if WebSocket is still open
+            if hasattr(websocket, 'client_state') and websocket.client_state != WebSocketState.CONNECTED:
+                logger.error(f"[5-ERROR] WebSocket not in CONNECTED state: {websocket.client_state}")
+                raise Exception(f"WebSocket not connected: {websocket.client_state}")
+            
+            confirmation_msg = {
                 "type": "connection_established",
                 "workflow_id": workflow_id,
                 "connection_id": connection_id,
                 "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            logger.info(f"[5] Sent connection confirmation for {workflow_id}")
+            }
+            
+            logger.info(f"[5c] Attempting to send: {confirmation_msg}")
+            await websocket.send_json(confirmation_msg)
+            logger.info(f"[6] Sent connection confirmation for {workflow_id}")
+            
+        except WebSocketDisconnect as e:
+            logger.error(f"[5-ERROR] WebSocket disconnected during send: code={e.code}, reason={e.reason}")
+            raise
+        except ConnectionError as e:
+            logger.error(f"[5-ERROR] Connection error during send: {e}")
+            logger.error(f"[5-ERROR] Connection type: {type(e)}")
+            raise
         except Exception as e:
             logger.error(f"[5-ERROR] Failed to send connection confirmation: {e}")
+            logger.error(f"[5-ERROR] Exception type: {type(e).__name__}")
+            logger.error(f"[5-ERROR] Exception details: {str(e)}")
+            logger.error(f"[5-ERROR] Traceback: {traceback.format_exc()}")
             raise
         
         # Get initial workflow status if available
         if workflow_service:
             try:
-                logger.info(f"[6] Getting workflow status for {workflow_id}")
+                logger.info(f"[7] Getting workflow status for {workflow_id}")
                 workflow_status = await workflow_service.get_workflow_status(workflow_id)
                 if workflow_status:
                     await websocket.send_json({
@@ -152,14 +193,13 @@ async def workflow_websocket(websocket: WebSocket, workflow_id: str):
                         "status": workflow_status,
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     })
-                    logger.info(f"[7] Sent workflow status for {workflow_id}")
+                    logger.info(f"[8] Sent workflow status for {workflow_id}")
             except Exception as e:
                 logger.warning(f"[7-WARNING] Failed to get initial workflow status: {e}")
         
-        logger.info(f"[8] Entering main loop for {workflow_id}")
+        logger.info(f"[9] Entering main loop for {workflow_id}")
         
-        # THE CRITICAL FIX: Use receive_text with timeout
-        import asyncio
+        # Main message loop
         while True:
             try:
                 # Wait for message with timeout
@@ -167,7 +207,7 @@ async def workflow_websocket(websocket: WebSocket, workflow_id: str):
                     websocket.receive_text(),
                     timeout=30.0  # 30 second timeout
                 )
-                logger.debug(f"[9] Received message from client: {message[:100]}")
+                logger.debug(f"[10] Received message from client: {message[:100] if message else 'empty'}")
                 
                 # Parse and handle message
                 try:
@@ -192,22 +232,28 @@ async def workflow_websocket(websocket: WebSocket, workflow_id: str):
                     logger.error(f"[11-ERROR] Failed to send heartbeat: {e}")
                     break  # Connection is dead
                     
-            except WebSocketDisconnect:
-                logger.info(f"[12] WebSocket disconnected for workflow {workflow_id}")
+            except WebSocketDisconnect as e:
+                logger.info(f"[12] WebSocket disconnected for workflow {workflow_id}: code={e.code}, reason={e.reason}")
                 break
                 
             except Exception as e:
                 logger.error(f"[13-ERROR] Unexpected error in WebSocket loop: {e}")
+                logger.error(f"[13-ERROR] Traceback: {traceback.format_exc()}")
                 break
     
     except Exception as e:
         logger.error(f"[14-ERROR] WebSocket connection error for workflow {workflow_id}: {e}")
+        logger.error(f"[14-ERROR] Exception type: {type(e).__name__}")
+        logger.error(f"[14-ERROR] Traceback: {traceback.format_exc()}")
     
     finally:
         # Clean disconnect
         if connection_id and websocket_manager:
             logger.info(f"[15] Cleaning up connection {connection_id}")
-            await websocket_manager.disconnect(websocket)
+            try:
+                await websocket_manager.disconnect(websocket)
+            except Exception as e:
+                logger.error(f"[15-ERROR] Error during cleanup: {e}")
         logger.info(f"[16] WebSocket connection closed for workflow {workflow_id}")
 
 

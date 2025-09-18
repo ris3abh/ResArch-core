@@ -1,5 +1,6 @@
 // frontend/src/components/workflow/ChatWorkflowInterface.tsx
 // Enhanced version with proper backend integration and human input handling
+// FIXED: WebSocket connection management to prevent multiple connections
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -87,18 +88,28 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [workflowData, setWorkflowData] = useState<WorkflowResponse | null>(null);
   
-  // Refs
+  // Refs for stable references
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Connection state tracking refs to prevent multiple connections
+  const isConnectingRef = useRef(false);
+  const hasInitializedRef = useRef(false);
+  const workflowIdRef = useRef(workflowId);
+  
+  // Update workflowId ref when prop changes
+  useEffect(() => {
+    workflowIdRef.current = workflowId;
+  }, [workflowId]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Add system message helper
+  // Stable message helpers that don't cause re-renders
   const addSystemMessage = useCallback((content: string) => {
     const message: WorkflowMessage = {
       id: `sys-${Date.now()}-${Math.random()}`,
@@ -110,7 +121,6 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     setMessages(prev => [...prev, message]);
   }, []);
 
-  // Add agent message helper
   const addAgentMessage = useCallback((content: string, agentType?: string, stage?: string) => {
     const message: WorkflowMessage = {
       id: `agent-${Date.now()}-${Math.random()}`,
@@ -121,15 +131,17 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       metadata: {
         agent_type: agentType,
         stage: stage,
-        workflow_id: workflowId
+        workflow_id: workflowIdRef.current
       }
     };
     setMessages(prev => [...prev, message]);
-  }, [workflowId]);
+  }, []);
 
-  // Handle WebSocket messages based on backend message types
+  // Stable WebSocket message handler
+  // Stable WebSocket message handler
   const handleWebSocketMessage = useCallback((data: any) => {
     console.log('📨 WebSocket message received:', data.type, data);
+    console.log('Full message data:', JSON.stringify(data, null, 2)); // DEBUG: See full message structure
 
     switch (data.type) {
       case 'connection_established':
@@ -137,8 +149,9 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         setReconnectAttempts(0);
         addSystemMessage(`✅ Connected to workflow (ID: ${data.workflow_id})`);
         // Request initial status
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'get_status' }));
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'get_status' }));
         }
         break;
 
@@ -168,25 +181,57 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         break;
 
       case 'agent_message':
-        const agentContent = data.data?.message_content || data.data?.content || data.content || '';
-        const agentType = data.data?.agent_type || data.agent_type || data.role;
-        const messageStage = data.data?.stage || data.stage;
+      case 'agent_communication':  // Added alternate type
+      case 'agent_output':         // Moved here to handle together
+        // Log what we're receiving for debugging
+        console.log('Agent message raw data:', {
+          type: data.type,
+          content: data.data?.message_content || data.data?.content || data.content || data.message,
+          agent: data.data?.agent_type || data.agent_type || data.role || data.agent_role,
+          stage: data.data?.stage || data.stage,
+          hasData: !!data.data,
+          dataKeys: data.data ? Object.keys(data.data) : [],
+          topLevelKeys: Object.keys(data)
+        });
         
-        if (agentContent) {
+        // Try multiple possible content fields
+        const agentContent = 
+          data.data?.message_content || 
+          data.data?.content || 
+          data.content || 
+          data.message ||
+          data.data?.message ||
+          data.text ||
+          '';
+          
+        // Try multiple possible agent type fields
+        const agentType = 
+          data.data?.agent_type || 
+          data.agent_type || 
+          data.data?.role ||
+          data.role ||
+          data.agent_role ||
+          data.sender ||
+          data.data?.sender ||
+          'Agent';
+          
+        const messageStage = data.data?.stage || data.stage || currentStage;
+        
+        if (agentContent && agentContent.trim()) {
+          console.log('Adding agent message:', { content: agentContent, agent: agentType, stage: messageStage });
           addAgentMessage(agentContent, agentType, messageStage);
           
           // Track active agents
-          if (agentType && !activeAgents.includes(agentType)) {
-            setActiveAgents(prev => [...prev, agentType]);
+          if (agentType && agentType !== 'Agent') {
+            setActiveAgents(prev => {
+              if (!prev.includes(agentType)) {
+                return [...prev, agentType];
+              }
+              return prev;
+            });
           }
-        }
-        break;
-
-      case 'agent_output':
-        // Handle console output from agents
-        if (data.content && data.content.trim()) {
-          const agentRole = data.agent_role || data.role || 'Agent';
-          addAgentMessage(data.content, agentRole, data.stage);
+        } else {
+          console.warn('Agent message had no content:', data);
         }
         break;
 
@@ -205,14 +250,16 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         break;
 
       case 'checkpoint_required':
+      case 'checkpoint':  // Added alternate type
         // Handle checkpoint that needs approval
+        console.log('Checkpoint data received:', data);
         const checkpoint: CheckpointData = {
-          id: data.data?.checkpoint_id || data.checkpoint_id,
+          id: data.data?.checkpoint_id || data.checkpoint_id || data.id,
           title: data.data?.title || data.title || 'Review Required',
           description: data.data?.description || data.description || 'Please review and approve to continue',
           status: 'pending',
           data: data.data?.checkpoint_data || data.data || {},
-          content_preview: data.data?.content_preview
+          content_preview: data.data?.content_preview || data.content_preview
         };
         setPendingCheckpoint(checkpoint);
         setWorkflowStatus('paused');
@@ -247,28 +294,107 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         console.log('💓 Pong received');
         break;
 
+      // Add catch-all for workflow updates
+      case 'workflow_update':
+        console.log('Workflow update:', data);
+        if (data.status) {
+          setWorkflowStatus(data.status === 'in_progress' ? 'running' : data.status);
+        }
+        if (data.stage) {
+          setCurrentStage(data.stage);
+        }
+        if (data.message) {
+          addSystemMessage(`📊 ${data.message}`);
+        }
+        break;
+
+      // Catch message types that might be coming through differently
+      case 'message':
+        console.log('Generic message received:', data);
+        // Try to determine if it's from an agent
+        if (data.sender_type === 'agent' || data.role || data.agent_type) {
+          const content = data.content || data.message || data.text || '';
+          const agent = data.agent_type || data.role || data.sender || 'Agent';
+          if (content) {
+            addAgentMessage(content, agent, data.stage || currentStage);
+          }
+        } else {
+          // Otherwise add as system message
+          const content = data.content || data.message || data.text;
+          if (content) {
+            addSystemMessage(content);
+          }
+        }
+        break;
+
       default:
         console.log('Unknown message type:', data.type);
+        console.log('Full unknown message:', JSON.stringify(data, null, 2));
+        
+        // Try to handle unknown message types that might contain content
+        if (data.message || data.content || data.text) {
+          const content = data.message || data.content || data.text;
+          if (data.agent_type || data.role || data.sender_type === 'agent') {
+            // It's likely an agent message
+            addAgentMessage(content, data.agent_type || data.role || 'Agent', data.stage || currentStage);
+          } else {
+            // Add as system message
+            addSystemMessage(`📬 ${content}`);
+          }
+        }
     }
-  }, [addSystemMessage, addAgentMessage, activeAgents, workflowId, onWorkflowComplete]);
+  }, [addSystemMessage, addAgentMessage, onWorkflowComplete, currentStage]);
 
-  // WebSocket connection management
+  // Stable WebSocket connection function
   const connectWebSocket = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      console.log('WebSocket already connected');
+    // Check if already connected or connecting
+    if (wsRef.current && (
+      wsRef.current.readyState === WebSocket.OPEN || 
+      wsRef.current.readyState === WebSocket.CONNECTING
+    )) {
+      console.log('WebSocket already connected or connecting');
       return;
     }
 
+    // Prevent concurrent connection attempts
+    if (isConnectingRef.current) {
+      console.log('Connection already in progress');
+      return;
+    }
+
+    isConnectingRef.current = true;
+
     try {
       setIsReconnecting(true);
-      const ws = apiService.createWorkflowWebSocket(workflowId);
+      
+      // Clean up any existing connection first
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'Creating new connection');
+        wsRef.current = null;
+      }
+      
+      // Clear existing ping interval
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
+      }
+      
+      const ws = apiService.createWorkflowWebSocket(workflowIdRef.current);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        isConnectingRef.current = false;
         setIsConnected(true);
         setIsReconnecting(false);
         setReconnectAttempts(0);
         console.log('🔌 Connected to workflow WebSocket');
+        
+        // Setup ping interval after connection is established
+        pingIntervalRef.current = setInterval(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 30000); // Ping every 30 seconds
       };
 
       ws.onmessage = (event) => {
@@ -281,73 +407,104 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       };
 
       ws.onclose = (event) => {
+        isConnectingRef.current = false;
         setIsConnected(false);
         console.log('❌ WebSocket disconnected:', event.code, event.reason);
         
         // Clear ping interval
         if (pingIntervalRef.current) {
           clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
         }
         
-        // Attempt to reconnect if not a normal closure and workflow is still running
-        if (event.code !== 1000 && workflowStatus === 'running' && reconnectAttempts < 5) {
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
-          addSystemMessage(`⚠️ Connection lost. Reconnecting in ${delay / 1000}s...`);
-          
-          reconnectTimeoutRef.current = setTimeout(() => {
-            setReconnectAttempts(prev => prev + 1);
-            connectWebSocket();
-          }, delay);
+        // Only reconnect on abnormal closure
+        if (event.code !== 1000 && event.code !== 1001) {
+          // Use functional setState to avoid stale closures
+          setWorkflowStatus(prevStatus => {
+            if (prevStatus === 'running') {
+              setReconnectAttempts(prevAttempts => {
+                if (prevAttempts < 5) {
+                  const delay = Math.min(1000 * Math.pow(2, prevAttempts), 10000);
+                  addSystemMessage(`⚠️ Connection lost. Reconnecting in ${delay / 1000}s...`);
+                  
+                  reconnectTimeoutRef.current = setTimeout(() => {
+                    connectWebSocket();
+                  }, delay);
+                  
+                  return prevAttempts + 1;
+                }
+                return prevAttempts;
+              });
+            }
+            return prevStatus;
+          });
         }
       };
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
+        isConnectingRef.current = false;
         setIsConnected(false);
         setIsReconnecting(false);
       };
 
-      // Setup ping interval to keep connection alive
-      pingIntervalRef.current = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'ping' }));
-        }
-      }, 30000); // Ping every 30 seconds
-
     } catch (error) {
       console.error('Failed to create WebSocket:', error);
+      isConnectingRef.current = false;
       setIsReconnecting(false);
       addSystemMessage('❌ Failed to connect to workflow');
     }
-  }, [workflowId, workflowStatus, reconnectAttempts, handleWebSocketMessage, addSystemMessage]);
+  }, [handleWebSocketMessage, addSystemMessage]);
 
-  // Initialize WebSocket connection
+  // Initialize WebSocket connection only once per workflow
   useEffect(() => {
-    connectWebSocket();
-
-    // Load workflow status via API as backup
-    apiService.getWorkflowStatus(workflowId)
-      .then(workflow => {
-        setWorkflowData(workflow);
-        if (workflow.current_stage) {
-          setCurrentStage(workflow.current_stage);
-        }
-      })
-      .catch(err => console.warn('Failed to load workflow status:', err));
+    // Check if workflow ID has changed
+    const workflowChanged = workflowIdRef.current !== workflowId;
+    
+    if (workflowChanged) {
+      // Clean up existing connection
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'Workflow changed');
+        wsRef.current = null;
+      }
+      hasInitializedRef.current = false;
+      workflowIdRef.current = workflowId;
+    }
+    
+    if (!hasInitializedRef.current) {
+      hasInitializedRef.current = true;
+      connectWebSocket();
+      
+      // Load workflow status via API as backup
+      apiService.getWorkflowStatus(workflowId)
+        .then(workflow => {
+          setWorkflowData(workflow);
+          if (workflow.current_stage) {
+            setCurrentStage(workflow.current_stage);
+          }
+        })
+        .catch(err => console.warn('Failed to load workflow status:', err));
+    }
 
     // Cleanup on unmount
     return () => {
+      hasInitializedRef.current = false;
+      isConnectingRef.current = false;
+      
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
       }
       if (wsRef.current) {
         wsRef.current.close(1000, 'Component unmounting');
+        wsRef.current = null;
       }
     };
-  }, [connectWebSocket, workflowId]);
+  }, [workflowId, connectWebSocket]);
 
   // Handle human input response for CAMEL agents
   const sendHumanResponse = async () => {
@@ -424,6 +581,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   // Handle manual reconnection
   const handleReconnect = () => {
     setReconnectAttempts(0);
+    isConnectingRef.current = false;
     connectWebSocket();
   };
 
@@ -452,7 +610,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'user_message',
-        content: inputMessage,
+        content: userMessage.content,
         workflow_id: workflowId
       }));
     }
