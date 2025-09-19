@@ -1,9 +1,11 @@
 """
-WebSocket Message Interceptor for CAMEL Agents
-===============================================
+WebSocket Message Interceptor for CAMEL Agents - FIXED VERSION
+==============================================================
 
 This module provides the critical bridge between CAMEL's agent communication system
 and the SpinScribe WebSocket infrastructure, enabling real-time frontend updates.
+
+FIXED: Now properly wraps agents to capture their actual output.
 
 Author: SpinScribe Team
 Created: 2025
@@ -13,20 +15,24 @@ License: MIT
 import asyncio
 import logging
 import json
-from typing import Optional, Dict, Any, List, Union, TYPE_CHECKING
+from typing import Optional, Dict, Any, List, Union, TYPE_CHECKING, Callable
 from datetime import datetime, timezone
 import uuid
 from enum import Enum
+import functools
+import inspect
 
 # CAMEL imports - Based on CAMEL Message Cookbook documentation
 try:
     from camel.messages import BaseMessage
     from camel.types import RoleType
+    from camel.agents import ChatAgent
     CAMEL_AVAILABLE = True
 except ImportError:
     # Fallback for testing without CAMEL installed
     BaseMessage = None
     RoleType = None
+    ChatAgent = None
     CAMEL_AVAILABLE = False
     logging.warning("CAMEL not installed - using mock mode for testing")
 
@@ -55,11 +61,13 @@ class AgentRole(Enum):
     """Known agent roles in the SpinScribe system"""
     CONTENT_CREATOR = "Content Creator"
     CONTENT_STRATEGIST = "Content Strategist"
-    STYLE_ANALYST = "Style Analyst"
-    CONTENT_PLANNER = "Content Planner"
+    STYLE_ANALYST = "Style Analysis Agent"
+    CONTENT_PLANNER = "Content Planning Agent"
+    CONTENT_GENERATOR = "Content Generation Agent"
+    QA_AGENT = "Quality Assurance Agent"
     EDITOR = "Editor"
     TASK_PLANNER = "Task Planner"
-    COORDINATOR = "Coordinator"
+    COORDINATOR = "Coordinator Agent"
     CHECKPOINT_MANAGER = "Checkpoint Manager"
     UNKNOWN = "Unknown Agent"
 
@@ -67,16 +75,13 @@ class AgentRole(Enum):
 class WebSocketMessageInterceptor:
     """
     Intercepts CAMEL agent messages and broadcasts them to WebSocket clients.
-    
-    This class serves as the bridge between CAMEL's internal messaging system
-    and the frontend WebSocket connections, enabling real-time visibility into
-    agent workflows.
+    FIXED: Now properly wraps agents and captures their actual output.
     """
     
     def __init__(
         self, 
-        websocket_bridge,
-        workflow_id: str,
+        websocket_bridge=None,
+        workflow_id: str = None,
         chat_id: Optional[str] = None,
         enable_detailed_logging: bool = True
     ):
@@ -90,7 +95,7 @@ class WebSocketMessageInterceptor:
             enable_detailed_logging: Whether to log detailed message content
         """
         self.bridge = websocket_bridge
-        self.workflow_id = workflow_id
+        self.workflow_id = workflow_id or f"workflow_{uuid.uuid4().hex[:8]}"
         self.chat_id = chat_id
         self.enable_detailed_logging = enable_detailed_logging
         
@@ -99,106 +104,402 @@ class WebSocketMessageInterceptor:
         self.agent_message_history = []
         self.pending_human_inputs = {}
         
+        # Agent tracking for wrapping
+        self.wrapped_agents = set()
+        
         # Performance tracking
         self.start_time = datetime.now(timezone.utc)
         self.last_message_time = self.start_time
         
-        logger.info(f"📡 WebSocket Interceptor initialized for workflow {workflow_id}")
+        logger.info(f"📡 WebSocket Interceptor initialized for workflow {self.workflow_id}")
         if chat_id:
             logger.info(f"   Connected to chat: {chat_id}")
     
+    def wrap_agent(self, agent: Any, agent_name: str = None) -> Any:
+        """
+        Wrap a CAMEL agent to intercept its messages.
+        FIXED: Properly wraps the step method to capture actual output.
+        
+        Args:
+            agent: The CAMEL agent to wrap
+            agent_name: Name of the agent for identification
+            
+        Returns:
+            The wrapped agent with intercepted methods
+        """
+        if not agent or id(agent) in self.wrapped_agents:
+            return agent
+        
+        agent_name = agent_name or getattr(agent, 'name', 'Unknown Agent')
+        interceptor = self
+        
+        # Mark as wrapped
+        self.wrapped_agents.add(id(agent))
+        
+        # Store original methods
+        original_step = getattr(agent, 'step', None)
+        original_step_async = getattr(agent, 'step_async', None)
+        original_run = getattr(agent, 'run', None)
+        original_run_async = getattr(agent, 'run_async', None)
+        
+        # Wrap the step method (most commonly used in CAMEL agents)
+        if original_step:
+            def wrapped_step(input_message):
+                """Wrapped step method that intercepts messages"""
+                try:
+                    # Log input
+                    input_content = ""
+                    if hasattr(input_message, 'content'):
+                        input_content = input_message.content
+                    elif isinstance(input_message, dict):
+                        input_content = input_message.get('content', str(input_message))
+                    else:
+                        input_content = str(input_message)
+                    
+                    if input_content:
+                        # Send input notification asynchronously
+                        asyncio.create_task(interceptor.intercept_agent_message(
+                            agent_name=agent_name,
+                            message=f"📥 Received task: {input_content[:200]}...",
+                            role=interceptor._get_agent_role_name(agent_name),
+                            stage="processing_start"
+                        ))
+                    
+                    # Call original method
+                    result = original_step(input_message)
+                    
+                    # Extract output from result
+                    output_content = interceptor._extract_content_from_result(result)
+                    
+                    if output_content:
+                        # Send output notification asynchronously
+                        asyncio.create_task(interceptor.intercept_agent_message(
+                            agent_name=agent_name,
+                            message=output_content,
+                            role=interceptor._get_agent_role_name(agent_name),
+                            stage="processing_complete"
+                        ))
+                    
+                    return result
+                    
+                except Exception as e:
+                    logger.error(f"Error in wrapped_step for {agent_name}: {e}")
+                    return original_step(input_message)
+            
+            agent.step = wrapped_step
+            logger.info(f"   ✅ Wrapped {agent_name} step method")
+        
+        # Wrap async step if available
+        if original_step_async:
+            async def wrapped_step_async(input_message):
+                """Wrapped async step method"""
+                try:
+                    # Log input
+                    input_content = self._extract_content_from_message(input_message)
+                    if input_content:
+                        await interceptor.intercept_agent_message(
+                            agent_name=agent_name,
+                            message=f"📥 Processing: {input_content[:200]}...",
+                            role=interceptor._get_agent_role_name(agent_name),
+                            stage="processing_start"
+                        )
+                    
+                    # Call original
+                    result = await original_step_async(input_message)
+                    
+                    # Log output
+                    output_content = interceptor._extract_content_from_result(result)
+                    if output_content:
+                        await interceptor.intercept_agent_message(
+                            agent_name=agent_name,
+                            message=output_content,
+                            role=interceptor._get_agent_role_name(agent_name),
+                            stage="processing_complete"
+                        )
+                    
+                    return result
+                    
+                except Exception as e:
+                    logger.error(f"Error in wrapped_step_async for {agent_name}: {e}")
+                    return await original_step_async(input_message)
+            
+            agent.step_async = wrapped_step_async
+            logger.info(f"   ✅ Wrapped {agent_name} step_async method")
+        
+        # Wrap run method if available
+        if original_run:
+            def wrapped_run(*args, **kwargs):
+                """Wrapped run method"""
+                try:
+                    # Log start
+                    task = args[0] if args else kwargs.get('task', '')
+                    if task:
+                        asyncio.create_task(interceptor.intercept_agent_message(
+                            agent_name=agent_name,
+                            message=f"🚀 Starting: {str(task)[:200]}...",
+                            role=interceptor._get_agent_role_name(agent_name),
+                            stage="task_start"
+                        ))
+                    
+                    # Call original
+                    result = original_run(*args, **kwargs)
+                    
+                    # Log completion
+                    if result:
+                        asyncio.create_task(interceptor.intercept_agent_message(
+                            agent_name=agent_name,
+                            message=f"✅ Completed: {str(result)[:500]}...",
+                            role=interceptor._get_agent_role_name(agent_name),
+                            stage="task_complete"
+                        ))
+                    
+                    return result
+                    
+                except Exception as e:
+                    logger.error(f"Error in wrapped_run for {agent_name}: {e}")
+                    return original_run(*args, **kwargs)
+            
+            agent.run = wrapped_run
+            logger.info(f"   ✅ Wrapped {agent_name} run method")
+        
+        logger.info(f"   📡 WebSocket wrapping complete for {agent_name}")
+        return agent
+    
+    def _extract_content_from_message(self, message: Any) -> str:
+        """
+        Extract content from various message types.
+        
+        Args:
+            message: The message to extract content from
+            
+        Returns:
+            Extracted content string
+        """
+        if not message:
+            return ""
+        
+        # Handle CAMEL BaseMessage
+        if hasattr(message, 'content'):
+            return str(message.content)
+        
+        # Handle dict
+        if isinstance(message, dict):
+            return message.get('content', '') or message.get('message', '') or str(message)
+        
+        # Handle string
+        return str(message)
+    
+    def _extract_content_from_result(self, result: Any) -> str:
+        """
+        Extract content from agent step result.
+        CRITICAL: This extracts from CAMEL's response structure.
+        
+        Args:
+            result: The result from agent.step()
+            
+        Returns:
+            Extracted content string
+        """
+        if not result:
+            return ""
+        
+        # Handle CAMEL ChatAgentResponse (has msgs attribute)
+        if hasattr(result, 'msgs') and result.msgs:
+            # msgs is a list of messages
+            if isinstance(result.msgs, list) and len(result.msgs) > 0:
+                # Get the first message (usually the agent's response)
+                first_msg = result.msgs[0]
+                if hasattr(first_msg, 'content'):
+                    return str(first_msg.content)
+                else:
+                    return str(first_msg)
+            return str(result.msgs)
+        
+        # Handle direct message
+        if hasattr(result, 'content'):
+            return str(result.content)
+        
+        # Handle dict result
+        if isinstance(result, dict):
+            return result.get('content', '') or result.get('result', '') or str(result)
+        
+        # Fallback
+        return str(result)
+    
+    def _get_agent_role_name(self, agent_name: str) -> str:
+        """
+        Get human-readable role name for agent.
+        
+        Args:
+            agent_name: Raw agent name
+            
+        Returns:
+            Human-readable role name
+        """
+        role_map = {
+            'enhanced_style_analysis': 'Style Analysis Agent',
+            'enhanced_content_planning': 'Content Planning Agent',
+            'enhanced_content_generation': 'Content Generation Agent',
+            'enhanced_qa': 'Quality Assurance Agent',
+            'enhanced_coordinator': 'Coordinator Agent',
+            'style_analyst': 'Style Analysis Agent',
+            'content_planner': 'Content Planning Agent',
+            'content_generator': 'Content Generation Agent',
+            'qa_agent': 'Quality Assurance Agent',
+            'coordinator': 'Coordinator Agent'
+        }
+        
+        # Try exact match first
+        if agent_name in role_map:
+            return role_map[agent_name]
+        
+        # Try to identify by keywords
+        agent_lower = agent_name.lower()
+        if 'style' in agent_lower:
+            return 'Style Analysis Agent'
+        elif 'planning' in agent_lower or 'planner' in agent_lower:
+            return 'Content Planning Agent'
+        elif 'generation' in agent_lower or 'generator' in agent_lower:
+            return 'Content Generation Agent'
+        elif 'qa' in agent_lower or 'quality' in agent_lower:
+            return 'Quality Assurance Agent'
+        elif 'coordinator' in agent_lower:
+            return 'Coordinator Agent'
+        
+        return agent_name.replace('_', ' ').title()
+    
+    async def intercept_agent_message(
+        self,
+        agent_name: str,
+        message: str,
+        role: str = None,
+        stage: str = "processing",
+        **kwargs
+    ) -> None:
+        """
+        Intercept and broadcast an agent message.
+        
+        Args:
+            agent_name: Name of the agent
+            message: Message content
+            role: Agent role
+            stage: Current stage
+            **kwargs: Additional metadata
+        """
+        try:
+            self.message_count += 1
+            
+            # Ensure we have actual content
+            if not message or (isinstance(message, str) and not message.strip()):
+                logger.debug(f"Skipping empty message from {agent_name}")
+                return
+            
+            role = role or self._get_agent_role_name(agent_name)
+            
+            # Build message data with the correct field name
+            message_data = {
+                "type": "agent_message",
+                "agent_type": agent_name,
+                "agent_role": role,
+                "message_content": str(message),  # CRITICAL: Use message_content field
+                "stage": stage,
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                "message_number": self.message_count,
+                **kwargs
+            }
+            
+            # Store in history
+            self.agent_message_history.append(message_data)
+            
+            # Broadcast via bridge if available
+            if self.bridge:
+                try:
+                    if hasattr(self.bridge, 'broadcast_agent_message'):
+                        await self.bridge.broadcast_agent_message(
+                            workflow_id=self.workflow_id,
+                            agent_message=message_data
+                        )
+                    elif hasattr(self.bridge, 'broadcast_to_workflow'):
+                        await self.bridge.broadcast_to_workflow(
+                            self.workflow_id,
+                            message_data
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not broadcast via bridge: {e}")
+            
+            # Log if enabled
+            if self.enable_detailed_logging:
+                logger.info(f"📨 Intercepted {role} message #{self.message_count}")
+                if len(message) < 200:
+                    logger.debug(f"   Content: {message}")
+                else:
+                    logger.debug(f"   Content: {message[:200]}...")
+            
+        except Exception as e:
+            logger.error(f"Error in intercept_agent_message: {e}", exc_info=True)
+    
     async def intercept_message(
         self,
-        message: Union['BaseMessageType', Dict[str, Any]],
+        message: Union[BaseMessageType, Dict[str, Any]],
         agent_type: str,
         stage: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Intercept and broadcast a CAMEL agent message.
-        FIXED: Using message_content field consistently
+        Legacy method for compatibility - redirects to intercept_agent_message.
+        """
+        # Extract content
+        if isinstance(message, dict):
+            content = message.get('content', '')
+        elif hasattr(message, 'content'):
+            content = message.content
+        else:
+            content = str(message)
+        
+        await self.intercept_agent_message(
+            agent_name=agent_type,
+            message=content,
+            role=self._get_agent_role_name(agent_type),
+            stage=stage or "processing",
+            metadata=metadata
+        )
+    
+    async def send_checkpoint(self, checkpoint_id: str, checkpoint_data: Dict[str, Any]) -> None:
+        """
+        Send checkpoint requirement through WebSocket.
         
         Args:
-            message: CAMEL BaseMessage or dict containing message data
-            agent_type: Type/role of the agent sending the message
-            stage: Current workflow stage (e.g., "planning", "creating", "reviewing")
-            metadata: Additional metadata to include in the broadcast
+            checkpoint_id: Unique checkpoint identifier
+            checkpoint_data: Checkpoint details
         """
-        try:
-            self.message_count += 1
-            current_time = datetime.now(timezone.utc)
-            
-            # Extract message content based on type
-            if CAMEL_AVAILABLE and BaseMessage and isinstance(message, BaseMessage):
-                content = message.content
-                role = getattr(message, 'role_name', agent_type)
-                message_info = getattr(message, 'info', {})
-            elif isinstance(message, dict):
-                content = message.get('content', '')
-                role = message.get('role', agent_type)
-                message_info = message.get('info', {})
-            else:
-                content = str(message)
-                role = agent_type
-                message_info = {}
-            
-            # Detect message type from content patterns
-            message_type = self._detect_message_type(content)
-            
-            # Identify agent role
-            agent_role = self._identify_agent_role(agent_type)
-            
-            # CRITICAL FIX: Build message payload with message_content field
-            message_data = {
-                "agent_type": agent_type,
-                "agent_role": agent_role.value,
-                "message_content": content,  # CHANGED from "content" to "message_content"
-                "role": role,
-                "message_type": message_type.value,
-                "stage": stage or self._infer_stage(content),
-                "sequence_number": self.message_count,
-                "timestamp": current_time.isoformat(),
-                "elapsed_time": (current_time - self.start_time).total_seconds(),
-                "workflow_id": self.workflow_id,
-                "metadata": {
-                    **(metadata or {}),
-                    **message_info,
-                    "chat_id": self.chat_id
-                }
-            }
-            
-            # Store in history for context
-            self.agent_message_history.append(message_data)
-            
-            # Broadcast via WebSocket bridge
-            if self.bridge:
-                await self.bridge.broadcast_agent_message(
-                    workflow_id=self.workflow_id,
-                    agent_message=message_data
-                )
-                
-                # Also send to chat if linked
-                if self.chat_id:
-                    await self._send_to_chat(message_data)
-            
-            # Handle special message types
-            if message_type == MessageType.HUMAN_INTERACTION:
-                await self._handle_human_interaction_request(content, message_data)
-            elif message_type == MessageType.CHECKPOINT_REQUEST:
-                await self._handle_checkpoint_request(content, message_data)
-            
-            # Log the interception
-            if self.enable_detailed_logging:
-                logger.info(f"📨 Intercepted {agent_role.value} message #{self.message_count}")
-                logger.debug(f"   Type: {message_type.value}, Stage: {message_data['stage']}")
-                if len(content) < 200:
-                    logger.debug(f"   Content: {content[:100]}...")
-            
-            self.last_message_time = current_time
-            
-        except Exception as e:
-            logger.error(f"❌ Error intercepting message: {e}", exc_info=True)
-            await self._broadcast_error(str(e), agent_type)
+        logger.info(f"🛑 Checkpoint created: {checkpoint_id}")
+        
+        checkpoint_msg = {
+            "type": "checkpoint_required",
+            "checkpoint_id": checkpoint_id,
+            "title": checkpoint_data.get('title', 'Approval Required'),
+            "description": checkpoint_data.get('description', ''),
+            "content_preview": str(checkpoint_data.get('content', ''))[:500],
+            "stage": checkpoint_data.get('stage', 'checkpoint'),
+            "priority": checkpoint_data.get('priority', 'normal'),
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
+        }
+        
+        # Broadcast if bridge available
+        if self.bridge:
+            try:
+                if hasattr(self.bridge, 'broadcast_checkpoint_notification'):
+                    await self.bridge.broadcast_checkpoint_notification(
+                        workflow_id=self.workflow_id,
+                        checkpoint_data=checkpoint_msg
+                    )
+                else:
+                    await self.bridge.broadcast_to_workflow(
+                        self.workflow_id,
+                        checkpoint_msg
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send checkpoint: {e}")
     
     async def intercept_completion(
         self,
@@ -208,11 +509,6 @@ class WebSocketMessageInterceptor:
     ) -> None:
         """
         Intercept and broadcast workflow completion.
-        
-        Args:
-            final_content: The final generated content
-            agent_type: Agent that completed the work
-            metadata: Additional completion metadata
         """
         completion_data = {
             "type": "workflow_completed",
@@ -220,306 +516,22 @@ class WebSocketMessageInterceptor:
             "final_content": final_content,
             "total_messages": self.message_count,
             "duration": (datetime.now(timezone.utc) - self.start_time).total_seconds(),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
             "workflow_id": self.workflow_id,
             "metadata": metadata or {}
         }
         
         if self.bridge:
-            await self.bridge.broadcast_to_workflow(self.workflow_id, completion_data)
+            try:
+                await self.bridge.broadcast_to_workflow(self.workflow_id, completion_data)
+            except Exception as e:
+                logger.error(f"Failed to broadcast completion: {e}")
         
         logger.info(f"✅ Workflow completed after {self.message_count} messages")
-    
-    def _detect_message_type(self, content: str) -> MessageType:
-        """
-        Detect the type of message based on content patterns.
-        
-        Args:
-            content: Message content to analyze
-            
-        Returns:
-            Detected MessageType
-        """
-        content_lower = content.lower()
-        
-        # Check for specific patterns
-        if any(q in content_lower for q in ["question:", "do you", "should we", "which", "what"]):
-            return MessageType.HUMAN_INTERACTION
-        elif any(c in content_lower for c in ["checkpoint", "approval", "review required"]):
-            return MessageType.CHECKPOINT_REQUEST
-        elif any(s in content_lower for s in ["solution:", "here's", "created", "generated"]):
-            return MessageType.SOLUTION
-        elif any(t in content_lower for t in ["thinking", "analyzing", "considering"]):
-            return MessageType.THINKING
-        elif any(e in content_lower for e in ["error", "failed", "exception"]):
-            return MessageType.ERROR
-        elif any(c in content_lower for c in ["completed", "finished", "done", "final"]):
-            return MessageType.COMPLETION
-        elif any(u in content_lower for u in ["working on", "processing", "creating"]):
-            return MessageType.TASK_UPDATE
-        else:
-            return MessageType.AGENT_COMMUNICATION
-    
-    def _identify_agent_role(self, agent_type: str) -> AgentRole:
-        """
-        Identify the specific agent role from the agent type string.
-        
-        Args:
-            agent_type: Raw agent type string
-            
-        Returns:
-            Identified AgentRole
-        """
-        agent_type_lower = agent_type.lower()
-        
-        if "checkpoint" in agent_type_lower:
-            return AgentRole.CHECKPOINT_MANAGER
-        elif "content" in agent_type_lower and "creator" in agent_type_lower:
-            return AgentRole.CONTENT_CREATOR
-        elif "strategist" in agent_type_lower:
-            return AgentRole.CONTENT_STRATEGIST
-        elif "style" in agent_type_lower or "analyst" in agent_type_lower:
-            return AgentRole.STYLE_ANALYST
-        elif "planner" in agent_type_lower:
-            return AgentRole.CONTENT_PLANNER
-        elif "editor" in agent_type_lower:
-            return AgentRole.EDITOR
-        elif "task" in agent_type_lower:
-            return AgentRole.TASK_PLANNER
-        elif "coordinator" in agent_type_lower:
-            return AgentRole.COORDINATOR
-        else:
-            return AgentRole.UNKNOWN
-    
-    def _infer_stage(self, content: str) -> str:
-        """
-        Infer the workflow stage from message content.
-        
-        Args:
-            content: Message content to analyze
-            
-        Returns:
-            Inferred stage name
-        """
-        content_lower = content.lower()
-        
-        if any(p in content_lower for p in ["planning", "outline", "structure"]):
-            return "planning"
-        elif any(a in content_lower for a in ["analyzing", "analysis", "reviewing"]):
-            return "analysis"
-        elif any(c in content_lower for c in ["creating", "writing", "generating"]):
-            return "creation"
-        elif any(r in content_lower for r in ["revising", "editing", "improving"]):
-            return "revision"
-        elif any(f in content_lower for f in ["final", "complete", "done"]):
-            return "completion"
-        else:
-            return "processing"
-    
-    async def _send_to_chat(self, message_data: Dict[str, Any]) -> None:
-        """
-        Send agent message to associated chat.
-        FIXED: Using message_content field
-        
-        Args:
-            message_data: Message data to send to chat
-        """
-        if not self.chat_id or not self.bridge:
-            return
-        
-        try:
-            # Format for chat display with message_content field
-            chat_message = {
-                "type": "agent_message",
-                "sender_type": "agent",
-                "agent_type": message_data["agent_type"],
-                "message_content": message_data["message_content"],  # Use message_content
-                "message_type": "agent_update",
-                "stage": message_data["stage"],
-                "workflow_id": self.workflow_id,
-                "timestamp": message_data["timestamp"],
-                "metadata": message_data.get("metadata", {})
-            }
-            
-            # Use bridge method if available
-            if hasattr(self.bridge, 'broadcast_to_chat'):
-                await self.bridge.broadcast_to_chat(self.chat_id, chat_message)
-            
-        except Exception as e:
-            logger.warning(f"Could not send to chat: {e}")
-    
-    async def _handle_human_interaction_request(
-        self,
-        content: str,
-        message_data: Dict[str, Any]
-    ) -> None:
-        """
-        Handle requests for human interaction.
-        
-        Args:
-            content: Question content
-            message_data: Full message data
-        """
-        try:
-            request_id = str(uuid.uuid4())
-            
-            # Extract question from content
-            question = content
-            if "Question:" in content:
-                question = content.split("Question:")[1].strip()
-            
-            agent_requesting = message_data.get("agent_type", "Unknown Agent")
-            stage = message_data.get("stage", "unknown")
-            timestamp = message_data.get("timestamp", datetime.now(timezone.utc).isoformat())
-            
-            interaction_data = {
-                "type": "human_input_required",
-                "request_id": request_id,
-                "question": question,
-                "agent_requesting": agent_requesting,
-                "stage": stage,
-                "workflow_id": self.workflow_id,
-                "chat_id": self.chat_id,
-                "timestamp": timestamp
-            }
-            
-            # Store pending request
-            self.pending_human_inputs[request_id] = interaction_data
-            
-            # Broadcast to workflow and chat
-            if self.bridge:
-                await self.bridge.broadcast_to_workflow(self.workflow_id, interaction_data)
-                
-                if self.chat_id and hasattr(self.bridge, 'broadcast_to_chat'):
-                    agent_role = message_data.get('agent_role', 'Agent')
-                    await self.bridge.broadcast_to_chat(self.chat_id, {
-                        **interaction_data,
-                        "message_content": f"🤔 {agent_role} needs your input: {question}"
-                    })
-            
-            logger.info(f"❓ Human interaction requested: {request_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling human interaction: {e}", exc_info=True)
-    
-    async def _handle_checkpoint_request(
-        self,
-        content: str,
-        message_data: Dict[str, Any]
-    ) -> None:
-        """
-        Handle checkpoint approval requests.
-        FIXED: Using checkpoint_required type instead of checkpoint_approval_required
-        
-        Args:
-            content: Checkpoint content
-            message_data: Full message data
-        """
-        try:
-            checkpoint_id = f"checkpoint_{uuid.uuid4().hex[:8]}"
-            
-            agent_type = message_data.get("agent_type", "Checkpoint Manager")
-            agent_role = message_data.get("agent_role", "Checkpoint Manager")
-            stage = message_data.get("stage", "checkpoint_approval")
-            timestamp = message_data.get("timestamp", datetime.now(timezone.utc).isoformat())
-            
-            # Handle different checkpoint data structures
-            if "checkpoint_data" in message_data:
-                checkpoint_info = message_data.get("checkpoint_data", {})
-                title = checkpoint_info.get("title", f"Approval needed from {agent_role}")
-                description = checkpoint_info.get("description", "Please review and approve")
-                priority = checkpoint_info.get("priority", "medium")
-                checkpoint_type = checkpoint_info.get("checkpoint_type", "review")
-                checkpoint_id = checkpoint_info.get("checkpoint_id", checkpoint_id)
-                content_preview = checkpoint_info.get("content", content)[:500]
-            else:
-                title = message_data.get("title", f"Approval needed from {agent_role}")
-                description = message_data.get("description", "Please review and approve")
-                priority = message_data.get("priority", "medium")
-                checkpoint_type = message_data.get("checkpoint_type", "review")
-                content_preview = content[:500] if content else ""
-            
-            # CRITICAL FIX: Use "checkpoint_required" type for frontend compatibility
-            checkpoint_data = {
-                "type": "checkpoint_required",  # CHANGED from "checkpoint_approval_required"
-                "checkpoint_id": checkpoint_id,
-                "title": title,
-                "description": description,
-                "content_preview": content_preview,  # Add content preview for UI display
-                "status": "pending",  # Add status field
-                "agent_type": agent_type,
-                "agent_role": agent_role,
-                "stage": stage,
-                "priority": priority,
-                "checkpoint_type": checkpoint_type,
-                "workflow_id": self.workflow_id,
-                "timestamp": timestamp,
-                "requires_approval": True
-            }
-            
-            # Broadcast checkpoint using the bridge's dedicated method
-            if self.bridge:
-                if hasattr(self.bridge, 'broadcast_checkpoint_notification'):
-                    # Pass the checkpoint data without the type field (method will add it)
-                    await self.bridge.broadcast_checkpoint_notification(
-                        workflow_id=self.workflow_id,
-                        checkpoint_data={
-                            "checkpoint_id": checkpoint_id,
-                            "title": title,
-                            "description": description,
-                            "content": content_preview,
-                            "status": "pending",
-                            "agent_type": agent_type,
-                            "agent_role": agent_role,
-                            "stage": stage,
-                            "priority": priority,
-                            "checkpoint_type": checkpoint_type
-                        }
-                    )
-                else:
-                    # Fallback to direct broadcast
-                    await self.bridge.broadcast_to_workflow(self.workflow_id, checkpoint_data)
-            
-            logger.info(f"🛑 Checkpoint created: {checkpoint_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling checkpoint: {e}", exc_info=True)
-    
-    async def intercept_checkpoint(self, checkpoint_data: Dict[str, Any]) -> None:
-        """
-        Public method to handle checkpoint creation and broadcast.
-        This is called from external code when checkpoints are created.
-        
-        Args:
-            checkpoint_data: Dictionary containing checkpoint information
-        """
-        try:
-            agent_role = checkpoint_data.get('agent_role', 'Checkpoint Manager')
-            agent_type = checkpoint_data.get('agent_type', 'Checkpoint Manager')
-            content = checkpoint_data.get('content', '')
-            
-            # Build message_data with safe defaults
-            message_data = {
-                "agent_type": agent_type,
-                "agent_role": agent_role,
-                "stage": "checkpoint_approval",
-                "checkpoint_data": checkpoint_data,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-            
-            # Delegate to the internal handler
-            await self._handle_checkpoint_request(content, message_data)
-            
-        except Exception as e:
-            logger.error(f"Error in intercept_checkpoint: {e}", exc_info=True)
     
     async def _broadcast_error(self, error_msg: str, agent_type: str) -> None:
         """
         Broadcast an error message.
-        
-        Args:
-            error_msg: Error message
-            agent_type: Agent that encountered the error
         """
         if self.bridge:
             error_data = {
@@ -527,67 +539,48 @@ class WebSocketMessageInterceptor:
                 "agent_type": agent_type,
                 "error": error_msg,
                 "workflow_id": self.workflow_id,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
             }
             try:
                 await self.bridge.broadcast_to_workflow(self.workflow_id, error_data)
             except Exception as e:
                 logger.error(f"Failed to broadcast error: {e}")
     
-    def get_statistics(self) -> Dict[str, Any]:
+    def _identify_agent_role(self, agent_type: str) -> AgentRole:
         """
-        Get interceptor statistics.
+        Identify the specific agent role from the agent type string.
+        """
+        agent_type_lower = agent_type.lower()
         
-        Returns:
-            Dictionary of statistics
-        """
-        current_time = datetime.now(timezone.utc)
-        duration = (current_time - self.start_time).total_seconds()
-        return {
-            "workflow_id": self.workflow_id,
-            "chat_id": self.chat_id,
-            "total_messages": self.message_count,
-            "duration_seconds": duration,
-            "messages_per_minute": self.message_count / max(1, duration / 60),
-            "pending_human_inputs": len(self.pending_human_inputs),
-            "agent_breakdown": self._get_agent_breakdown()
-        }
+        if "checkpoint" in agent_type_lower:
+            return AgentRole.CHECKPOINT_MANAGER
+        elif "style" in agent_type_lower:
+            return AgentRole.STYLE_ANALYST
+        elif "planning" in agent_type_lower or "planner" in agent_type_lower:
+            return AgentRole.CONTENT_PLANNER
+        elif "generation" in agent_type_lower or "generator" in agent_type_lower:
+            return AgentRole.CONTENT_GENERATOR
+        elif "qa" in agent_type_lower or "quality" in agent_type_lower:
+            return AgentRole.QA_AGENT
+        elif "coordinator" in agent_type_lower:
+            return AgentRole.COORDINATOR
+        else:
+            return AgentRole.UNKNOWN
     
-    def _get_agent_breakdown(self) -> Dict[str, int]:
+    async def _handle_checkpoint_request(self, content: str, message_data: Dict[str, Any]) -> None:
         """
-        Get breakdown of messages by agent.
+        Handle checkpoint requests - internal method called by checkpoint system.
+        """
+        checkpoint_data = message_data.get('checkpoint_data', {})
+        checkpoint_id = checkpoint_data.get('checkpoint_id', f"checkpoint_{uuid.uuid4().hex[:8]}")
         
-        Returns:
-            Dictionary of agent message counts
-        """
-        breakdown = {}
-        for msg in self.agent_message_history:
-            agent = msg.get("agent_role", "Unknown")
-            breakdown[agent] = breakdown.get(agent, 0) + 1
-        return breakdown
-    
-    async def cleanup(self) -> None:
-        """
-        Clean up resources and send final statistics.
-        """
-        stats = self.get_statistics()
-        logger.info(f"📊 Interceptor cleanup - {stats['total_messages']} messages in {stats['duration_seconds']:.1f}s")
-        
-        if self.bridge and self.workflow_id:
-            try:
-                await self.bridge.broadcast_to_workflow(self.workflow_id, {
-                    "type": "interceptor_stats",
-                    "stats": stats,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                })
-            except Exception as e:
-                logger.error(f"Failed to broadcast cleanup stats: {e}")
+        await self.send_checkpoint(checkpoint_id, checkpoint_data)
 
 
 # Helper function for easy integration
-async def create_interceptor(
-    websocket_bridge,
-    workflow_id: str,
+def create_interceptor(
+    websocket_bridge=None,
+    workflow_id: str = None,
     chat_id: Optional[str] = None
 ) -> WebSocketMessageInterceptor:
     """
@@ -606,9 +599,5 @@ async def create_interceptor(
         workflow_id=workflow_id,
         chat_id=chat_id
     )
-    
-    # Link workflow to chat if both exist
-    if websocket_bridge and chat_id and hasattr(websocket_bridge, 'link_workflow_to_chat'):
-        websocket_bridge.link_workflow_to_chat(workflow_id, chat_id)
     
     return interceptor
