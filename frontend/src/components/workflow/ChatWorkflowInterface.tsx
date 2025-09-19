@@ -1,6 +1,7 @@
 // frontend/src/components/workflow/ChatWorkflowInterface.tsx
 // Enhanced version with proper backend integration and human input handling
 // FIXED: WebSocket connection management and message type compatibility
+// FIXED: Checkpoint modal state persistence using ref pattern
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -97,6 +98,12 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingCheckpointRef = useRef<CheckpointData | null>(null); // CHANGE 1: Added ref for checkpoint state
+  
+  // CHANGE 2: Sync ref with state to maintain consistency
+  useEffect(() => {
+    pendingCheckpointRef.current = pendingCheckpoint;
+  }, [pendingCheckpoint]);
   
   // Connection state tracking refs to prevent multiple connections
   const isConnectingRef = useRef(false);
@@ -147,6 +154,36 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     console.log('📨 WebSocket message received:', data.type, data);
 
     switch (data.type) {
+      case 'workflow_output':
+        // Handle workflow output messages (logs from backend)
+        const outputContent = data.content || data.message || '';
+        
+        // Filter out noise - only show important messages
+        if (outputContent && 
+            !outputContent.includes('INFO') && 
+            !outputContent.includes('DEBUG') &&
+            !outputContent.includes('WARNING') &&
+            outputContent.trim().length > 0) {
+          
+          // Check if it's an error message
+          if (outputContent.includes('ERROR') || data.stream === 'stderr') {
+            addSystemMessage(`⚠️ ${outputContent}`);
+          } else {
+            // For other output, check if it's meaningful
+            const isAgentOutput = data.message_type === 'agent' || 
+                                outputContent.includes('Agent') ||
+                                outputContent.includes('checkpoint');
+            
+            if (isAgentOutput) {
+              // Try to extract agent type from the message
+              const agentMatch = outputContent.match(/(\w+)\s+Agent:/);
+              const agentType = agentMatch ? agentMatch[1] : 'Workflow';
+              addAgentMessage(outputContent, agentType, data.stage || currentStage);
+            }
+          }
+        }
+        break;
+
       case 'connection_established':
         setIsConnected(true);
         setReconnectAttempts(0);
@@ -241,12 +278,17 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         addSystemMessage(`❓ Input needed: ${data.question}`);
         break;
 
-      // FIXED: Add case for checkpoint_approval_required
       case 'checkpoint_approval_required':
       case 'checkpoint_required':
       case 'checkpoint':
-        // Handle checkpoint that needs approval - ensure proper null checking
+        // CHANGE 3: Updated checkpoint handling to use ref for comparison
         console.log('Checkpoint data received:', data);
+        
+        // Use ref instead of state for the check to avoid stale closure
+        if (pendingCheckpointRef.current) {
+          console.log('Already have pending checkpoint, ignoring new one:', pendingCheckpointRef.current.id);
+          break;
+        }
         
         // Extract checkpoint data with comprehensive null checking
         const checkpointId = data.checkpoint_id || data.data?.checkpoint_id || data.id;
@@ -269,7 +311,10 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
             timeout_seconds: data.timeout_seconds || data.data?.timeout_seconds
           };
           
+          // CHANGE 4: Update both ref and state atomically
+          pendingCheckpointRef.current = checkpoint;
           setPendingCheckpoint(checkpoint);
+          console.log('Checkpoint state set:', checkpoint);
           setWorkflowStatus('paused');
           addSystemMessage(`🔍 Checkpoint: ${checkpoint.title}`);
         } else {
@@ -278,8 +323,9 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         break;
 
       case 'checkpoint_resolved':
-        // Handle checkpoint resolution
-        if (pendingCheckpoint && data.checkpoint_id === pendingCheckpoint.id) {
+        // CHANGE 5: Use ref for comparison to avoid stale closure issues
+        if (pendingCheckpointRef.current && data.checkpoint_id === pendingCheckpointRef.current.id) {
+          pendingCheckpointRef.current = null;
           setPendingCheckpoint(null);
           setWorkflowStatus('running');
           const statusText = data.approved ? '✅ Approved' : '❌ Rejected';
@@ -377,7 +423,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
           }
         }
     }
-  }, [addSystemMessage, addAgentMessage, onWorkflowComplete, currentStage, pendingCheckpoint]);
+  }, [addSystemMessage, addAgentMessage, onWorkflowComplete, currentStage]); // CHANGE 6: Removed pendingCheckpoint from deps
 
   // Enhanced WebSocket connection with retry logic and proper state management
   const connectWebSocket = useCallback(() => {
@@ -594,6 +640,8 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         addSystemMessage(`❌ Checkpoint rejected${feedback ? `: ${feedback}` : ''}`);
       }
       
+      // CHANGE 7: Clear both ref and state when handling approval
+      pendingCheckpointRef.current = null;
       setPendingCheckpoint(null);
       setWorkflowStatus('running');
     } catch (error) {
@@ -640,13 +688,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   };
 
   // Filter messages by stage
-  const filteredMessages = selectedStage === 'all' 
-    ? messages 
-    : messages.filter(msg => 
-        msg.metadata?.stage === selectedStage || 
-        msg.type === 'system' || 
-        msg.type === 'user'
-      );
+  const filteredMessages = messages;
 
   // Agent colors for visual distinction
   const agentColors: { [key: string]: string } = {
@@ -723,7 +765,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
             filteredMessages.map((message) => (
               <div
                 key={message.id}
-                className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
+                className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'} mb-3`}
               >
                 <div className={`max-w-[70%] ${
                   message.type === 'user' 
@@ -732,20 +774,32 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
                     ? 'bg-gray-700 text-gray-300'
                     : message.type === 'checkpoint'
                     ? 'bg-yellow-900/30 border border-yellow-600/30 text-yellow-300'
+                    : message.type === 'agent'
+                    ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white'  // Make agent messages stand out
                     : 'bg-gray-700 text-white'
-                } rounded-lg p-4`}>
+                } rounded-lg p-4 shadow-lg`}>
                   <div className="flex items-start gap-3">
-                    {message.type === 'agent' && <Bot className="w-5 h-5 mt-1 flex-shrink-0" />}
-                    {message.type === 'user' && <User className="w-5 h-5 mt-1 flex-shrink-0" />}
-                    {message.type === 'system' && <Zap className="w-5 h-5 mt-1 flex-shrink-0" />}
+                    {message.type === 'agent' && (
+                      <Bot className="w-5 h-5 mt-1 flex-shrink-0 text-white" />
+                    )}
+                    {message.type === 'user' && (
+                      <User className="w-5 h-5 mt-1 flex-shrink-0" />
+                    )}
+                    {message.type === 'system' && (
+                      <Zap className="w-5 h-5 mt-1 flex-shrink-0" />
+                    )}
                     
                     <div className="flex-1">
-                      {message.sender && (
-                        <p className="text-xs font-medium mb-1 opacity-80">{message.sender}</p>
+                      {message.sender && message.sender !== 'System' && (
+                        <p className="text-xs font-bold mb-1 text-white/90">
+                          {message.sender}
+                        </p>
                       )}
-                      <p className="whitespace-pre-wrap">{message.content}</p>
+                      <p className="whitespace-pre-wrap break-words">{message.content}</p>
                       {message.metadata?.stage && (
-                        <p className="text-xs mt-2 opacity-60">Stage: {message.metadata.stage}</p>
+                        <p className="text-xs mt-2 opacity-60">
+                          Stage: {message.metadata.stage}
+                        </p>
                       )}
                       <p className="text-xs mt-2 opacity-60">
                         {new Date(message.timestamp).toLocaleTimeString()}
@@ -820,60 +874,101 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
           </div>
         )}
 
-        {/* Enhanced Checkpoint Approval UI - FIXED: Shows when checkpoint data is received */}
+        {/* Enhanced Checkpoint Modal Overlay - Now properly controlled by state */}
         {pendingCheckpoint && (
-          <div className="border-t border-gray-700 p-4 bg-blue-900/20">
-            <div className="mb-3">
-              <p className="text-blue-300 font-medium mb-2 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5" />
-                Checkpoint Review
-                {pendingCheckpoint.priority && (
-                  <span className={`text-xs px-2 py-1 rounded ${
-                    pendingCheckpoint.priority === 'high' ? 'bg-red-600' :
-                    pendingCheckpoint.priority === 'medium' ? 'bg-yellow-600' :
-                    'bg-green-600'
-                  }`}>
-                    {pendingCheckpoint.priority.toUpperCase()}
-                  </span>
-                )}
-              </p>
-              <p className="text-white font-semibold">{pendingCheckpoint.title}</p>
-              <p className="text-gray-300 mt-1">{pendingCheckpoint.description}</p>
-              {pendingCheckpoint.checkpoint_type && (
-                <p className="text-sm text-gray-400 mt-1">Type: {pendingCheckpoint.checkpoint_type}</p>
-              )}
-              {pendingCheckpoint.timeout_seconds && (
-                <p className="text-sm text-yellow-400 mt-1">
-                  Auto-approves in {pendingCheckpoint.timeout_seconds} seconds
-                </p>
-              )}
+          <>
+            {/* Debug banner - remove after confirming fix works */}
+            <div style={{ position: 'fixed', top: 0, left: 0, backgroundColor: 'red', color: 'white', padding: '10px', zIndex: 99999 }}>
+              CHECKPOINT ACTIVE: {pendingCheckpoint.id}
             </div>
             
-            {(pendingCheckpoint.content_preview || pendingCheckpoint.full_content) && (
-              <div className="bg-gray-900 rounded-lg p-3 mb-4 max-h-48 overflow-y-auto">
-                <pre className="text-xs text-gray-400 whitespace-pre-wrap">
-                  {pendingCheckpoint.content_preview || pendingCheckpoint.full_content}
-                </pre>
+            {/* Dark overlay background */}
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" style={{ zIndex: 9998 }} />
+            
+            {/* Modal content */}
+            <div className="fixed inset-0 flex items-center justify-center p-4" style={{ zIndex: 9999 }}>
+              <div className="bg-gray-800 border border-gray-700 rounded-xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden">
+                {/* Modal header */}
+                <div className="bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <AlertTriangle className="w-6 h-6 text-white" />
+                      <h2 className="text-xl font-bold text-white">Checkpoint Review Required</h2>
+                    </div>
+                    {pendingCheckpoint.priority && (
+                      <span className={`text-xs px-3 py-1 rounded-full font-semibold ${
+                        pendingCheckpoint.priority === 'high' ? 'bg-red-500 text-white' :
+                        pendingCheckpoint.priority === 'medium' ? 'bg-yellow-500 text-black' :
+                        'bg-green-500 text-white'
+                      }`}>
+                        {pendingCheckpoint.priority.toUpperCase()} PRIORITY
+                      </span>
+                    )}
+                  </div>
+                </div>
+                
+                {/* Modal body */}
+                <div className="p-6 overflow-y-auto max-h-[60vh]">
+                  <div className="mb-4">
+                    <h3 className="text-white font-semibold text-lg mb-2">
+                      {pendingCheckpoint.title}
+                    </h3>
+                    <p className="text-gray-300">
+                      {pendingCheckpoint.description}
+                    </p>
+                    
+                    <div className="flex flex-wrap gap-3 mt-3">
+                      {pendingCheckpoint.checkpoint_type && (
+                        <div className="text-sm bg-gray-700 rounded px-3 py-1">
+                          <span className="text-gray-400">Type: </span>
+                          <span className="text-white">{pendingCheckpoint.checkpoint_type}</span>
+                        </div>
+                      )}
+                      {pendingCheckpoint.timeout_seconds && (
+                        <div className="text-sm bg-yellow-900/30 border border-yellow-600/30 rounded px-3 py-1">
+                          <span className="text-yellow-400">
+                            ⏱️ Auto-approves in {pendingCheckpoint.timeout_seconds} seconds
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  {/* Content preview */}
+                  {(pendingCheckpoint.content_preview || pendingCheckpoint.full_content) && (
+                    <div className="mt-4">
+                      <h4 className="text-sm font-semibold text-gray-400 mb-2">Content Preview:</h4>
+                      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 max-h-64 overflow-y-auto">
+                        <pre className="text-sm text-gray-300 whitespace-pre-wrap font-mono">
+                          {pendingCheckpoint.content_preview || pendingCheckpoint.full_content}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Modal footer with actions */}
+                <div className="border-t border-gray-700 bg-gray-900/50 px-6 py-4">
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => handleCheckpointApproval(true)}
+                      className="flex-1 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 transition-all duration-200 flex items-center justify-center gap-2 font-semibold shadow-lg"
+                    >
+                      <CheckCircle className="w-5 h-5" />
+                      Approve & Continue
+                    </button>
+                    <button
+                      onClick={() => handleCheckpointApproval(false)}
+                      className="flex-1 py-3 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 flex items-center justify-center gap-2 font-semibold shadow-lg"
+                    >
+                      <AlertCircle className="w-5 h-5" />
+                      Request Changes
+                    </button>
+                  </div>
+                </div>
               </div>
-            )}
-            
-            <div className="flex gap-3">
-              <button
-                onClick={() => handleCheckpointApproval(true)}
-                className="flex-1 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
-              >
-                <CheckCircle className="w-5 h-5" />
-                Approve
-              </button>
-              <button
-                onClick={() => handleCheckpointApproval(false)}
-                className="flex-1 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center justify-center gap-2"
-              >
-                <AlertCircle className="w-5 h-5" />
-                Request Changes
-              </button>
             </div>
-          </div>
+          </>
         )}
 
         {/* Regular Input Area */}

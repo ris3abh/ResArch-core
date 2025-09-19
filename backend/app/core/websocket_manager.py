@@ -486,10 +486,8 @@ class WebSocketManager:
         """Broadcast message to workflow subscribers - alias for send_to_workflow"""
         await self.send_to_workflow(workflow_id, message)
     
-    def register_connection(self, websocket: WebSocket, connection_id: str, connection_type: str, resource_id: str):
-        """
-        Register connection manually (for compatibility with websocket endpoint).
-        """
+    async def register_connection(self, websocket: WebSocket, connection_id: str, connection_type: str, resource_id: str):
+        """Register connection manually (for compatibility with websocket endpoint)."""
         self.active_connections[connection_id] = websocket
         self.connection_metadata[connection_id] = {
             "type": connection_type,
@@ -499,11 +497,9 @@ class WebSocketManager:
         
         if connection_type == "workflow":
             self.workflow_connections[resource_id].add(connection_id)
-    
-    def unregister_connection(self, connection_id: str):
-        """
-        Unregister connection manually (for compatibility with websocket endpoint).
-        """
+
+    async def unregister_connection(self, connection_id: str):
+        """Unregister connection manually (for compatibility with websocket endpoint)."""
         if connection_id in self.connection_metadata:
             metadata = self.connection_metadata[connection_id]
             

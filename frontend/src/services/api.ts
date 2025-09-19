@@ -643,7 +643,7 @@ class ApiService {
       connectionTimeout = setTimeout(() => {
         if (ws.readyState !== WebSocket.OPEN) {
           console.error(`⏱️ Reconnection timeout for workflow ${workflowId}`);
-          ws.close(1006, 'Connection timeout');
+          ws.close(1000, 'Connection timeout');
           this.handleWebSocketReconnection(workflowId, wsUrl, nextAttempt);
         }
       }, 10000);
@@ -761,7 +761,7 @@ class ApiService {
     connectionTimeout = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
         console.error(`⏱️ WebSocket connection timeout for workflow ${workflowId}`);
-        ws.close(1006, 'Connection timeout');
+        ws.close(1000, 'Connection timeout');
         // Trigger reconnection
         this.handleWebSocketReconnection(workflowId, wsUrl, 0);
       }

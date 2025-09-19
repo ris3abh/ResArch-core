@@ -64,7 +64,7 @@ export const useWebSocket = (endpoint: string) => {
         if (!connectionEstablished.current) {
           console.error('⏱️ Connection timeout - closing WebSocket');
           if (ws.current) {
-            ws.current.close(1006, 'Connection timeout');
+            ws.current.close(1000, 'Connection timeout');
           }
         }
       }, 10000);
