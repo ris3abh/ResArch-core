@@ -1,6 +1,6 @@
 """
 Enhanced WebSocket endpoints for real-time workflow communication
-FIXED: Properly handles agent messages, checkpoints, and human interactions
+FIXED: Properly handles authentication, agent messages, checkpoints, and human interactions
 """
 import json
 import logging
@@ -24,7 +24,9 @@ chat_connections: Dict[str, Set[str]] = defaultdict(set)
 # Import with error handling
 try:
     from app.core.websocket_manager import websocket_manager
-    from app.core.auth import verify_token
+    # FIX 1: Import from the correct auth module
+    from app.dependencies.auth import get_websocket_user
+    from app.core.database import get_db
     from services.workflow.camel_workflow_service import workflow_service
     from services.workflow.camel_websocket_bridge import CAMELWebSocketBridge
     from spinscribe.checkpoints.checkpoint_manager import CheckpointManager
@@ -47,7 +49,8 @@ except ImportError as e:
     workflow_service = None
     camel_bridge = None
     checkpoint_manager = None
-    verify_token = None
+    get_websocket_user = None
+    get_db = None
 
 
 async def broadcast_to_workflow(workflow_id: str, message: Dict[str, Any]):
@@ -257,7 +260,8 @@ async def handle_websocket_message(
         })
 
 
-@router.websocket("/api/v1/ws/workflows/{workflow_id}")
+# FIX 2: Remove the /api/v1 prefix - it's added by the router
+@router.websocket("/workflows/{workflow_id}")
 async def workflow_websocket(
     websocket: WebSocket,
     workflow_id: str,
@@ -265,33 +269,49 @@ async def workflow_websocket(
 ):
     """
     WebSocket endpoint for real-time workflow updates.
-    FIXED: Properly handles agent messages and checkpoints.
+    FIXED: Properly handles authentication, agent messages and checkpoints.
     """
     
     connection_id = None
     heartbeat_task = None
     
     try:
-        # Step 1: Verify authentication if token provided
-        user = None
-        if token and verify_token:
-            try:
-                user = await verify_token(token)
-                if not user:
-                    await websocket.close(code=4001, reason="Invalid token")
-                    return
-            except Exception as e:
-                logger.warning(f"Token verification failed: {e}")
-                # Continue without auth for now
-        
-        # Step 2: Accept WebSocket connection
+        # FIX 3: Accept WebSocket FIRST (WebSocket protocol requirement)
         await websocket.accept()
         logger.info(f"✅ WebSocket accepted for workflow {workflow_id}")
         
         # Critical: Allow client time to establish connection
         await asyncio.sleep(0.5)
         
-        # Step 3: Generate connection ID and track connection
+        # FIX 4: Properly verify authentication if token provided
+        user = None
+        if token:
+            try:
+                # Get database session and use proper auth function
+                if get_db and get_websocket_user:
+                    async for db in get_db():
+                        user = await get_websocket_user(token, db)
+                        break
+                    
+                    if not user:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Invalid or expired token",
+                            "code": 4001
+                        })
+                        await websocket.close(code=4001, reason="Invalid token")
+                        return
+                    
+                    logger.info(f"✅ Authenticated user: {user.email if hasattr(user, 'email') else user}")
+                else:
+                    logger.warning("Auth dependencies not available, continuing without auth")
+                    
+            except Exception as e:
+                logger.warning(f"Token verification failed: {e}")
+                # For development, continue without auth
+                # In production, you might want to close the connection here
+        
+        # Generate connection ID and track connection
         connection_id = f"workflow_{workflow_id}_{uuid.uuid4().hex[:8]}"
         
         # Store connection info
@@ -308,7 +328,7 @@ async def workflow_websocket(
         
         logger.info(f"📡 Connection registered: {connection_id}")
         
-        # Step 4: Setup heartbeat to keep connection alive
+        # Setup heartbeat to keep connection alive
         async def send_heartbeat():
             """Send periodic heartbeat to keep connection alive"""
             while connection_id in active_connections:
@@ -333,7 +353,7 @@ async def workflow_websocket(
         # Start heartbeat task
         heartbeat_task = asyncio.create_task(send_heartbeat())
         
-        # Step 5: Send connection confirmation with features
+        # Send connection confirmation with features
         await websocket.send_json({
             "type": "connection_established",
             "workflow_id": workflow_id,
@@ -348,7 +368,7 @@ async def workflow_websocket(
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
         
-        # Step 6: Register with CAMEL bridge for agent messages
+        # Register with CAMEL bridge for agent messages
         if camel_bridge:
             # This allows the bridge to send agent messages to this connection
             def agent_message_handler(message: Dict[str, Any]):
@@ -359,7 +379,7 @@ async def workflow_websocket(
             if hasattr(camel_bridge, 'register_workflow_handler'):
                 camel_bridge.register_workflow_handler(workflow_id, agent_message_handler)
         
-        # Step 7: Send initial workflow status
+        # Send initial workflow status
         if workflow_service:
             try:
                 status = await workflow_service.get_workflow_status(workflow_id)
@@ -372,7 +392,7 @@ async def workflow_websocket(
             except Exception as e:
                 logger.warning(f"Could not get initial status: {e}")
         
-        # Step 8: Notify that connection is ready for messages
+        # Notify that connection is ready for messages
         await websocket.send_json({
             "type": "workflow_connection_confirmed",
             "status": "connected",
@@ -382,7 +402,7 @@ async def workflow_websocket(
         
         logger.info(f"🎯 Entering message loop for workflow {workflow_id}")
         
-        # Step 9: Main message handling loop
+        # Main message handling loop
         while True:
             try:
                 # Receive message from client
@@ -468,7 +488,8 @@ async def workflow_websocket(
         logger.info(f"✅ WebSocket fully closed for workflow {workflow_id}")
 
 
-@router.websocket("/api/v1/ws/chats/{chat_id}")
+# FIX 5: Remove /api/v1 prefix from chat endpoint
+@router.websocket("/chats/{chat_id}")
 async def chat_websocket(
     websocket: WebSocket,
     chat_id: str,
@@ -481,9 +502,29 @@ async def chat_websocket(
     heartbeat_task = None
     
     try:
-        # Accept connection
+        # Accept connection first
         await websocket.accept()
         await asyncio.sleep(0.5)
+        
+        # Verify auth if token provided (same pattern as workflow)
+        user = None
+        if token:
+            try:
+                if get_db and get_websocket_user:
+                    async for db in get_db():
+                        user = await get_websocket_user(token, db)
+                        break
+                    
+                    if not user:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Invalid or expired token",
+                            "code": 4001
+                        })
+                        await websocket.close(code=4001, reason="Invalid token")
+                        return
+            except Exception as e:
+                logger.warning(f"Chat token verification failed: {e}")
         
         # Generate connection ID
         connection_id = f"chat_{chat_id}_{uuid.uuid4().hex[:8]}"
@@ -493,6 +534,7 @@ async def chat_websocket(
             'websocket': websocket,
             'type': 'chat',
             'chat_id': chat_id,
+            'user': user,
             'connected_at': datetime.now(timezone.utc)
         }
         
@@ -565,7 +607,8 @@ async def chat_websocket(
             pass
 
 
-@router.get("/api/v1/ws/stats")
+# FIX 6: Remove /api/v1 prefix from stats endpoint
+@router.get("/stats")
 async def get_websocket_stats():
     """Get WebSocket connection statistics."""
     return {
@@ -580,7 +623,8 @@ async def get_websocket_stats():
         "services": {
             "camel_bridge": "connected" if camel_bridge else "disconnected",
             "workflow_service": "connected" if workflow_service else "disconnected",
-            "checkpoint_manager": "connected" if checkpoint_manager else "disconnected"
+            "checkpoint_manager": "connected" if checkpoint_manager else "disconnected",
+            "get_websocket_user": "available" if get_websocket_user else "unavailable"
         },
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
