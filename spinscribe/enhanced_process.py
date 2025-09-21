@@ -93,7 +93,6 @@ async def run_enhanced_content_task(
         builder = EnhancedWorkforceBuilder(
             project_id=project_id,
             websocket_interceptor=websocket_interceptor,
-            use_checkpoints=checkpoints_enabled
         )
         
         workforce = builder.build_enhanced_workforce()
