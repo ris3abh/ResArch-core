@@ -729,11 +729,12 @@ class ApiService {
   }
 
   createWorkflowWebSocket(workflowId: string): WebSocket {
-    // Check if there's already an active connection
+    // Check if connection already exists
     const existing = this.activeWebSockets.get(workflowId);
-    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
-      console.log('🔌 Returning existing WebSocket connection for workflow:', workflowId);
-      return existing;
+    if (existing && (existing.readyState === WebSocket.OPEN || 
+                     existing.readyState === WebSocket.CONNECTING)) {
+        console.log(`✅ WebSocket already exists for workflow ${workflowId}`);
+        return existing;
     }
     
     // Close existing connection if any

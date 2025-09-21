@@ -69,7 +69,7 @@ class CAMELWorkflowService:
             # Wait for WebSocket connection with extended timeout and retry logic
             connected = await self._wait_for_websocket_connection(
                 workflow_id, 
-                timeout=10,  # Increased timeout
+                timeout=30,  # Increased timeout
                 retry_interval=0.5  # Check every 500ms
             )
             

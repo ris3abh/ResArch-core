@@ -113,6 +113,7 @@ class EnhancedWorkforceBuilder:
                             content = result.msg.content if hasattr(result.msg, 'content') else str(result.msg)
                             loop = asyncio.get_event_loop()
                             if loop.is_running():
+                                # Just create the task, don't await (we're in sync context)
                                 asyncio.create_task(
                                     interceptor.intercept_message(
                                         message={"content": content},

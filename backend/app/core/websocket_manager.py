@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
 from collections import defaultdict
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -227,34 +228,42 @@ class WebSocketManager:
     async def send_to_workflow(self, workflow_id: str, message: Dict[str, Any]):
         """Send message to all connections subscribed to a workflow."""
         if workflow_id not in self.workflow_connections:
+            logger.warning(f"No connections for workflow {workflow_id}")
             return
         
-        dead_connections = set()
-        for connection_id in list(self.workflow_connections[workflow_id]):
-            try:
-                websocket = self.active_connections.get(connection_id)
-                if websocket:
-                    # Check if WebSocket is still open before sending
-                    if hasattr(websocket, 'client_state'):
-                        if websocket.client_state != WebSocketState.CONNECTED:
-                            dead_connections.add(connection_id)
-                            continue
-                            
-                    await websocket.send_json(message)
-                    logger.debug(f"✅ Sent to workflow {workflow_id} via {connection_id}")
-            except Exception as e:
-                dead_connections.add(connection_id)
-        
-        # Clean up dead connections
-        for conn_id in dead_connections:
-            self.workflow_connections[workflow_id].discard(conn_id)
-            if conn_id in self.active_connections:
-                del self.active_connections[conn_id]
-            if conn_id in self.connection_metadata:
-                del self.connection_metadata[conn_id]
-        
-        if dead_connections:
-            logger.info(f"Cleaned up {len(dead_connections)} dead connections for workflow {workflow_id}")
+        # Try sending with retries
+        for attempt in range(3):
+            success = False
+            dead_connections = set()
+            
+            for connection_id in list(self.workflow_connections[workflow_id]):
+                try:
+                    websocket = self.active_connections.get(connection_id)
+                    if websocket:
+                        if hasattr(websocket, 'client_state'):
+                            if websocket.client_state != WebSocketState.CONNECTED:
+                                dead_connections.add(connection_id)
+                                continue
+                        
+                        await websocket.send_json(message)
+                        success = True
+                        logger.debug(f"✅ Sent to workflow {workflow_id} via {connection_id}")
+                except Exception as e:
+                    if attempt == 2:  # Last attempt
+                        logger.error(f"Failed to send after 3 attempts: {e}")
+                    dead_connections.add(connection_id)
+            
+            # Clean up dead connections
+            for conn_id in dead_connections:
+                self.workflow_connections[workflow_id].discard(conn_id)
+                if conn_id in self.active_connections:
+                    del self.active_connections[conn_id]
+            
+            if success:
+                break
+            
+            if attempt < 2:  # Not the last attempt
+                await asyncio.sleep(0.5)
     
     async def broadcast_agent_message(self, workflow_id: str, agent_message: dict):
         """
