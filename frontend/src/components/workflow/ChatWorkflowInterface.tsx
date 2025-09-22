@@ -1,9 +1,5 @@
 // frontend/src/components/workflow/ChatWorkflowInterface.tsx
-// PRODUCTION-READY VERSION with all fixes applied
-// FIXED: Agent content generation before checkpoints
-// FIXED: WebSocket message handling with correct field mapping
-// FIXED: Checkpoint modal state management using refs
-// FIXED: Message filtering for clean display
+// ENHANCED VERSION WITH OPEN-ENDED FEEDBACK SUPPORT
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -76,6 +72,9 @@ interface ChatWorkflowInterfaceProps {
   onWorkflowComplete?: (result: any) => void;
 }
 
+// Global WebSocket store to prevent duplicates in StrictMode
+const globalWebSockets = new Map<string, WebSocket>();
+
 const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   workflowId,
   projectId,
@@ -105,22 +104,16 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
   const pendingCheckpointRef = useRef<CheckpointData | null>(null);
   const processedCheckpointIds = useRef<Set<string>>(new Set());
   const processedMessageIds = useRef<Set<string>>(new Set());
+  const mountedRef = useRef(true);
+  const cleanupTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   // Connection state tracking
-  const isConnectingRef = useRef(false);
-  const hasInitializedRef = useRef(false);
-  const workflowIdRef = useRef(workflowId);
   const maxReconnectAttempts = 5;
   
   // Sync checkpoint ref with state
   useEffect(() => {
     pendingCheckpointRef.current = pendingCheckpoint;
   }, [pendingCheckpoint]);
-  
-  // Update workflowId ref when prop changes
-  useEffect(() => {
-    workflowIdRef.current = workflowId;
-  }, [workflowId]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -133,6 +126,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     
     // Skip duplicate messages
     if (processedMessageIds.current.has(content)) {
+      console.log('🔄 Skipping duplicate system message:', content.substring(0, 50));
       return;
     }
     processedMessageIds.current.add(content);
@@ -144,27 +138,52 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       timestamp: new Date().toISOString(),
       sender: 'System'
     };
+    
+    console.log('➕ Adding system message:', content);
     setMessages(prev => [...prev, message]);
   }, []);
 
   const addAgentMessage = useCallback((content: string, agentType?: string, stage?: string) => {
-    // Filter out empty, debug, or template messages
-    if (!content || content.trim().length < 10) return;
+    console.log('🤖 addAgentMessage called:', {
+      contentLength: content?.length,
+      contentPreview: content?.substring(0, 100),
+      agentType,
+      stage
+    });
     
-    // Skip log messages
-    if (content.includes('INFO:') || 
-        content.includes('DEBUG:') || 
-        content.includes('WARNING:') ||
-        content.includes('Token calculation failed') ||
-        content.includes('2025-') ||  // Skip timestamps
-        content.startsWith('[') ||     // Skip bracketed debug info
-        content === 'Multi-agent content creation workflow') {  // Skip template text
+    // Log why messages might be filtered
+    if (!content) {
+      console.log('❌ Rejected: No content');
+      return;
+    }
+    
+    if (content.trim().length < 10) {
+      console.log('❌ Rejected: Content too short (<10 chars):', content);
+      return;
+    }
+    
+    // Check for filtered patterns
+    const filterPatterns = [
+      'INFO:', 'DEBUG:', 'WARNING:', 'Token calculation failed',
+      'Multi-agent content creation workflow'
+    ];
+    
+    for (const pattern of filterPatterns) {
+      if (content.includes(pattern)) {
+        console.log(`❌ Rejected: Contains filtered pattern "${pattern}"`);
+        return;
+      }
+    }
+    
+    if (content.startsWith('[')) {
+      console.log('❌ Rejected: Starts with bracket (debug info)');
       return;
     }
     
     // Create unique ID for deduplication
     const contentKey = `${agentType}-${content.substring(0, 50)}`;
     if (processedMessageIds.current.has(contentKey)) {
+      console.log('❌ Rejected: Duplicate message');
       return;
     }
     processedMessageIds.current.add(contentKey);
@@ -178,33 +197,35 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       metadata: {
         agent_type: agentType,
         stage: stage,
-        workflow_id: workflowIdRef.current
+        workflow_id: workflowId
       }
     };
+    
+    console.log('✅ ADDING AGENT MESSAGE:', {
+      sender: message.sender,
+      contentLength: content.length,
+      stage
+    });
+    
     setMessages(prev => [...prev, message]);
-  }, []);
+  }, [workflowId]);
 
-  // Enhanced WebSocket message handler
+  // Enhanced WebSocket message handler with extensive logging
   const handleWebSocketMessage = useCallback((data: any) => {
-    console.log('📨 WS Message:', { type: data.type, hasContent: !!data.message_content || !!data.content });
+    if (!mountedRef.current) return;
+    
+    console.log('📨 FULL WebSocket Message:', {
+      type: data.type,
+      hasMessageContent: !!data.message_content,
+      messageContentLength: data.message_content?.length,
+      hasContent: !!data.content,
+      hasData: !!data.data,
+      agentType: data.agent_type || data.agent_role,
+      stage: data.stage,
+      fullData: JSON.stringify(data, null, 2)
+    });
 
     switch (data.type) {
-      case 'workflow_output':
-        const outputContent = data.content || data.message || '';
-        
-        // Only show meaningful workflow outputs
-        if (outputContent && 
-            !outputContent.includes('INFO') && 
-            !outputContent.includes('DEBUG') &&
-            !outputContent.includes('Token calculation') &&
-            outputContent.trim().length > 20) {
-          
-          if (outputContent.includes('ERROR') || data.stream === 'stderr') {
-            addSystemMessage(`⚠️ ${outputContent}`);
-          }
-        }
-        break;
-
       case 'connection_established':
         setIsConnected(true);
         setReconnectAttempts(0);
@@ -216,6 +237,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         break;
 
       case 'workflow_status':
+        console.log('📊 Workflow status update:', data);
         const status = data.status;
         if (status) {
           setWorkflowStatus(status.status === 'in_progress' ? 'running' : status.status);
@@ -226,12 +248,14 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         break;
 
       case 'workflow_started':
+        console.log('🚀 Workflow started');
         setWorkflowStatus('running');
         addSystemMessage('🚀 Workflow started - Agents are generating content...');
         break;
 
       case 'workflow_stage_update':
         const stage = data.data?.stage || data.stage;
+        console.log('🔄 Stage update:', stage);
         if (stage) {
           setCurrentStage(stage);
           if (stage === 'agent_processing') {
@@ -243,11 +267,45 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         break;
 
       case 'agent_message':
+        console.log('🤖 AGENT MESSAGE RECEIVED:', {
+          hasMessageContent: !!data.message_content,
+          messageContentLength: data.message_content?.length,
+          agentRole: data.agent_role,
+          agentType: data.agent_type,
+          stage: data.stage,
+          messagePreview: data.message_content?.substring(0, 200)
+        });
+        
+        // Fixed field mapping - backend sends 'message_content' as primary
+        const agentContent = data.message_content || data.data?.message_content || data.content || data.message || '';
+        const agentType = data.agent_role || data.agent_type || 'Agent';
+        const messageStage = data.stage || currentStage;
+        
+        console.log('📝 Processing agent message:', {
+          contentLength: agentContent.length,
+          agentType,
+          messageStage
+        });
+        
+        if (agentContent && typeof agentContent === 'string' && agentContent.trim().length > 0) {
+          console.log('✅ Agent message passes checks, adding to UI');
+          addAgentMessage(agentContent, agentType, messageStage);
+          
+          // Track active agents
+          if (agentType && agentType !== 'Agent' && agentType !== 'System' && !activeAgents.includes(agentType)) {
+            console.log('➕ Adding active agent:', agentType);
+            setActiveAgents(prev => [...prev, agentType]);
+          }
+        } else {
+          console.log('❌ Agent message rejected - empty or invalid');
+        }
+        break;
+
       case 'agent_communication':
       case 'agent_output':
-        // FIXED: Prioritize message_content field as per backend structure
-        const agentContent = 
-          data.message_content ||        // Primary field from backend
+        console.log('📡 Agent communication/output received:', data.type);
+        // Handle other agent message formats
+        const altContent = 
           data.data?.message_content ||  
           data.data?.content || 
           data.content || 
@@ -256,37 +314,34 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
           data.text ||
           '';
           
-        const agentType = 
-          data.agent_type ||
+        const altAgentType = 
           data.data?.agent_type || 
           data.data?.role ||
           data.role ||
-          data.agent_role ||
           data.sender ||
           data.data?.sender ||
           'Agent';
           
-        const messageStage = data.data?.stage || data.stage || currentStage;
+        const altStage = data.data?.stage || data.stage || currentStage;
         
-        // Only add meaningful agent content
-        if (agentContent && typeof agentContent === 'string' && agentContent.trim().length > 20) {
-          // Skip template/placeholder content
-          if (!agentContent.includes('Multi-agent content creation workflow') &&
-              !agentContent.includes('INTEGRATION FEATURES:') &&
-              !agentContent.includes('======')) {
-            
-            console.log('✅ Adding agent message:', { agent: agentType, contentLength: agentContent.length });
-            addAgentMessage(agentContent, agentType, messageStage);
-            
-            // Track active agents
-            if (agentType && agentType !== 'Agent' && !activeAgents.includes(agentType)) {
-              setActiveAgents(prev => [...prev, agentType]);
-            }
+        console.log('📝 Alt format processing:', {
+          contentLength: altContent.length,
+          agentType: altAgentType,
+          stage: altStage
+        });
+        
+        if (altContent && typeof altContent === 'string' && altContent.trim().length > 5) {
+          console.log('✅ Alt format message accepted');
+          addAgentMessage(altContent, altAgentType, altStage);
+          
+          if (altAgentType && altAgentType !== 'Agent' && !activeAgents.includes(altAgentType)) {
+            setActiveAgents(prev => [...prev, altAgentType]);
           }
         }
         break;
 
       case 'human_input_required':
+        console.log('❓ Human input required:', data);
         const inputRequest: HumanInputRequest = {
           request_id: data.request_id,
           question: data.question,
@@ -302,40 +357,56 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       case 'checkpoint_approval_required':
       case 'checkpoint_required':
       case 'checkpoint':
-        // FIXED: Use unique checkpoint ID tracking to prevent duplicates
+        console.log('🔍 CHECKPOINT RECEIVED:', {
+          type: data.type,
+          hasCheckpointId: !!data.checkpoint_id,
+          hasDataCheckpointId: !!data.data?.checkpoint_id,
+          hasId: !!data.id,
+          hasFullContent: !!data.full_content,
+          hasContentPreview: !!data.content_preview,
+          hasDataContent: !!data.data?.content,
+          hasDataContentPreview: !!data.data?.content_preview,
+          title: data.title || data.data?.title,
+          description: data.description || data.data?.description
+        });
+        
         const checkpointId = data.checkpoint_id || data.data?.checkpoint_id || data.id;
         
         if (!checkpointId) {
-          console.warn('Checkpoint without ID:', data);
+          console.warn('❌ Checkpoint without ID:', data);
           break;
         }
         
-        // Skip if we've already processed this checkpoint
         if (processedCheckpointIds.current.has(checkpointId)) {
-          console.log('Skipping duplicate checkpoint:', checkpointId);
+          console.log('🔄 Skipping duplicate checkpoint:', checkpointId);
           break;
         }
         
-        // Skip if we already have a pending checkpoint
         if (pendingCheckpointRef.current) {
-          console.log('Already have pending checkpoint, queueing:', checkpointId);
+          console.log('⏳ Already have pending checkpoint, queueing:', checkpointId);
           break;
         }
         
-        // Mark as processed
         processedCheckpointIds.current.add(checkpointId);
         
-        // Extract actual content from the checkpoint
+        // Try all possible content fields
         const checkpointContent = 
           data.full_content || 
+          data.content_preview ||
           data.content || 
           data.data?.content ||
-          data.content_preview || 
           data.data?.content_preview ||
+          data.data?.full_content ||
+          data.checkpoint_data?.content || 
+          data.checkpoint_data?.full_content ||
           '';
         
-        // Only create checkpoint if there's actual content (not template)
-        if (checkpointContent && checkpointContent.length > 50) {
+        console.log('📋 Checkpoint content extracted:', {
+          contentLength: checkpointContent.length,
+          contentPreview: checkpointContent.substring(0, 100)
+        });
+        
+        if (checkpointContent && checkpointContent.length > 10) {
           const checkpoint: CheckpointData = {
             id: checkpointId,
             title: data.title || data.data?.title || 'Content Review Required',
@@ -349,33 +420,55 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
             timeout_seconds: data.timeout_seconds || data.data?.timeout_seconds || 7200
           };
           
-          // Update both ref and state
+          console.log('✅ CHECKPOINT CREATED:', {
+            id: checkpoint.id,
+            title: checkpoint.title,
+            hasContent: !!checkpoint.full_content
+          });
+          
           pendingCheckpointRef.current = checkpoint;
           setPendingCheckpoint(checkpoint);
           setWorkflowStatus('paused');
-          addSystemMessage(`🔍 Checkpoint: ${checkpoint.title} - Content ready for review`);
+          
+          // Enhanced message about feedback
+          addSystemMessage(
+            `🔍 Checkpoint: ${checkpoint.title}\n` +
+            `Please review the content and provide your feedback.\n` +
+            `You can approve it, request specific changes, or give detailed instructions.`
+          );
+          
+          // Notify backend that we're tracking this checkpoint
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+              type: 'checkpoint_acknowledged',
+              checkpoint_id: checkpointId,
+              workflow_id: workflowId
+            }));
+          }
         } else {
-          console.log('Checkpoint has no meaningful content, skipping');
+          console.warn('❌ Checkpoint has no content or content too short');
         }
         break;
 
       case 'checkpoint_resolved':
-        if (pendingCheckpointRef.current && data.checkpoint_id === pendingCheckpointRef.current.id) {
+      case 'checkpoint_response_received':
+        console.log('✅ Checkpoint resolved:', data);
+        if (pendingCheckpointRef.current && 
+            (data.checkpoint_id === pendingCheckpointRef.current.id || 
+             data.data?.checkpoint_id === pendingCheckpointRef.current.id)) {
+          
           pendingCheckpointRef.current = null;
           setPendingCheckpoint(null);
           setWorkflowStatus('running');
-          const statusText = data.approved ? '✅ Approved' : '❌ Changes requested';
-          addSystemMessage(`Checkpoint ${statusText}: ${data.feedback || 'Continuing workflow'}`);
-        }
-        break;
-
-      case 'checkpoint_reminder':
-        if (data.time_remaining_seconds) {
-          addSystemMessage(`⏰ Checkpoint will auto-approve in ${Math.round(data.time_remaining_seconds / 60)} minutes`);
+          
+          // Show the actual feedback provided
+          const feedback = data.feedback || data.data?.feedback || 'No feedback provided';
+          addSystemMessage(`✅ Checkpoint feedback processed:\n"${feedback}"\n\nWorkflow continuing with your instructions...`);
         }
         break;
 
       case 'workflow_completed':
+        console.log('🎉 Workflow completed:', data);
         setWorkflowStatus('completed');
         const content = data.data?.final_content || data.final_content || '';
         if (content) {
@@ -390,87 +483,87 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         break;
 
       case 'workflow_error':
+        console.log('❌ Workflow error:', data);
         setWorkflowStatus('error');
         const errorMsg = data.data?.error || data.error || data.message || 'Unknown error occurred';
         addSystemMessage(`❌ Error: ${errorMsg}`);
         break;
 
-      case 'workflow_warning':
-        addSystemMessage(`⚠️ ${data.message || 'Workflow warning'}`);
-        break;
-
       case 'heartbeat':
-        // Respond with pong
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify({ type: 'pong' }));
         }
         break;
 
       case 'pong':
-        // Heartbeat response received
         console.log('💓 Heartbeat OK');
         break;
 
-      case 'workflow_update':
-        if (data.status) {
-          setWorkflowStatus(data.status === 'in_progress' ? 'running' : data.status);
-        }
-        if (data.stage) {
-          setCurrentStage(data.stage);
-        }
+      case 'workflow_output':
+        console.log('📤 Workflow output (skipping):', data.type);
         break;
 
       default:
-        // Try to extract content from unknown message types
+        console.log('❓ Unknown message type:', data.type);
+        // Fallback for any other message types with content
         if (data.message_content || data.message || data.content || data.text) {
           const content = data.message_content || data.message || data.content || data.text;
           
-          // Check if it's agent content
-          if ((data.agent_type || data.role || data.sender_type === 'agent') && content.length > 20) {
+          if ((data.agent_type || data.role || data.sender_type === 'agent') && content.length > 5) {
+            console.log('✅ Fallback: Adding message from unknown type');
             addAgentMessage(content, data.agent_type || data.role || 'Agent', data.stage || currentStage);
           }
         }
     }
   }, [addSystemMessage, addAgentMessage, onWorkflowComplete, currentStage, activeAgents]);
 
-  // WebSocket connection with retry logic
+  // WebSocket connection with singleton pattern
   const connectWebSocket = useCallback(() => {
-    // Prevent multiple concurrent connections
-    if (wsRef.current && (
-      wsRef.current.readyState === WebSocket.OPEN || 
-      wsRef.current.readyState === WebSocket.CONNECTING
-    )) {
-      console.log('WebSocket already connected or connecting');
+    // Check if we already have a global WebSocket for this workflow
+    const existingWs = globalWebSockets.get(workflowId);
+    if (existingWs && (existingWs.readyState === WebSocket.OPEN || existingWs.readyState === WebSocket.CONNECTING)) {
+      console.log('Using existing global WebSocket for workflow:', workflowId);
+      wsRef.current = existingWs;
+      
+      // Reattach event handlers
+      existingWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleWebSocketMessage(data);
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
+        }
+      };
+      
+      if (existingWs.readyState === WebSocket.OPEN) {
+        setIsConnected(true);
+        setIsReconnecting(false);
+      }
       return;
     }
 
-    if (isConnectingRef.current) {
-      console.log('Connection already in progress');
-      return;
+    // Clean up old connection if exists
+    if (wsRef.current) {
+      wsRef.current.close(1000, 'Creating new connection');
+      wsRef.current = null;
     }
-
-    isConnectingRef.current = true;
+    
+    // Clear existing intervals
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
 
     try {
       setIsReconnecting(true);
       
-      // Clean up existing connection
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Creating new connection');
-        wsRef.current = null;
-      }
-      
-      // Clear existing intervals
-      if (pingIntervalRef.current) {
-        clearInterval(pingIntervalRef.current);
-        pingIntervalRef.current = null;
-      }
-      
-      const ws = apiService.createWorkflowWebSocket(workflowIdRef.current);
+      const ws = apiService.createWorkflowWebSocket(workflowId);
       wsRef.current = ws;
+      globalWebSockets.set(workflowId, ws);
 
       ws.onopen = () => {
-        isConnectingRef.current = false;
+        if (!mountedRef.current) return;
+        
         setIsConnected(true);
         setIsReconnecting(false);
         setReconnectAttempts(0);
@@ -478,13 +571,15 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
         
         // Setup heartbeat ping interval
         pingIntervalRef.current = setInterval(() => {
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'ping' }));
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
           }
-        }, 30000); // Ping every 30 seconds
+        }, 30000);
       };
 
       ws.onmessage = (event) => {
+        if (!mountedRef.current) return;
+        
         try {
           const data = JSON.parse(event.data);
           handleWebSocketMessage(data);
@@ -494,11 +589,13 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
       };
 
       ws.onclose = (event) => {
-        isConnectingRef.current = false;
+        globalWebSockets.delete(workflowId);
+        
+        if (!mountedRef.current) return;
+        
         setIsConnected(false);
         console.log('❌ WebSocket disconnected:', event.code, event.reason);
         
-        // Clear intervals
         if (pingIntervalRef.current) {
           clearInterval(pingIntervalRef.current);
           pingIntervalRef.current = null;
@@ -514,7 +611,9 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
           
           setReconnectAttempts(nextAttempt);
           reconnectTimeoutRef.current = setTimeout(() => {
-            connectWebSocket();
+            if (mountedRef.current) {
+              connectWebSocket();
+            }
           }, delay);
         } else if (reconnectAttempts >= maxReconnectAttempts) {
           setIsReconnecting(false);
@@ -524,68 +623,71 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        isConnectingRef.current = false;
-        setIsConnected(false);
-        setIsReconnecting(false);
+        if (mountedRef.current) {
+          setIsConnected(false);
+          setIsReconnecting(false);
+        }
       };
 
     } catch (error) {
       console.error('Failed to create WebSocket:', error);
-      isConnectingRef.current = false;
-      setIsReconnecting(false);
-      addSystemMessage('❌ Failed to connect to workflow');
+      if (mountedRef.current) {
+        setIsReconnecting(false);
+        addSystemMessage('❌ Failed to connect to workflow');
+      }
     }
-  }, [handleWebSocketMessage, addSystemMessage, reconnectAttempts]);
+  }, [workflowId, handleWebSocketMessage, addSystemMessage, reconnectAttempts]);
 
   // Initialize WebSocket connection
   useEffect(() => {
-    const workflowChanged = workflowIdRef.current !== workflowId;
+    mountedRef.current = true;
     
-    if (workflowChanged) {
-      // Clean up existing connection
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Workflow changed');
-        wsRef.current = null;
-      }
-      hasInitializedRef.current = false;
-      workflowIdRef.current = workflowId;
-      // Clear processed IDs for new workflow
-      processedCheckpointIds.current.clear();
-      processedMessageIds.current.clear();
+    // Clear any pending cleanup timeout
+    if (cleanupTimeoutRef.current) {
+      clearTimeout(cleanupTimeoutRef.current);
+      cleanupTimeoutRef.current = null;
     }
     
-    if (!hasInitializedRef.current) {
-      hasInitializedRef.current = true;
-      connectWebSocket();
-      
-      // Load workflow status via API as backup
-      apiService.getWorkflowStatus(workflowId)
-        .then(workflow => {
+    // Connect to WebSocket
+    connectWebSocket();
+    
+    // Load workflow status via API as backup
+    apiService.getWorkflowStatus(workflowId)
+      .then(workflow => {
+        if (mountedRef.current) {
           setWorkflowData(workflow);
           if (workflow.current_stage) {
             setCurrentStage(workflow.current_stage);
           }
-        })
-        .catch(err => console.warn('Failed to load workflow status:', err));
-    }
+        }
+      })
+      .catch(err => console.warn('Failed to load workflow status:', err));
 
     // Cleanup on unmount
     return () => {
-      hasInitializedRef.current = false;
-      isConnectingRef.current = false;
+      mountedRef.current = false;
       
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
-      if (pingIntervalRef.current) {
-        clearInterval(pingIntervalRef.current);
-        pingIntervalRef.current = null;
-      }
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Component unmounting');
+      // Add delay before cleanup to handle StrictMode double-mount
+      cleanupTimeoutRef.current = setTimeout(() => {
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
+        }
+        
+        // Only close if this component instance created the WebSocket
+        const globalWs = globalWebSockets.get(workflowId);
+        if (globalWs === wsRef.current) {
+          globalWebSockets.delete(workflowId);
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.close(1000, 'Component unmounting');
+          }
+        }
         wsRef.current = null;
-      }
+      }, 100);
     };
   }, [workflowId, connectWebSocket]);
 
@@ -633,56 +735,9 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     }
   };
 
-  // FIXED: Enhanced checkpoint approval with proper WebSocket and API communication
-  const handleCheckpointApproval = async (approved: boolean) => {
-    if (!pendingCheckpoint) return;
-
-    try {
-      const feedback = checkpointFeedback || (approved ? 'Content approved' : 'Changes requested');
-      
-      // Send via WebSocket for immediate response
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'checkpoint_response',
-          checkpoint_id: pendingCheckpoint.id,
-          decision: approved ? 'approve' : 'reject',
-          feedback: feedback,
-          workflow_id: workflowId,
-          timestamp: new Date().toISOString()
-        }));
-      }
-      
-      // Also send via API for persistence
-      if (approved) {
-        await apiService.approveCheckpoint(pendingCheckpoint.id, { feedback });
-        addSystemMessage(`✅ Checkpoint approved: ${feedback}`);
-      } else {
-        await apiService.rejectCheckpoint(pendingCheckpoint.id, { feedback });
-        addSystemMessage(`❌ Changes requested: ${feedback}`);
-      }
-      
-      // Clear checkpoint state
-      pendingCheckpointRef.current = null;
-      setPendingCheckpoint(null);
-      setCheckpointFeedback('');
-      setWorkflowStatus('running');
-      
-      // Notify workflow to continue
-      addSystemMessage('↻ Workflow resuming with your feedback...');
-      
-    } catch (error) {
-      console.error('Failed to respond to checkpoint:', error);
-      addSystemMessage('❌ Failed to submit checkpoint response. Retrying...');
-      
-      // Retry once after delay
-      setTimeout(() => handleCheckpointApproval(approved), 2000);
-    }
-  };
-
   // Handle manual reconnection
   const handleReconnect = () => {
     setReconnectAttempts(0);
-    isConnectingRef.current = false;
     connectWebSocket();
   };
 
@@ -692,7 +747,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     addSystemMessage('📋 Content copied to clipboard!');
   };
 
-  // Send user message
+  // Send user message - ENHANCED FOR CHECKPOINT FEEDBACK
   const sendUserMessage = async () => {
     if (!inputMessage.trim() || !isConnected) return;
 
@@ -705,14 +760,39 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     };
 
     setMessages(prev => [...prev, userMessage]);
+    
+    // Store the message before clearing
+    const messageContent = inputMessage;
     setInputMessage('');
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'user_message',
-        content: userMessage.content,
-        workflow_id: workflowId
-      }));
+    // Check if this is feedback for a pending checkpoint
+    if (pendingCheckpointRef.current) {
+      // Send as checkpoint response with full user feedback
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'checkpoint_response',  // Changed from user_message
+          checkpoint_id: pendingCheckpointRef.current.id,
+          feedback: messageContent,  // Full open-ended feedback
+          workflow_id: workflowId,
+          timestamp: new Date().toISOString()
+        }));
+        
+        addSystemMessage(`📝 Checkpoint feedback sent: "${messageContent}"`);
+        
+        // Clear the checkpoint after sending feedback
+        pendingCheckpointRef.current = null;
+        setPendingCheckpoint(null);
+        setWorkflowStatus('running');
+      }
+    } else {
+      // Regular user message when no checkpoint is pending
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'user_message',
+          content: messageContent,
+          workflow_id: workflowId
+        }));
+      }
     }
   };
 
@@ -730,6 +810,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
     'default': 'from-gray-500 to-gray-600'
   };
 
+  // The rest of the component remains the same (JSX return statement)
   return (
     <div className="flex h-[calc(100vh-200px)] gap-6">
       {/* Main Chat Area */}
@@ -895,7 +976,7 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
           </div>
         )}
 
-        {/* Enhanced Checkpoint Modal - FIXED with proper state management */}
+        {/* Enhanced Checkpoint Modal - Modified to show guidance only */}
         {pendingCheckpoint && (
           <div className="fixed inset-0 z-50 overflow-y-auto">
             <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={(e) => e.stopPropagation()} />
@@ -960,61 +1041,45 @@ const ChatWorkflowInterface: React.FC<ChatWorkflowInterfaceProps> = ({
                       </pre>
                     </div>
                   </div>
-                  
-                  {/* Feedback input */}
-                  <div>
-                    <label className="text-sm font-semibold text-gray-400 mb-2 block">
-                      Feedback (optional):
-                    </label>
-                    <textarea
-                      value={checkpointFeedback}
-                      onChange={(e) => setCheckpointFeedback(e.target.value)}
-                      placeholder="Add any feedback or requested changes..."
-                      className="w-full px-4 py-3 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                      rows={3}
-                    />
-                  </div>
                 </div>
                 
-                {/* Modal footer with action buttons */}
+                {/* Modal footer - Modified to show instructions only */}
                 <div className="border-t border-gray-700 bg-gray-900/50 px-6 py-4">
-                  <div className="flex gap-3">
-                    <button
-                      onClick={() => handleCheckpointApproval(true)}
-                      className="flex-1 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 transition-all duration-200 flex items-center justify-center gap-2 font-semibold shadow-lg"
-                    >
-                      <CheckCircle className="w-5 h-5" />
-                      Approve & Continue
-                    </button>
-                    <button
-                      onClick={() => handleCheckpointApproval(false)}
-                      className="flex-1 py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:from-orange-600 hover:to-red-600 transition-all duration-200 flex items-center justify-center gap-2 font-semibold shadow-lg"
-                    >
-                      <AlertCircle className="w-5 h-5" />
-                      Request Changes
-                    </button>
-                  </div>
-                  
-                  {checkpointFeedback && (
-                    <p className="text-xs text-gray-400 mt-3 text-center">
-                      Your feedback will be sent to the agents for revision
-                    </p>
-                  )}
+                  <p className="text-center text-gray-300">
+                    Please review the content above and provide your feedback in the chat below.
+                  </p>
+                  <p className="text-center text-gray-400 text-sm mt-2">
+                    You can approve, request specific changes, or provide detailed instructions.
+                  </p>
                 </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* Regular Input Area */}
-        {workflowStatus === 'running' && !pendingHumanInput && !pendingCheckpoint && (
+        {/* Regular Input Area - ENHANCED WITH CHECKPOINT CONTEXT */}
+        {workflowStatus === 'running' && !pendingHumanInput && (
           <div className="border-t border-gray-700 p-4">
+            {/* Show checkpoint feedback prompt when checkpoint is pending */}
+            {pendingCheckpoint && (
+              <div className="mb-3 bg-yellow-900/30 border border-yellow-600/30 rounded-lg p-3">
+                <p className="text-yellow-400 text-sm font-medium flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4" />
+                  Checkpoint Review Active: {pendingCheckpoint.title}
+                </p>
+                <p className="text-gray-300 text-sm mt-1">
+                  Type your feedback below - you can approve, request changes, or provide detailed instructions.
+                </p>
+              </div>
+            )}
             <div className="flex gap-3">
               <input
                 type="text"
                 value={inputMessage}
                 onChange={(e) => setInputMessage(e.target.value)}
-                placeholder="Send a message to the workflow..."
+                placeholder={pendingCheckpoint 
+                  ? "Enter your feedback for this checkpoint..." 
+                  : "Send a message to the workflow..."}
                 className="flex-1 px-4 py-3 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500"
                 disabled={!isConnected}
                 onKeyPress={(e) => e.key === 'Enter' && sendUserMessage()}

@@ -866,6 +866,30 @@ async def reject_checkpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to reject checkpoint"
         )
+    
+
+@router.get("/workflows/{workflow_id}/pending-checkpoint")
+async def get_pending_checkpoint(
+    workflow_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get any pending checkpoint for a workflow"""
+    from spinscribe.checkpoints.checkpoint_manager import get_checkpoint_manager
+    checkpoint_manager = get_checkpoint_manager()
+    
+    # Get all pending checkpoints for this workflow
+    pending = checkpoint_manager.get_pending_checkpoints()
+    for checkpoint in pending:
+        if checkpoint.metadata.get('workflow_id') == workflow_id:
+            return {
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "title": checkpoint.title,
+                "description": checkpoint.description,
+                "content_preview": checkpoint.content[:500] if checkpoint.content else None
+            }
+    
+    return {"checkpoint_id": None}
 
 # WebSocket endpoint for real-time updates
 @router.websocket("/ws/workflow/{workflow_id}")

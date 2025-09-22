@@ -21,6 +21,9 @@ active_connections: Dict[str, Dict[str, Any]] = {}
 workflow_connections: Dict[str, Set[str]] = defaultdict(set)
 chat_connections: Dict[str, Set[str]] = defaultdict(set)
 
+# Track pending checkpoints per workflow
+pending_checkpoints: Dict[str, str] = {}
+
 # Import with error handling
 try:
     from app.core.websocket_manager import websocket_manager
@@ -90,29 +93,30 @@ async def handle_checkpoint_response(
 ):
     """
     Handle checkpoint approval/rejection from frontend.
-    FIXED: Properly unblocks workflow execution.
+    FIXED: Properly unblocks workflow execution and handles open-ended feedback.
     """
     try:
         logger.info(f"Processing checkpoint {decision} for {checkpoint_id}")
         
-        # Validate decision
+        # Store pending checkpoint for this workflow
         if decision not in ['approve', 'reject']:
-            await websocket.send_json({
-                "type": "error",
-                "message": f"Invalid decision: {decision}",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            return
+            # If not a clear decision, treat as revision request
+            decision = "revise"
+        
+        # Clear from pending if it exists
+        if workflow_id in pending_checkpoints:
+            if pending_checkpoints[workflow_id] == checkpoint_id:
+                del pending_checkpoints[workflow_id]
         
         # Process the checkpoint response
         if checkpoint_manager:
             # Record the response in checkpoint manager
             approved = decision == 'approve'
-            checkpoint_manager.respond_to_checkpoint(
+            checkpoint_manager.submit_response(
                 checkpoint_id=checkpoint_id,
-                approved=approved,
-                feedback=feedback,
-                responded_by="user"  # Could be from token if available
+                reviewer_id="user",  # Could be from token if available
+                decision=decision,
+                feedback=feedback  # Full open-ended feedback
             )
             
             # Notify all workflow connections about the decision
@@ -141,7 +145,7 @@ async def handle_checkpoint_response(
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
             
-            logger.info(f"✅ Checkpoint {checkpoint_id} {decision}d")
+            logger.info(f"✅ Checkpoint {checkpoint_id} {decision}d with feedback: {feedback[:100]}...")
             
         else:
             await websocket.send_json({
@@ -159,6 +163,23 @@ async def handle_checkpoint_response(
         })
 
 
+async def safe_send_json(websocket: WebSocket, data: dict) -> bool:
+    """Safely send JSON data to websocket, checking connection state first."""
+    try:
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.send_json(data)
+            return True
+        else:
+            logger.debug(f"WebSocket not connected, skipping message: {data.get('type', 'unknown')}")
+            return False
+    except WebSocketDisconnect:
+        logger.debug("WebSocket disconnected during send")
+        return False
+    except Exception as e:
+        logger.error(f"Error sending to WebSocket: {e}")
+        return False
+
+
 async def handle_websocket_message(
     workflow_id: str,
     data: Dict[Any, Any],
@@ -167,7 +188,7 @@ async def handle_websocket_message(
 ):
     """
     Handle incoming WebSocket messages for workflows.
-    FIXED: Properly handles all message types.
+    FIXED: Properly handles all message types including open-ended user feedback.
     """
     message_type = data.get("type")
     
@@ -202,21 +223,32 @@ async def handle_websocket_message(
         elif message_type == "checkpoint_response":
             # Handle checkpoint approval/rejection
             checkpoint_id = data.get("checkpoint_id")
-            decision = data.get("decision")
             feedback = data.get("feedback", "")
             
-            if checkpoint_id and decision:
+            # Parse decision from feedback if not explicitly provided
+            decision = data.get("decision")
+            if not decision and feedback:
+                # Infer decision from feedback content
+                feedback_lower = feedback.lower()
+                if any(word in feedback_lower for word in ["approve", "looks good", "accept", "yes", "ok", "lgtm"]):
+                    decision = "approve"
+                elif any(word in feedback_lower for word in ["reject", "no", "cancel", "stop"]):
+                    decision = "reject"
+                else:
+                    decision = "revise"  # Default for open-ended feedback
+            
+            if checkpoint_id:
                 await handle_checkpoint_response(
                     workflow_id=workflow_id,
                     checkpoint_id=checkpoint_id,
-                    decision=decision,
+                    decision=decision or "revise",
                     feedback=feedback,
                     websocket=websocket
                 )
             else:
                 await websocket.send_json({
                     "type": "error",
-                    "message": "Invalid checkpoint response: missing checkpoint_id or decision",
+                    "message": "Invalid checkpoint response: missing checkpoint_id",
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
         
@@ -248,6 +280,72 @@ async def handle_websocket_message(
             logger.info(f"Connection {connection_id} subscribed to agent messages")
             # Could store this preference if needed
             
+        elif message_type == "user_message":
+            # Handle user messages that might be checkpoint feedback
+            user_content = data.get("content", "").strip()
+            
+            # Check if there's a pending checkpoint for this workflow
+            if workflow_id in pending_checkpoints:
+                checkpoint_id = pending_checkpoints[workflow_id]
+                
+                # Parse user intent from message - more sophisticated parsing
+                decision = "revise"  # Default to revision request
+                content_lower = user_content.lower()
+                
+                # Check for approval patterns
+                if any(word in content_lower for word in ["approve", "looks good", "accept", "yes", "ok", "lgtm", "perfect", "great"]):
+                    decision = "approve"
+                # Check for rejection patterns
+                elif any(word in content_lower for word in ["reject", "no", "cancel", "stop", "wrong"]):
+                    decision = "reject"
+                # Everything else is treated as revision feedback
+                else:
+                    decision = "revise"
+                
+                # Submit to checkpoint manager with full feedback
+                if checkpoint_manager:
+                    checkpoint_manager.submit_response(
+                        checkpoint_id=checkpoint_id,
+                        reviewer_id=connection_id,  # Use connection_id as reviewer
+                        decision=decision,
+                        feedback=user_content  # Full user message as feedback
+                    )
+                    
+                    # Clear pending checkpoint
+                    del pending_checkpoints[workflow_id]
+                    
+                    # Broadcast resolution to all connections
+                    await broadcast_to_workflow(workflow_id, {
+                        "type": "checkpoint_resolved",
+                        "checkpoint_id": checkpoint_id,
+                        "decision": decision,
+                        "feedback": user_content,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+                    
+                    # Send confirmation to sender
+                    await websocket.send_json({
+                        "type": "checkpoint_response_received",
+                        "checkpoint_id": checkpoint_id,
+                        "decision": decision,
+                        "feedback": user_content,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+                    
+                    logger.info(f"✅ User message processed as checkpoint feedback for {checkpoint_id}: {decision}")
+                else:
+                    logger.warning("Checkpoint manager not available for user message")
+            else:
+                # Regular user message - forward to workflow if needed
+                logger.info(f"Regular user message (no pending checkpoint): {user_content[:50]}...")
+                
+        elif message_type == "checkpoint_acknowledged":
+            # Frontend acknowledging checkpoint receipt
+            checkpoint_id = data.get("checkpoint_id")
+            if checkpoint_id and workflow_id:
+                pending_checkpoints[workflow_id] = checkpoint_id
+                logger.info(f"✅ Checkpoint {checkpoint_id} acknowledged for workflow {workflow_id}")
+        
         else:
             logger.warning(f"Unknown message type: {message_type}")
             
@@ -269,49 +367,18 @@ async def workflow_websocket(
 ):
     """
     WebSocket endpoint for real-time workflow updates.
-    FIXED: Properly handles authentication, agent messages and checkpoints.
+    FIXED: Checks connection state before sending to prevent errors.
     """
     
     connection_id = None
     heartbeat_task = None
     
     try:
-        # FIX 3: Accept WebSocket FIRST (WebSocket protocol requirement)
+        # Accept WebSocket connection
         await websocket.accept()
         logger.info(f"✅ WebSocket accepted for workflow {workflow_id}")
         
-        # Critical: Allow client time to establish connection
-        await asyncio.sleep(0.5)
-        
-        # FIX 4: Properly verify authentication if token provided
-        user = None
-        if token:
-            try:
-                # Get database session and use proper auth function
-                if get_db and get_websocket_user:
-                    async for db in get_db():
-                        user = await get_websocket_user(token, db)
-                        break
-                    
-                    if not user:
-                        await websocket.send_json({
-                            "type": "error",
-                            "message": "Invalid or expired token",
-                            "code": 4001
-                        })
-                        await websocket.close(code=4001, reason="Invalid token")
-                        return
-                    
-                    logger.info(f"✅ Authenticated user: {user.email if hasattr(user, 'email') else user}")
-                else:
-                    logger.warning("Auth dependencies not available, continuing without auth")
-                    
-            except Exception as e:
-                logger.warning(f"Token verification failed: {e}")
-                # For development, continue without auth
-                # In production, you might want to close the connection here
-        
-        # Generate connection ID and track connection
+        # Generate connection ID immediately
         connection_id = f"workflow_{workflow_id}_{uuid.uuid4().hex[:8]}"
         
         # Store connection info
@@ -319,12 +386,39 @@ async def workflow_websocket(
             'websocket': websocket,
             'type': 'workflow',
             'workflow_id': workflow_id,
-            'user': user,
+            'user': None,
             'connected_at': datetime.now(timezone.utc)
         }
         
         # Track workflow connections
         workflow_connections[workflow_id].add(connection_id)
+        
+        # Verify authentication if token provided
+        user = None
+        if token:
+            try:
+                if get_db and get_websocket_user:
+                    async for db in get_db():
+                        user = await get_websocket_user(token, db)
+                        break
+                    
+                    if not user:
+                        await safe_send_json(websocket, {
+                            "type": "error",
+                            "message": "Invalid or expired token",
+                            "code": 4001
+                        })
+                        await websocket.close(code=4001, reason="Invalid token")
+                        return
+                    
+                    # Update connection with user info
+                    active_connections[connection_id]['user'] = user
+                    logger.info(f"✅ Authenticated user: {user.email if hasattr(user, 'email') else user}")
+                else:
+                    logger.warning("Auth dependencies not available, continuing without auth")
+                    
+            except Exception as e:
+                logger.warning(f"Token verification failed: {e}")
         
         logger.info(f"📡 Connection registered: {connection_id}")
         
@@ -336,7 +430,7 @@ async def workflow_websocket(
                     await asyncio.sleep(30)  # Every 30 seconds
                     
                     if websocket.client_state == WebSocketState.CONNECTED:
-                        await websocket.send_json({
+                        await safe_send_json(websocket, {
                             "type": "heartbeat",
                             "timestamp": datetime.now(timezone.utc).isoformat()
                         })
@@ -354,7 +448,7 @@ async def workflow_websocket(
         heartbeat_task = asyncio.create_task(send_heartbeat())
         
         # Send connection confirmation with features
-        await websocket.send_json({
+        await safe_send_json(websocket, {
             "type": "connection_established",
             "workflow_id": workflow_id,
             "connection_id": connection_id,
@@ -368,23 +462,58 @@ async def workflow_websocket(
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
         
+        # Check for any pending checkpoints for this workflow
+        if checkpoint_manager:
+            pending = checkpoint_manager.get_pending_checkpoints()
+            for checkpoint in pending:
+                if checkpoint.metadata and checkpoint.metadata.get('workflow_id') == workflow_id:
+                    pending_checkpoints[workflow_id] = checkpoint.checkpoint_id
+                    logger.info(f"Found existing pending checkpoint: {checkpoint.checkpoint_id}")
+                    
+                    # Notify frontend about pending checkpoint
+                    await safe_send_json(websocket, {
+                        "type": "checkpoint_required",
+                        "checkpoint_id": checkpoint.checkpoint_id,
+                        "title": checkpoint.title,
+                        "description": checkpoint.description,
+                        "content_preview": checkpoint.content[:500] if checkpoint.content else "",
+                        "full_content": checkpoint.content,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+                    break
+        
         # Register with CAMEL bridge for agent messages
         if camel_bridge:
             # This allows the bridge to send agent messages to this connection
-            def agent_message_handler(message: Dict[str, Any]):
+            async def agent_message_handler(message: Dict[str, Any]):
                 """Handler for agent messages from CAMEL bridge"""
-                asyncio.create_task(websocket.send_json(message))
+                await safe_send_json(websocket, message)
             
             # Register handler with bridge (implementation depends on bridge)
             if hasattr(camel_bridge, 'register_workflow_handler'):
                 camel_bridge.register_workflow_handler(workflow_id, agent_message_handler)
+        
+        # Register with websocket_manager if available
+        if websocket_manager:
+            try:
+                if hasattr(websocket_manager, 'connect_accepted'):
+                    # Don't call accept again
+                    await websocket_manager.connect_accepted(
+                        websocket=websocket,
+                        connection_type="workflow",
+                        resource_id=workflow_id,
+                        user_id=str(user.id) if user and hasattr(user, 'id') else "anonymous"
+                    )
+                logger.info(f"✅ Registered with WebSocket manager")
+            except Exception as e:
+                logger.warning(f"Could not register with WebSocket manager: {e}")
         
         # Send initial workflow status
         if workflow_service:
             try:
                 status = await workflow_service.get_workflow_status(workflow_id)
                 if status:
-                    await websocket.send_json({
+                    await safe_send_json(websocket, {
                         "type": "workflow_status",
                         "status": status,
                         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -393,7 +522,7 @@ async def workflow_websocket(
                 logger.warning(f"Could not get initial status: {e}")
         
         # Notify that connection is ready for messages
-        await websocket.send_json({
+        await safe_send_json(websocket, {
             "type": "workflow_connection_confirmed",
             "status": "connected",
             "message": "Workflow service connected successfully",
@@ -405,6 +534,11 @@ async def workflow_websocket(
         # Main message handling loop
         while True:
             try:
+                # Check if still connected before receiving
+                if websocket.client_state != WebSocketState.CONNECTED:
+                    logger.info(f"WebSocket no longer connected for {workflow_id}")
+                    break
+                
                 # Receive message from client
                 message = await websocket.receive_text()
                 
@@ -422,7 +556,7 @@ async def workflow_websocket(
                         
                     except json.JSONDecodeError as e:
                         logger.warning(f"Invalid JSON received: {e}")
-                        await websocket.send_json({
+                        await safe_send_json(websocket, {
                             "type": "error",
                             "message": "Invalid JSON format",
                             "details": str(e),
@@ -441,14 +575,11 @@ async def workflow_websocket(
                 logger.error(f"Error in message loop: {e}", exc_info=True)
                 
                 # Try to notify client
-                try:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "Internal server error",
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    })
-                except:
-                    pass
+                await safe_send_json(websocket, {
+                    "type": "error",
+                    "message": "Internal server error",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
                 
                 # Continue loop unless critical error
                 if "closed" in str(e).lower():
@@ -460,6 +591,11 @@ async def workflow_websocket(
     finally:
         # Cleanup
         logger.info(f"🧹 Cleaning up connection for workflow {workflow_id}")
+        
+        # Clear any pending checkpoints for this workflow
+        if workflow_id in pending_checkpoints:
+            logger.info(f"Clearing pending checkpoint for workflow {workflow_id}")
+            del pending_checkpoints[workflow_id]
         
         # Cancel heartbeat
         if heartbeat_task and not heartbeat_task.done():
@@ -478,15 +614,14 @@ async def workflow_websocket(
             if camel_bridge and hasattr(camel_bridge, 'unregister_workflow_handler'):
                 camel_bridge.unregister_workflow_handler(workflow_id)
         
-        # Close WebSocket if still open
-        try:
-            if websocket.client_state == WebSocketState.CONNECTED:
-                await websocket.close(code=1000, reason="Connection closed")
-        except:
-            pass
+        # Unregister from websocket_manager
+        if websocket_manager and hasattr(websocket_manager, 'disconnect'):
+            try:
+                await websocket_manager.disconnect(websocket)
+            except Exception as e:
+                logger.debug(f"Error during manager disconnect: {e}")
         
         logger.info(f"✅ WebSocket fully closed for workflow {workflow_id}")
-
 
 # FIX 5: Remove /api/v1 prefix from chat endpoint
 @router.websocket("/chats/{chat_id}")

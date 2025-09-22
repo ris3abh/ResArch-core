@@ -1,7 +1,7 @@
 # backend/services/workflow/camel_websocket_bridge.py
 """
 CAMEL WebSocket Bridge - Connects CAMEL's console I/O to WebSocket for frontend communication
-Fixed version with flattened message structure for frontend compatibility
+Enhanced version with checkpoint feedback handling and proper message structure
 """
 
 import sys
@@ -33,6 +33,7 @@ class CAMELWebSocketBridge:
         self.workflow_chat_mapping: Dict[str, str] = {}
         self._workflow_websockets: Dict[str, Any] = {}  # Direct WebSocket connections
         self._checkpoint_responses: Dict[str, Dict] = {}  # Store checkpoint responses
+        self._checkpoint_events: Dict[str, threading.Event] = {}  # Events for waiting on checkpoints
         
     def link_workflow_to_chat(self, workflow_id: str, chat_id: str):
         """Link a workflow to a chat for message routing"""
@@ -108,20 +109,29 @@ class CAMELWebSocketBridge:
     async def broadcast_checkpoint_notification(self, workflow_id: str, checkpoint_data: dict):
         """
         Broadcast checkpoint notification to workflow and chat.
-        FIXED: Use correct message type and structure
+        Enhanced to include full content for review
         """
-        # CRITICAL FIX: Use "checkpoint_required" type and flatten structure
+        checkpoint_id = checkpoint_data.get("checkpoint_id", str(uuid.uuid4()))
+        
+        # Store checkpoint ID for tracking
+        self._checkpoint_events[checkpoint_id] = threading.Event()
+        
+        # CRITICAL: Send complete checkpoint data for frontend review
         message = {
             "type": "checkpoint_required",  # Frontend expects this exact type
-            "checkpoint_id": checkpoint_data.get("checkpoint_id", str(uuid.uuid4())),
-            "title": checkpoint_data.get("title", "Approval Required"),
-            "description": checkpoint_data.get("description", "Please review and approve"),
-            "content_preview": checkpoint_data.get("content", "")[:500] if checkpoint_data.get("content") else "",
+            "checkpoint_id": checkpoint_id,
+            "title": checkpoint_data.get("title", "Content Review Required"),
+            "description": checkpoint_data.get("description", "Please review the generated content"),
+            "content_preview": checkpoint_data.get("content", "")[:1000] if checkpoint_data.get("content") else "",
+            "full_content": checkpoint_data.get("content", ""),  # Include full content
             "status": "pending",
             "workflow_id": workflow_id,
+            "checkpoint_type": checkpoint_data.get("type", "content_review"),
+            "priority": checkpoint_data.get("priority", "medium"),
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
+        logger.info(f"📋 Broadcasting checkpoint {checkpoint_id} for workflow {workflow_id}")
         await self.broadcast_to_workflow(workflow_id, message)
         
         # Also send to chat if linked
@@ -130,14 +140,25 @@ class CAMELWebSocketBridge:
             await self.broadcast_to_chat(chat_id, message)
     
     async def handle_checkpoint_response(self, workflow_id: str, checkpoint_id: str, decision: str, feedback: str = ""):
-        """Handle checkpoint approval/rejection from frontend"""
-        logger.info(f"Checkpoint {decision} for {checkpoint_id} in workflow {workflow_id}")
+        """
+        Handle checkpoint approval/rejection from frontend.
+        Enhanced to properly process open-ended feedback.
+        """
+        logger.info(f"📝 Processing checkpoint {decision} for {checkpoint_id} in workflow {workflow_id}")
+        logger.info(f"   Feedback: {feedback[:200]}..." if feedback else "   No feedback provided")
         
+        # Store the response
         self._checkpoint_responses[checkpoint_id] = {
             "decision": decision,
             "feedback": feedback,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "workflow_id": workflow_id
         }
+        
+        # Set event to unblock waiting code
+        if checkpoint_id in self._checkpoint_events:
+            self._checkpoint_events[checkpoint_id].set()
+            logger.info(f"✅ Unblocked checkpoint {checkpoint_id}")
         
         # Notify workflow of response
         await self.broadcast_to_workflow(workflow_id, {
@@ -147,10 +168,69 @@ class CAMELWebSocketBridge:
             "feedback": feedback,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
+        
+        # If it's a revision request, send to agents
+        if decision == "revise" or (decision == "reject" and feedback):
+            await self.send_checkpoint_feedback(workflow_id, checkpoint_id, feedback, approved=False)
     
-    def get_checkpoint_response(self, checkpoint_id: str) -> Optional[Dict]:
-        """Get stored checkpoint response"""
-        return self._checkpoint_responses.get(checkpoint_id)
+    async def send_checkpoint_feedback(self, workflow_id: str, checkpoint_id: str, feedback: str, approved: bool):
+        """
+        Send checkpoint feedback to agents for processing.
+        This method enables agents to revise content based on user feedback.
+        """
+        logger.info(f"📨 Sending checkpoint feedback to agents for {checkpoint_id}")
+        
+        feedback_message = {
+            "type": "checkpoint_feedback",
+            "checkpoint_id": checkpoint_id,
+            "approved": approved,
+            "feedback": feedback,
+            "workflow_id": workflow_id,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Broadcast to workflow for agent processing
+        await self.broadcast_to_workflow(workflow_id, feedback_message)
+        
+        # Also notify any listening agents through the session
+        if workflow_id in self.active_sessions:
+            session = self.active_sessions[workflow_id]
+            if hasattr(session, 'notify_checkpoint_feedback'):
+                await session.notify_checkpoint_feedback(checkpoint_id, feedback, approved)
+    
+    def get_checkpoint_response(self, checkpoint_id: str, timeout: int = 7200) -> Optional[Dict]:
+        """
+        Get stored checkpoint response, with wait capability.
+        Enhanced to wait for user response if not yet received.
+        """
+        # If we already have a response, return it
+        if checkpoint_id in self._checkpoint_responses:
+            return self._checkpoint_responses.get(checkpoint_id)
+        
+        # Otherwise wait for response
+        if checkpoint_id in self._checkpoint_events:
+            event = self._checkpoint_events[checkpoint_id]
+            logger.info(f"⏳ Waiting for checkpoint {checkpoint_id} response (timeout: {timeout}s)")
+            
+            if event.wait(timeout):
+                response = self._checkpoint_responses.get(checkpoint_id)
+                logger.info(f"✅ Got checkpoint response: {response.get('decision') if response else 'None'}")
+                return response
+            else:
+                logger.warning(f"⏰ Timeout waiting for checkpoint {checkpoint_id} response")
+                # Auto-approve on timeout
+                return {
+                    "decision": "approve",
+                    "feedback": "Auto-approved due to timeout",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+        
+        return None
+    
+    def clear_checkpoint_response(self, checkpoint_id: str):
+        """Clear checkpoint response after processing"""
+        self._checkpoint_responses.pop(checkpoint_id, None)
+        self._checkpoint_events.pop(checkpoint_id, None)
             
     @contextmanager
     def capture_camel_session(self, session_id: str):
@@ -206,6 +286,7 @@ class CaptureSession:
         self.original_input = None
         self.is_capturing = False
         self.loop = None
+        self._checkpoint_feedback_handlers = []
         
     def start_capture(self):
         """Start capturing stdout/stderr and override input()"""
@@ -259,6 +340,18 @@ class CaptureSession:
         
         self.is_capturing = False
     
+    async def notify_checkpoint_feedback(self, checkpoint_id: str, feedback: str, approved: bool):
+        """Notify any registered handlers about checkpoint feedback"""
+        for handler in self._checkpoint_feedback_handlers:
+            try:
+                await handler(checkpoint_id, feedback, approved)
+            except Exception as e:
+                logger.error(f"Error notifying checkpoint feedback handler: {e}")
+    
+    def register_checkpoint_feedback_handler(self, handler):
+        """Register a handler for checkpoint feedback"""
+        self._checkpoint_feedback_handlers.append(handler)
+    
     def _custom_input(self, prompt: str = "") -> str:
         """Custom input function that uses WebSocket for human interaction"""
         logger.info(f"Intercepted input request: {prompt}")
@@ -298,9 +391,9 @@ class CaptureSession:
         elif "professional/casual/technical" in prompt_lower:
             question_data["type"] = "choice"
             question_data["options"] = ["professional", "casual", "technical"]
-        elif "approve" in prompt_lower:
+        elif "approve" in prompt_lower or "review" in prompt_lower:
             question_data["type"] = "approval"
-            question_data["options"] = ["approve", "reject", "needs revision"]
+            question_data["options"] = ["approve", "request changes", "provide feedback"]
         
         return question_data
     
@@ -345,7 +438,7 @@ class CaptureSession:
             "message_type": "general"
         }
         
-        # Agent detection patterns
+        # Agent detection patterns - enhanced for better detection
         agent_patterns = [
             ("Content Creator", "content_creator", "Content Creator Agent"),
             ("Content Strategist", "content_strategist", "Content Strategy Agent"),
@@ -353,7 +446,10 @@ class CaptureSession:
             ("Content Planning", "content_planner", "Content Planning Agent"),
             ("Content Generation", "content_generator", "Content Generation Agent"),
             ("Quality Assurance", "qa_agent", "Quality Assurance Agent"),
-            ("Coordinator", "coordinator", "Coordinator Agent")
+            ("Coordinator", "coordinator", "Coordinator Agent"),
+            ("Enhanced Style Analysis", "style_analyst", "Enhanced Style Analysis Agent"),
+            ("Enhanced Content Planning", "content_planner", "Enhanced Content Planning Agent"),
+            ("Enhanced Content Generation", "content_generator", "Enhanced Content Generation Agent")
         ]
         
         for pattern, agent_type, agent_role in agent_patterns:
@@ -372,6 +468,8 @@ class CaptureSession:
             agent_info["message_type"] = "question"
         elif "turn" in text.lower() and "/" in text:
             agent_info["message_type"] = "progress"
+        elif "checkpoint" in text.lower():
+            agent_info["message_type"] = "checkpoint"
         
         return agent_info
     

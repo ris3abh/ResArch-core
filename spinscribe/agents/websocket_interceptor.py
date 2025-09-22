@@ -1,11 +1,11 @@
 """
-WebSocket Message Interceptor for CAMEL Agents - FIXED VERSION
-==============================================================
+WebSocket Message Interceptor for CAMEL Agents - ENHANCED VERSION
+==================================================================
 
 This module provides the critical bridge between CAMEL's agent communication system
 and the SpinScribe WebSocket infrastructure, enabling real-time frontend updates.
 
-FIXED: Now properly wraps agents to capture their actual output.
+ENHANCED: Properly handles checkpoint responses and workflow service integration.
 
 Author: SpinScribe Team
 Created: 2025
@@ -21,6 +21,7 @@ import uuid
 from enum import Enum
 import functools
 import inspect
+import threading
 
 # CAMEL imports - Based on CAMEL Message Cookbook documentation
 try:
@@ -55,6 +56,7 @@ class MessageType(Enum):
     COMPLETION = "completion"
     THINKING = "thinking"
     SOLUTION = "solution"
+    CHECKPOINT_FEEDBACK = "checkpoint_feedback"
 
 
 class AgentRole(Enum):
@@ -75,7 +77,7 @@ class AgentRole(Enum):
 class WebSocketMessageInterceptor:
     """
     Intercepts CAMEL agent messages and broadcasts them to WebSocket clients.
-    FIXED: Now properly wraps agents and captures their actual output.
+    ENHANCED: Properly handles checkpoint responses and workflow integration.
     """
     
     def __init__(
@@ -103,9 +105,16 @@ class WebSocketMessageInterceptor:
         self.message_count = 0
         self.agent_message_history = []
         self.pending_human_inputs = {}
+        self.pending_checkpoints = {}  # Track pending checkpoints
         
         # Agent tracking for wrapping
         self.wrapped_agents = set()
+        
+        # Workflow service reference
+        self.workflow_service = None
+        
+        # Checkpoint events for synchronization
+        self.checkpoint_events: Dict[str, threading.Event] = {}
         
         # Performance tracking
         self.start_time = datetime.now(timezone.utc)
@@ -115,10 +124,20 @@ class WebSocketMessageInterceptor:
         if chat_id:
             logger.info(f"   Connected to chat: {chat_id}")
     
+    def set_workflow_service(self, workflow_service):
+        """
+        Set reference to the workflow service for checkpoint tracking.
+        
+        Args:
+            workflow_service: The CAMELWorkflowService instance
+        """
+        self.workflow_service = workflow_service
+        logger.info(f"✅ Workflow service connected to interceptor")
+    
     def wrap_agent(self, agent: Any, agent_name: str = None) -> Any:
         """
         Wrap a CAMEL agent to intercept its messages.
-        FIXED: Properly wraps the step method to capture actual output.
+        ENHANCED: Better handling of agent output and checkpoint integration.
         
         Args:
             agent: The CAMEL agent to wrap
@@ -148,15 +167,9 @@ class WebSocketMessageInterceptor:
                 """Wrapped step method that intercepts messages"""
                 try:
                     # Log input
-                    input_content = ""
-                    if hasattr(input_message, 'content'):
-                        input_content = input_message.content
-                    elif isinstance(input_message, dict):
-                        input_content = input_message.get('content', str(input_message))
-                    else:
-                        input_content = str(input_message)
+                    input_content = interceptor._extract_content_from_message(input_message)
                     
-                    if input_content:
+                    if input_content and len(input_content.strip()) > 10:
                         # Send input notification asynchronously
                         asyncio.create_task(interceptor.intercept_agent_message(
                             agent_name=agent_name,
@@ -171,7 +184,13 @@ class WebSocketMessageInterceptor:
                     # Extract output from result
                     output_content = interceptor._extract_content_from_result(result)
                     
-                    if output_content:
+                    # Check if this is a checkpoint request
+                    if output_content and "checkpoint" in output_content.lower():
+                        asyncio.create_task(interceptor._handle_potential_checkpoint(
+                            output_content, agent_name
+                        ))
+                    
+                    if output_content and len(output_content.strip()) > 10:
                         # Send output notification asynchronously
                         asyncio.create_task(interceptor.intercept_agent_message(
                             agent_name=agent_name,
@@ -195,8 +214,8 @@ class WebSocketMessageInterceptor:
                 """Wrapped async step method"""
                 try:
                     # Log input
-                    input_content = self._extract_content_from_message(input_message)
-                    if input_content:
+                    input_content = interceptor._extract_content_from_message(input_message)
+                    if input_content and len(input_content.strip()) > 10:
                         await interceptor.intercept_agent_message(
                             agent_name=agent_name,
                             message=f"📥 Processing: {input_content[:200]}...",
@@ -209,7 +228,12 @@ class WebSocketMessageInterceptor:
                     
                     # Log output
                     output_content = interceptor._extract_content_from_result(result)
-                    if output_content:
+                    
+                    # Check for checkpoint
+                    if output_content and "checkpoint" in output_content.lower():
+                        await interceptor._handle_potential_checkpoint(output_content, agent_name)
+                    
+                    if output_content and len(output_content.strip()) > 10:
                         await interceptor.intercept_agent_message(
                             agent_name=agent_name,
                             message=output_content,
@@ -264,6 +288,39 @@ class WebSocketMessageInterceptor:
         
         logger.info(f"   📡 WebSocket wrapping complete for {agent_name}")
         return agent
+    
+    async def _handle_potential_checkpoint(self, content: str, agent_name: str):
+        """
+        Check if content contains a checkpoint request and handle it.
+        
+        Args:
+            content: The content to check
+            agent_name: Name of the agent generating the content
+        """
+        # Check for checkpoint markers
+        if any(marker in content.lower() for marker in ["checkpoint:", "review required:", "approval needed:"]):
+            # Extract checkpoint data
+            checkpoint_id = f"checkpoint_{uuid.uuid4().hex[:8]}"
+            
+            # Parse content for title and description
+            lines = content.split('\n')
+            title = "Content Review Required"
+            for line in lines:
+                if "checkpoint:" in line.lower():
+                    title = line.split(":", 1)[1].strip() if ":" in line else title
+                    break
+            
+            checkpoint_data = {
+                "checkpoint_id": checkpoint_id,
+                "title": title,
+                "description": f"Review requested by {agent_name}",
+                "content": content,
+                "agent": agent_name,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+            # Send checkpoint and wait for response
+            await self.send_checkpoint_and_wait(checkpoint_id, checkpoint_data)
     
     def _extract_content_from_message(self, message: Any) -> str:
         """
@@ -324,7 +381,7 @@ class WebSocketMessageInterceptor:
             return result.get('content', '') or result.get('result', '') or str(result)
         
         # Fallback
-        return str(result)
+        return str(result) if result else ""
     
     def _get_agent_role_name(self, agent_name: str) -> str:
         """
@@ -394,6 +451,11 @@ class WebSocketMessageInterceptor:
                 logger.debug(f"Skipping empty message from {agent_name}")
                 return
             
+            # Filter out debug/system messages
+            if any(pattern in str(message) for pattern in ["DEBUG:", "INFO:", "WARNING:", "[2025-"]):
+                logger.debug(f"Skipping system message from {agent_name}")
+                return
+            
             role = role or self._get_agent_role_name(agent_name)
             
             # Build message data with the correct field name
@@ -403,7 +465,7 @@ class WebSocketMessageInterceptor:
                 "agent_role": role,
                 "message_content": str(message),  # CRITICAL: Use message_content field
                 "stage": stage,
-                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "message_number": self.message_count,
                 **kwargs
             }
@@ -419,17 +481,25 @@ class WebSocketMessageInterceptor:
                             workflow_id=self.workflow_id,
                             agent_message=message_data
                         )
+                        logger.info(f"✅ Broadcast agent message #{self.message_count} from {role}")
+                        
                     elif hasattr(self.bridge, 'broadcast_to_workflow'):
                         await self.bridge.broadcast_to_workflow(
                             self.workflow_id,
                             message_data
                         )
+                        logger.info(f"✅ Broadcast message #{self.message_count} via fallback")
+                    else:
+                        logger.error(f"❌ Bridge has no broadcast methods!")
+                        
                 except Exception as e:
-                    logger.warning(f"Could not broadcast via bridge: {e}")
+                    logger.error(f"❌ Broadcast failed: {e}", exc_info=True)
+            else:
+                logger.warning(f"No bridge available for broadcasting")
             
             # Log if enabled
             if self.enable_detailed_logging:
-                logger.info(f"📨 Intercepted {role} message #{self.message_count}")
+                logger.debug(f"📨 Intercepted {role} message #{self.message_count}")
                 if len(message) < 200:
                     logger.debug(f"   Content: {message}")
                 else:
@@ -438,51 +508,40 @@ class WebSocketMessageInterceptor:
         except Exception as e:
             logger.error(f"Error in intercept_agent_message: {e}", exc_info=True)
     
-    async def intercept_message(
-        self,
-        message: Union[BaseMessageType, Dict[str, Any]],
-        agent_type: str,
-        stage: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> None:
+    async def send_checkpoint_and_wait(self, checkpoint_id: str, checkpoint_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Legacy method for compatibility - redirects to intercept_agent_message.
-        """
-        # Extract content
-        if isinstance(message, dict):
-            content = message.get('content', '')
-        elif hasattr(message, 'content'):
-            content = message.content
-        else:
-            content = str(message)
-        
-        await self.intercept_agent_message(
-            agent_name=agent_type,
-            message=content,
-            role=self._get_agent_role_name(agent_type),
-            stage=stage or "processing",
-            metadata=metadata
-        )
-    
-    async def send_checkpoint(self, checkpoint_id: str, checkpoint_data: Dict[str, Any]) -> None:
-        """
-        Send checkpoint requirement through WebSocket.
+        Send checkpoint requirement through WebSocket and wait for response.
         
         Args:
             checkpoint_id: Unique checkpoint identifier
             checkpoint_data: Checkpoint details
+            
+        Returns:
+            The checkpoint response with decision and feedback
         """
         logger.info(f"🛑 Checkpoint created: {checkpoint_id}")
+        
+        # Track the checkpoint
+        self.pending_checkpoints[checkpoint_id] = checkpoint_data
+        
+        # Register with workflow service if available
+        if self.workflow_service and hasattr(self.workflow_service, 'register_checkpoint'):
+            await self.workflow_service.register_checkpoint(self.workflow_id, checkpoint_id)
+        
+        # Create event for waiting
+        event = threading.Event()
+        self.checkpoint_events[checkpoint_id] = event
         
         checkpoint_msg = {
             "type": "checkpoint_required",
             "checkpoint_id": checkpoint_id,
-            "title": checkpoint_data.get('title', 'Approval Required'),
-            "description": checkpoint_data.get('description', ''),
-            "content_preview": str(checkpoint_data.get('content', ''))[:500],
+            "title": checkpoint_data.get('title', 'Content Review Required'),
+            "description": checkpoint_data.get('description', 'Please review the generated content'),
+            "content_preview": str(checkpoint_data.get('content', ''))[:1000],
+            "full_content": checkpoint_data.get('content', ''),
             "stage": checkpoint_data.get('stage', 'checkpoint'),
             "priority": checkpoint_data.get('priority', 'normal'),
-            "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
         # Broadcast if bridge available
@@ -498,8 +557,76 @@ class WebSocketMessageInterceptor:
                         self.workflow_id,
                         checkpoint_msg
                     )
+                logger.info(f"📤 Checkpoint {checkpoint_id} sent, waiting for response...")
+                
+                # Wait for response with timeout
+                timeout = checkpoint_data.get('timeout', 7200)  # 2 hours default
+                
+                # Use bridge's get_checkpoint_response if available
+                if hasattr(self.bridge, 'get_checkpoint_response'):
+                    response = self.bridge.get_checkpoint_response(checkpoint_id, timeout=timeout)
+                    if response:
+                        logger.info(f"✅ Got checkpoint response: {response.get('decision')}")
+                        return response
+                
+                # Fallback: wait for event
+                if event.wait(timeout):
+                    # Response received
+                    response = self.pending_checkpoints.get(checkpoint_id, {})
+                    logger.info(f"✅ Checkpoint {checkpoint_id} resolved")
+                    return response
+                else:
+                    # Timeout - auto-approve
+                    logger.warning(f"⏰ Checkpoint {checkpoint_id} timed out, auto-approving")
+                    return {
+                        "decision": "approve",
+                        "feedback": "Auto-approved due to timeout",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                    
             except Exception as e:
                 logger.error(f"Failed to send checkpoint: {e}")
+                return {
+                    "decision": "approve",
+                    "feedback": "Auto-approved due to error",
+                    "error": str(e)
+                }
+        
+        # No bridge - auto-approve
+        return {
+            "decision": "approve",
+            "feedback": "Auto-approved (no bridge)",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    
+    def handle_checkpoint_response(self, checkpoint_id: str, decision: str, feedback: str):
+        """
+        Handle checkpoint response from user.
+        
+        Args:
+            checkpoint_id: The checkpoint ID
+            decision: The user's decision
+            feedback: User's feedback
+        """
+        if checkpoint_id in self.pending_checkpoints:
+            # Update checkpoint data
+            self.pending_checkpoints[checkpoint_id].update({
+                "decision": decision,
+                "feedback": feedback,
+                "resolved_at": datetime.now(timezone.utc).isoformat()
+            })
+            
+            # Set event to unblock waiting
+            if checkpoint_id in self.checkpoint_events:
+                self.checkpoint_events[checkpoint_id].set()
+            
+            logger.info(f"✅ Checkpoint {checkpoint_id} resolved with {decision}")
+    
+    async def send_checkpoint(self, checkpoint_id: str, checkpoint_data: Dict[str, Any]) -> None:
+        """
+        Legacy method for compatibility - redirects to send_checkpoint_and_wait.
+        """
+        await self.send_checkpoint_and_wait(checkpoint_id, checkpoint_data)
     
     async def intercept_completion(
         self,
@@ -516,7 +643,7 @@ class WebSocketMessageInterceptor:
             "final_content": final_content,
             "total_messages": self.message_count,
             "duration": (datetime.now(timezone.utc) - self.start_time).total_seconds(),
-            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "workflow_id": self.workflow_id,
             "metadata": metadata or {}
         }
@@ -529,22 +656,19 @@ class WebSocketMessageInterceptor:
         
         logger.info(f"✅ Workflow completed after {self.message_count} messages")
     
-    async def _broadcast_error(self, error_msg: str, agent_type: str) -> None:
+    async def cleanup(self):
         """
-        Broadcast an error message.
+        Clean up resources when interceptor is done.
         """
-        if self.bridge:
-            error_data = {
-                "type": "agent_error",
-                "agent_type": agent_type,
-                "error": error_msg,
-                "workflow_id": self.workflow_id,
-                "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
-            }
-            try:
-                await self.bridge.broadcast_to_workflow(self.workflow_id, error_data)
-            except Exception as e:
-                logger.error(f"Failed to broadcast error: {e}")
+        # Clear pending checkpoints
+        self.pending_checkpoints.clear()
+        self.checkpoint_events.clear()
+        
+        # Clear message history if it's too large
+        if len(self.agent_message_history) > 1000:
+            self.agent_message_history = self.agent_message_history[-100:]  # Keep last 100
+        
+        logger.info(f"🧹 Cleaned up interceptor for workflow {self.workflow_id}")
     
     def _identify_agent_role(self, agent_type: str) -> AgentRole:
         """
@@ -566,15 +690,6 @@ class WebSocketMessageInterceptor:
             return AgentRole.COORDINATOR
         else:
             return AgentRole.UNKNOWN
-    
-    async def _handle_checkpoint_request(self, content: str, message_data: Dict[str, Any]) -> None:
-        """
-        Handle checkpoint requests - internal method called by checkpoint system.
-        """
-        checkpoint_data = message_data.get('checkpoint_data', {})
-        checkpoint_id = checkpoint_data.get('checkpoint_id', f"checkpoint_{uuid.uuid4().hex[:8]}")
-        
-        await self.send_checkpoint(checkpoint_id, checkpoint_data)
 
 
 # Helper function for easy integration

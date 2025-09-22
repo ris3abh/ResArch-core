@@ -1,6 +1,7 @@
 # backend/services/workflow/camel_workflow_service.py
 """
 FIXED CAMEL workflow service with WebSocket interceptor integration
+Enhanced to properly handle checkpoint responses from user messages
 """
 import asyncio
 import logging
@@ -30,6 +31,7 @@ class CAMELWorkflowService:
         self.websocket_manager: Optional[Any] = None
         self.camel_bridge: Optional[Any] = None  # Will be set by endpoint
         self.active_workflows: Dict[str, Dict[str, Any]] = {}
+        self.workflow_checkpoints: Dict[str, str] = {}  # Track pending checkpoints per workflow
         
     def set_websocket_manager(self, websocket_manager):
         """Set WebSocket manager"""
@@ -39,7 +41,91 @@ class CAMELWorkflowService:
     def set_camel_bridge(self, bridge):
         """Set the CAMEL WebSocket bridge for human interaction"""
         self.camel_bridge = bridge
-        logger.info("CAMEL WebSocket bridge connected to workflow service")
+        logger.info(f"CAMEL WebSocket bridge connected to workflow service")
+        logger.info(f"🔍 DEBUG - Bridge type: {type(bridge)}")
+        logger.info(f"🔍 DEBUG - Bridge has broadcast_agent_message: {hasattr(bridge, 'broadcast_agent_message')}")
+        logger.info(f"🔍 DEBUG - Bridge has broadcast_to_workflow: {hasattr(bridge, 'broadcast_to_workflow')}")
+    
+    async def handle_checkpoint_rejection(
+        self,
+        workflow_id: str,
+        checkpoint_id: str,
+        feedback: str
+    ):
+        """
+        Handle checkpoint rejection with user feedback.
+        This method processes revision requests and sends them back to agents.
+        """
+        try:
+            logger.info(f"📝 Processing checkpoint rejection for {checkpoint_id}")
+            logger.info(f"   Feedback: {feedback[:200]}...")
+            
+            # Notify the CAMEL workflow about the rejection
+            if workflow_id in self.active_workflows:
+                workflow_data = self.active_workflows[workflow_id]
+                
+                # Send feedback to the agents through the bridge
+                if self.camel_bridge and hasattr(self.camel_bridge, 'send_checkpoint_feedback'):
+                    await self.camel_bridge.send_checkpoint_feedback(
+                        workflow_id=workflow_id,
+                        checkpoint_id=checkpoint_id,
+                        feedback=feedback,
+                        approved=False
+                    )
+                
+                # Update workflow status to show revision in progress
+                execution_id = workflow_data.get("execution_id")
+                if execution_id:
+                    # Note: We'd need the db session here, but for now we'll just log
+                    logger.info(f"Workflow {workflow_id} entering revision stage for checkpoint {checkpoint_id}")
+            
+            # Clear the pending checkpoint
+            if workflow_id in self.workflow_checkpoints:
+                del self.workflow_checkpoints[workflow_id]
+                
+        except Exception as e:
+            logger.error(f"Error handling checkpoint rejection: {e}")
+    
+    async def continue_workflow_after_approval(
+        self,
+        workflow_id: str,
+        checkpoint_id: str,
+        feedback: str = None
+    ):
+        """
+        Continue workflow execution after checkpoint approval.
+        This unblocks the workflow and processes any user feedback.
+        """
+        try:
+            logger.info(f"✅ Continuing workflow {workflow_id} after checkpoint {checkpoint_id} approval")
+            
+            if feedback:
+                logger.info(f"   User feedback: {feedback[:200]}...")
+            
+            # Notify the CAMEL workflow to continue
+            if self.camel_bridge and hasattr(self.camel_bridge, 'send_checkpoint_feedback'):
+                await self.camel_bridge.send_checkpoint_feedback(
+                    workflow_id=workflow_id,
+                    checkpoint_id=checkpoint_id,
+                    feedback=feedback or "Approved",
+                    approved=True
+                )
+            
+            # Clear the pending checkpoint
+            if workflow_id in self.workflow_checkpoints:
+                del self.workflow_checkpoints[workflow_id]
+            
+            # Broadcast workflow resuming
+            if self.websocket_manager:
+                await self.websocket_manager.broadcast_to_workflow(workflow_id, {
+                    "type": "workflow_resuming",
+                    "checkpoint_id": checkpoint_id,
+                    "message": "Workflow continuing with your feedback",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                
+        except Exception as e:
+            logger.error(f"Error continuing workflow after approval: {e}")
     
     async def start_workflow(
         self,
@@ -63,7 +149,8 @@ class CAMELWorkflowService:
                 "execution": workflow_execution,
                 "execution_id": execution_id,
                 "started_at": datetime.now(timezone.utc),
-                "documents": project_documents
+                "documents": project_documents,
+                "checkpoints_enabled": workflow_execution.enable_checkpoints
             }
             
             # Wait for WebSocket connection with extended timeout and retry logic
@@ -218,6 +305,14 @@ class CAMELWorkflowService:
         
         return False
     
+    async def register_checkpoint(self, workflow_id: str, checkpoint_id: str):
+        """
+        Register a pending checkpoint for a workflow.
+        This helps track which checkpoint is waiting for user feedback.
+        """
+        self.workflow_checkpoints[workflow_id] = checkpoint_id
+        logger.info(f"📋 Registered checkpoint {checkpoint_id} for workflow {workflow_id}")
+    
     async def _run_camel_workflow_async(
         self,
         workflow_id: str,
@@ -258,6 +353,14 @@ class CAMELWorkflowService:
                 elif hasattr(workflow_execution, 'chat_instance_id'):
                     chat_id = str(workflow_execution.chat_instance_id)
                 
+                # DEBUG LOGGING BEFORE CREATING INTERCEPTOR
+                logger.info(f"🔍 DEBUG - Creating interceptor")
+                logger.info(f"🔍 DEBUG - self.camel_bridge is: {self.camel_bridge is not None}")
+                logger.info(f"🔍 DEBUG - self.camel_bridge type: {type(self.camel_bridge) if self.camel_bridge else 'None'}")
+                logger.info(f"🔍 DEBUG - self.websocket_manager is: {self.websocket_manager is not None}")
+                logger.info(f"🔍 DEBUG - workflow_id: {workflow_id}")
+                logger.info(f"🔍 DEBUG - chat_id: {chat_id}")
+                
                 # Create the interceptor using public workflow_id
                 websocket_interceptor = WebSocketMessageInterceptor(
                     websocket_bridge=self.camel_bridge,
@@ -265,6 +368,16 @@ class CAMELWorkflowService:
                     chat_id=chat_id,
                     enable_detailed_logging=True
                 )
+                
+                # Set reference to workflow service for checkpoint tracking
+                if hasattr(websocket_interceptor, 'set_workflow_service'):
+                    websocket_interceptor.set_workflow_service(self)
+                
+                # DEBUG LOGGING AFTER CREATING INTERCEPTOR
+                logger.info(f"🔍 DEBUG - Interceptor created")
+                logger.info(f"🔍 DEBUG - Interceptor.bridge is: {websocket_interceptor.bridge is not None}")
+                logger.info(f"🔍 DEBUG - Interceptor.bridge type: {type(websocket_interceptor.bridge) if websocket_interceptor.bridge else 'None'}")
+                logger.info(f"🔍 DEBUG - Interceptor.workflow_id: {websocket_interceptor.workflow_id}")
                 
                 # Link workflow to chat if both exist
                 if chat_id and hasattr(self.camel_bridge, 'link_workflow_to_chat'):
@@ -290,7 +403,7 @@ class CAMELWorkflowService:
                             "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                     
-                    # Run with WebSocket interceptor
+                    # Pass workflow service reference for checkpoint handling
                     result = await run_enhanced_content_task(
                         title=workflow_execution.title,
                         content_type=workflow_execution.content_type,
@@ -299,7 +412,8 @@ class CAMELWorkflowService:
                         first_draft=workflow_execution.first_draft if hasattr(workflow_execution, 'first_draft') else None,
                         enable_checkpoints=workflow_execution.enable_checkpoints,
                         websocket_interceptor=websocket_interceptor,
-                        chat_id=chat_id
+                        chat_id=chat_id,
+                        workflow_service=self  # Pass reference to this service
                     )
             else:
                 # Run without bridge (fallback)
@@ -314,7 +428,8 @@ class CAMELWorkflowService:
                     first_draft=workflow_execution.first_draft if hasattr(workflow_execution, 'first_draft') else None,
                     enable_checkpoints=workflow_execution.enable_checkpoints,
                     websocket_interceptor=websocket_interceptor,
-                    chat_id=chat_id
+                    chat_id=chat_id,
+                    workflow_service=self  # Pass reference to this service
                 )
             
             # Clean up interceptor if it was created
@@ -364,6 +479,8 @@ class CAMELWorkflowService:
         finally:
             # Clean up active workflow using public workflow_id
             self.active_workflows.pop(workflow_id, None)
+            # Clean up any pending checkpoints
+            self.workflow_checkpoints.pop(workflow_id, None)
     
     async def get_workflow_status(self, workflow_id: str) -> Dict[str, Any]:
         """Get current workflow status - expects public workflow_id"""
@@ -378,13 +495,15 @@ class CAMELWorkflowService:
                 "current_stage": execution.current_stage,
                 "progress": execution.progress_percentage,
                 "started_at": workflow_data["started_at"].isoformat(),
-                "is_active": True
+                "is_active": True,
+                "has_pending_checkpoint": workflow_id in self.workflow_checkpoints
             }
         
         return {
             "workflow_id": workflow_id,
             "status": "not_found",
-            "is_active": False
+            "is_active": False,
+            "has_pending_checkpoint": False
         }
     
     async def stop_workflow(self, workflow_id: str, db: AsyncSession) -> bool:
@@ -399,6 +518,8 @@ class CAMELWorkflowService:
                 
                 # Remove from active workflows
                 self.active_workflows.pop(workflow_id, None)
+                # Clean up any pending checkpoints
+                self.workflow_checkpoints.pop(workflow_id, None)
                 
                 # Notify WebSocket clients using public workflow_id
                 if self.websocket_manager:
@@ -478,5 +599,6 @@ def health_check():
         "status": "healthy",
         "service": "camel_workflow_service",
         "active_workflows": len(workflow_service.active_workflows),
-        "websocket_bridge": "connected" if workflow_service.camel_bridge else "not_connected"
+        "websocket_bridge": "connected" if workflow_service.camel_bridge else "not_connected",
+        "pending_checkpoints": len(workflow_service.workflow_checkpoints)
     }
