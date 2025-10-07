@@ -1,0 +1,38 @@
+[project]
+name = "spinscribe"
+version = "0.1.0"
+description = "Multi-client AI content creation system with HITL protocol and brand voice compliance"
+authors = [{ name = "Spniutech Team", email = "dev@spniutech.com" }]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    # Core CrewAI with tools
+    "crewai[tools]>=0.201.1,<1.0.0",
+    
+    # PDF and Document Processing for client knowledge bases
+    "pypdf>=3.17.0",
+    "pdfplumber>=0.11.0",
+    
+    # Environment and Configuration
+    "python-dotenv>=1.0.0",
+    
+    # Structured Output Validation (for content templates)
+    "pydantic>=2.0.0",
+    
+    # Data Processing (for CSV/Excel content analysis)
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+]
+
+[project.scripts]
+spinscribe = "spinscribe.main:run"
+run_crew = "spinscribe.main:run"
+train = "spinscribe.main:train"
+replay = "spinscribe.main:replay"
+test = "spinscribe.main:test"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.crewai]
+type = "crew"
