@@ -253,74 +253,134 @@ def get_user_inputs(interactive: bool = True) -> Dict[str, Any]:
     
     Args:
         interactive: If True, prompts user for input. If False, uses defaults.
-    
+        
     Returns:
-        Dictionary containing all required inputs
+        Dictionary containing all required inputs for crew execution
     """
     if not interactive:
-        # Return default inputs for non-interactive mode
+        # Non-interactive mode with defaults
+        client_name = "Demo Client"
+        topic = "Artificial Intelligence in Modern Business"
+        content_type = "blog"
+        audience = "Business executives and technology decision makers"
+        ai_language_code = "/TN/P3,A2/VL3/SC3/FL2/LF3"
+        
+        # Add client_knowledge_directory for non-interactive mode too
+        client_knowledge_directory = f"knowledge/clients/{client_name.replace(' ', '_').lower()}"
+        
         return {
-            'client_name': 'Demo Client',
-            'topic': 'Artificial Intelligence in Modern Business',
-            'content_type': 'blog',
-            'audience': 'Business executives and technology decision makers',
-            'ai_language_code': '/TN/P3,A2/VL3/SC3/FL2/LF3'
+            'client_name': client_name,
+            'topic': topic,
+            'content_type': content_type,
+            'audience': audience,
+            'ai_language_code': ai_language_code,
+            'client_knowledge_directory': client_knowledge_directory  # ✅ ADD THIS
         }
     
-    print("\n" + "=" * 80)
+    # Interactive mode
+    print("\n" + "="*80)
     print("SPINSCRIBE CONTENT CREATION - INPUT COLLECTION")
-    print("=" * 80)
+    print("="*80)
     print("\nPlease provide the following information:")
     print("(Press Enter to use default values shown in brackets)\n")
     
-    # Collect client name
-    client_name = input("Client Name [Demo Client]: ").strip()
-    if not client_name:
-        client_name = "Demo Client"
+    client_name = input("Client Name [Demo Client]: ").strip() or "Demo Client"
+    topic = input("Content Topic [Artificial Intelligence in Modern Business]: ").strip() or "Artificial Intelligence in Modern Business"
     
-    # Collect topic
-    topic = input("Content Topic [Artificial Intelligence in Modern Business]: ").strip()
-    if not topic:
-        topic = "Artificial Intelligence in Modern Business"
-    
-    # Collect content type
     print("\nContent Type Options: blog, landing_page, local_article")
-    content_type = input("Content Type [blog]: ").strip().lower()
-    if not content_type or content_type not in ['blog', 'landing_page', 'local_article']:
-        content_type = "blog"
-        if content_type not in ['blog', 'landing_page', 'local_article']:
-            print(f"   Using default: {content_type}")
+    content_type = input("Content Type [blog]: ").strip() or "blog"
     
-    # Collect audience
-    audience = input("Target Audience [Business executives and technology decision makers]: ").strip()
-    if not audience:
-        audience = "Business executives and technology decision makers"
+    audience = input("Target Audience [Business executives and technology decision makers]: ").strip() or "Business executives and technology decision makers"
     
-    # Collect AI Language Code
     print("\nAI Language Code defines tone, vocabulary, and style.")
     print("Example: /TN/P3,A2/VL3/SC3/FL2/LF3")
-    ai_language_code = input("AI Language Code [/TN/P3,A2/VL3/SC3/FL2/LF3]: ").strip()
-    if not ai_language_code:
-        ai_language_code = "/TN/P3,A2/VL3/SC3/FL2/LF3"
+    ai_language_code = input("AI Language Code [/TN/P3,A2/VL3/SC3/FL2/LF3]: ").strip() or "/TN/P3,A2/VL3/SC3/FL2/LF3"
+    
+    # ✅ ADD THIS SECTION:
+    print("\n📄 Initial Draft (Optional):")
+    print("Do you have an initial draft to refine? [Y/n]: ", end="")
+    has_draft = input().strip().lower() in ['y', 'yes', '']
+    
+    initial_draft = None
+    draft_source = None
+    
+    if has_draft:
+        print("\nHow would you like to provide the draft?")
+        print("1. Paste text directly")
+        print("2. Provide file path")
+        print("3. Provide URL")
+        draft_option = input("Choose option [1/2/3]: ").strip() or "1"
+        
+        if draft_option == "1":
+            print("\nPaste your draft (press Ctrl+D or Ctrl+Z when done):")
+            print("-" * 80)
+            lines = []
+            try:
+                while True:
+                    lines.append(input())
+            except EOFError:
+                pass
+            initial_draft = "\n".join(lines)
+            draft_source = "pasted_text"
+            
+        elif draft_option == "2":
+            file_path = input("Enter file path: ").strip()
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    initial_draft = f.read()
+                draft_source = f"file:{file_path}"
+            except Exception as e:
+                print(f"⚠️  Error reading file: {e}")
+                print("Proceeding without initial draft...")
+                has_draft = False
+                
+        elif draft_option == "3":
+            url = input("Enter URL: ").strip()
+            try:
+                import requests
+                response = requests.get(url, timeout=10)
+                initial_draft = response.text
+                draft_source = f"url:{url}"
+            except Exception as e:
+                print(f"⚠️  Error fetching URL: {e}")
+                print("Proceeding without initial draft...")
+                has_draft = False
+
+    # Add client_knowledge_directory...
+    client_knowledge_directory = f"knowledge/clients/{client_name.replace(' ', '_').lower()}"
     
     inputs = {
         'client_name': client_name,
         'topic': topic,
         'content_type': content_type,
         'audience': audience,
-        'ai_language_code': ai_language_code
+        'ai_language_code': ai_language_code,
+        'client_knowledge_directory': client_knowledge_directory,
+        # ✅ ADD THESE:
+        'has_initial_draft': has_draft,
+        'initial_draft': initial_draft if has_draft else "",
+        'draft_source': draft_source if has_draft else "none",
+        'workflow_mode': "refinement" if has_draft else "creation"
     }
     
-    # Display summary
-    print("\n" + "=" * 80)
+    print("\n" + "="*80)
     print("INPUT SUMMARY")
-    print("=" * 80)
-    for key, value in inputs.items():
-        print(f"   {key.replace('_', ' ').title()}: {value}")
-    print("=" * 80)
+    print("="*80)
+    print(f"   Client Name: {client_name}")
+    print(f"   Topic: {topic}")
+    print(f"   Content Type: {content_type}")
+    print(f"   Audience: {audience}")
+    print(f"   AI Language Code: {ai_language_code}")
+    print(f"   Knowledge Directory: {client_knowledge_directory}")
+    # ✅ ADD THESE:
+    print(f"   Workflow Mode: {'🔄 Refinement (with draft)' if has_draft else '✨ Creation (from scratch)'}")
+    if has_draft:
+        print(f"   Draft Source: {draft_source}")
+        print(f"   Draft Length: {len(initial_draft)} characters")
+    print("="*80 + "\n")
     
-    confirm = input("\nProceed with these inputs? [Y/n]: ").strip().lower()
-    if confirm and confirm != 'y' and confirm != 'yes' and confirm != '':
+    confirm = input("Proceed with these inputs? [Y/n]: ").strip().lower()
+    if confirm and confirm not in ['y', 'yes', '']:
         print("Operation cancelled by user.")
         sys.exit(0)
     
@@ -390,7 +450,7 @@ def run():
         print(f"\n💡 TIP: Keep browser open to http://localhost:8000/dashboard")
         print(f"        You'll need it to approve HITL checkpoints\n")
 
-        result = crew_instance.run() 
+        result = crew_instance.run(inputs) 
         
         # Display results
         print("\n" + "=" * 80)

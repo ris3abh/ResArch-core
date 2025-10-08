@@ -40,29 +40,33 @@ _current_execution_id = None
 
 def agent_step_callback(step_output):
     """
-    Callback executed after each agent step (intermediate thoughts/actions).
-    
+    Callback executed after each agent step.
     Sends webhook to: AGENT_WEBHOOK_URL
     """
     webhook_url = os.getenv("AGENT_WEBHOOK_URL")
     if not webhook_url:
         return
-    
+
     try:
-        agent_info = step_output.get('agent', {})
-        agent_name = getattr(agent_info, 'role', 'Unknown Agent')
-        
+        # Handle both dict or object formats
+        agent_name = (
+            getattr(step_output, "agent", None) and getattr(step_output.agent, "role", "Unknown Agent")
+        ) or "Unknown Agent"
+
+        output_str = str(getattr(step_output, "output", None) or step_output)
+
         payload = {
-            "workflow_id": _current_execution_id,
+            "workflow_id": os.getenv("EXECUTION_ID", "unknown"),
             "agent_name": agent_name,
             "step_type": "agent_step",
-            "step_data": str(step_output),
+            "step_data": output_str,
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
         response = requests.post(webhook_url, json=payload, timeout=5)
+        response.raise_for_status()
         logger.debug(f"📤 Agent step webhook sent: {response.status_code}")
-        
+
     except Exception as e:
         logger.warning(f"⚠️  Failed to send agent step webhook: {e}")
 
@@ -70,28 +74,39 @@ def agent_step_callback(step_output):
 def task_status_callback(task_output):
     """
     Callback executed after each task completes.
-    
     Sends webhook to: TASK_STATUS_WEBHOOK
     """
     webhook_url = os.getenv("TASK_STATUS_WEBHOOK")
     if not webhook_url:
         return
-    
+
     try:
+        task_obj = getattr(task_output, "task", None)
+        task_id = getattr(task_obj, "id", "unknown")
+        task_description = getattr(task_obj, "description", "No description")
+
+        output_text = (
+            getattr(task_output, "output", None)
+            or getattr(task_output, "raw", None)
+            or "No output"
+        )
+
         payload = {
-            "workflow_id": _current_execution_id,
-            "task_id": str(getattr(task_output, 'task_id', 'unknown')),
-            "task_description": task_output.description,
+            "workflow_id": os.getenv("EXECUTION_ID", "unknown"),
+            "task_id": str(task_id),
+            "task_description": task_description,
             "status": "completed",
-            "output_preview": task_output.raw[:500] if task_output.raw else "",
+            "output_preview": output_text[:500],  # Preview only
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
         response = requests.post(webhook_url, json=payload, timeout=5)
+        response.raise_for_status()
         logger.info(f"✅ Task completed webhook sent: {response.status_code}")
-        
+
     except Exception as e:
         logger.warning(f"⚠️  Failed to send task status webhook: {e}")
+
 
 
 # =============================================================================
@@ -486,7 +501,56 @@ class SpinscribeCrew:
         print("\nAI Language Code defines tone, vocabulary, and style.")
         print("Example: /TN/P3,A2/VL3/SC3/FL2/LF3")
         ai_language_code = input("AI Language Code [/TN/P3,A2/VL3/SC3/FL2/LF3]: ").strip() or "/TN/P3,A2/VL3/SC3/FL2/LF3"
+
+        print("\n📄 Initial Draft (Optional):")
+        print("Do you have an initial draft to refine? [Y/n]: ", end="")
+        has_draft = input().strip().lower() in ['y', 'yes', '']
         
+        initial_draft = None
+        draft_source = None
+        
+        if has_draft:
+            print("\nHow would you like to provide the draft?")
+            print("1. Paste text directly")
+            print("2. Provide file path")
+            print("3. Provide URL")
+            draft_option = input("Choose option [1/2/3]: ").strip() or "1"
+            
+            if draft_option == "1":
+                print("\nPaste your draft (press Ctrl+D or Ctrl+Z when done):")
+                print("-" * 80)
+                lines = []
+                try:
+                    while True:
+                        lines.append(input())
+                except EOFError:
+                    pass
+                initial_draft = "\n".join(lines)
+                draft_source = "pasted_text"
+                
+            elif draft_option == "2":
+                file_path = input("Enter file path: ").strip()
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        initial_draft = f.read()
+                    draft_source = f"file:{file_path}"
+                except Exception as e:
+                    print(f"⚠️  Error reading file: {e}")
+                    print("Proceeding without initial draft...")
+                    has_draft = False
+                    
+            elif draft_option == "3":
+                url = input("Enter URL: ").strip()
+                try:
+                    import requests
+                    response = requests.get(url, timeout=10)
+                    initial_draft = response.text
+                    draft_source = f"url:{url}"
+                except Exception as e:
+                    print(f"⚠️  Error fetching URL: {e}")
+                    print("Proceeding without initial draft...")
+                    has_draft = False
+
         # Add client_knowledge_directory based on client_name
         client_knowledge_directory = f"knowledge/clients/{client_name.replace(' ', '_').lower()}"
         
@@ -496,7 +560,11 @@ class SpinscribeCrew:
             'content_type': content_type,
             'audience': audience,
             'ai_language_code': ai_language_code,
-            'client_knowledge_directory': client_knowledge_directory
+            'client_knowledge_directory': client_knowledge_directory,
+            "has_initial_draft": has_draft,
+            "initial_draft": initial_draft if has_draft else "",
+            "draft_source": draft_source if has_draft else "none",
+            "workflow_mode": "refinement" if has_draft else "creation"
         }
         
         print("\n" + "="*80)
@@ -508,6 +576,11 @@ class SpinscribeCrew:
         print(f"   Audience: {audience}")
         print(f"   AI Language Code: {ai_language_code}")
         print(f"   Knowledge Directory: {client_knowledge_directory}")
+        print(f"   Workflow Mode: {'🔄 Refinement (with draft)' if has_draft else '✨ Creation (from scratch)'}")
+        if has_draft:
+            print(f"   Draft Source: {draft_source}")
+            print(f"   Draft Length: {len(initial_draft)} characters")
+        print("="*80)
         print("="*80 + "\n")
         
         confirm = input("Proceed with these inputs? [Y/n]: ").strip().lower()
@@ -517,7 +590,7 @@ class SpinscribeCrew:
         
         return inputs
 
-    def run(self) -> str:
+    def run(self, inputs: Dict[str, Any]) -> str:
         """Execute the SpinScribe crew with webhook monitoring."""
         global _current_execution_id
         
@@ -528,8 +601,7 @@ class SpinscribeCrew:
             logger.info("🚀 Starting SpinScribe crew execution...")
             logger.info(f"   Execution ID: {_current_execution_id}")
             
-            # Get inputs
-            inputs = self.get_inputs()
+            # ✅ Use inputs passed as parameter, don't collect again
             
             # Get crew instance
             crew_instance = self.crew()
@@ -560,7 +632,7 @@ class SpinscribeCrew:
                         },
                         timeout=5
                     )
-                    logger.info("🔔 Completion notification sent")
+                    logger.info("📤 Completion notification sent")
                 except:
                     pass
             
