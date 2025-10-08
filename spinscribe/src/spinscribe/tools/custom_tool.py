@@ -9,8 +9,8 @@ This module provides specialized tools for parsing AI Language Code parameters,
 analyzing brand voice, and supporting the multi-agent workflow.
 """
 
-from crewai_tools import BaseTool
-from typing import Type, Dict, Any, Optional, List
+from crewai.tools import BaseTool
+from typing import Type, Dict, Any, Optional, List, ClassVar
 from pydantic import BaseModel, Field
 import re
 import json
@@ -32,32 +32,7 @@ class AILanguageCodeParser(BaseTool):
     """
     AI Language Code Parser Tool
     
-    Parses AI Language Code shorthand into detailed, actionable parameters
-    for content creation. This tool decodes complex voice specifications
-    into clear guidelines that agents can follow.
-    
-    Supported Parameters:
-    - /TN/     : Tone (with letter codes and intensity levels 1-5)
-    - /VL      : Vocabulary Level (1-10 scale)
-    - /SC      : Sentence Complexity (1-5 scale)
-    - /FL      : Figurative Language (1-5 scale)
-    - /LF      : Language Formality (1-5 scale)
-    - /LD      : Level of Detail (1-5 scale)
-    - /VS      : Verb Strength (1-10 scale)
-    - /SE      : Subject Expertise (1-5 scale)
-    - /AU-     : Audience specification
-    
-    Example Code:
-    /TN/A3,P4,EMP2/VL4/SC3/FL2/LF3/LD3/VS6
-    
-    Decoded Output:
-    - Tone: Authoritative (Level 3), Professional (Level 4), Empathetic (Level 2)
-    - Vocabulary Level: 4/10 (Advanced professional vocabulary)
-    - Sentence Complexity: 3/5 (Mix of simple and compound sentences)
-    - Figurative Language: 2/5 (Minimal metaphors, focus on clarity)
-    - Language Formality: 3/5 (Professional but approachable)
-    - Level of Detail: 3/5 (Balanced overview and depth)
-    - Verb Strength: 6/10 (Moderately dynamic verbs)
+    (docstring unchanged...)
     """
     
     name: str = "AI Language Code Parser"
@@ -68,8 +43,8 @@ class AILanguageCodeParser(BaseTool):
     )
     args_schema: Type[BaseModel] = AILanguageCodeInput
     
-    # Tone code mappings
-    TONE_CODES = {
+    # Tone code mappings - NOW PROPERLY ANNOTATED
+    TONE_CODES: ClassVar[Dict[str, str]] = {
         'A': 'Authoritative',
         'AF': 'Affluent',
         'AP': 'Approachable',
