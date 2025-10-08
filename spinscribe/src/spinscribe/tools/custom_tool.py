@@ -1,483 +1,811 @@
+# =============================================================================
+# SPINSCRIBE CUSTOM TOOLS
+# AI Language Code Parser and Utility Functions
+# =============================================================================
 """
-AI Language Code Parser Tool for SpinScribe
+Custom tools for the SpinScribe content creation system.
 
-This tool parses the AI Language Code shorthand notation into structured parameters
-that agents can use to generate content with precise stylistic control.
-
-Example input: /TN/A3,EMP4/VL3/SC2/FL3/VS5/LF2/LD4/CF2/PS3/SE4/AU-prospective-students
+This module provides specialized tools for parsing AI Language Code parameters,
+analyzing brand voice, and supporting the multi-agent workflow.
 """
 
-from crewai.tools import BaseTool
-from typing import Type, Dict, Any, List, Optional
+from crewai_tools import BaseTool
+from typing import Type, Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 import re
+import json
 
+
+# =============================================================================
+# AI LANGUAGE CODE PARSER TOOL
+# =============================================================================
 
 class AILanguageCodeInput(BaseModel):
     """Input schema for AI Language Code Parser."""
-    
     code: str = Field(
         ...,
-        description="The AI Language Code string to parse (e.g., /TN/A3,EMP4/VL3/SC2)"
+        description="AI Language Code string to parse (e.g., /TN/A3,P4,EMP2/VL4/SC3/FL2/LF3)"
     )
 
 
 class AILanguageCodeParser(BaseTool):
     """
-    Parses AI Language Code shorthand into structured content generation parameters.
+    AI Language Code Parser Tool
     
-    The AI Language Code is a compact notation system that defines precise stylistic
-    attributes for content generation including tone, vocabulary, complexity, and more.
+    Parses AI Language Code shorthand into detailed, actionable parameters
+    for content creation. This tool decodes complex voice specifications
+    into clear guidelines that agents can follow.
     
     Supported Parameters:
-    - /TN (Tone): e.g., /TN/A3,EMP4 (Authoritative:3, Empathetic:4)
-    - /VL (Vocabulary Level): 1-10 scale
-    - /SC (Sentence Complexity): 1-5 scale
-    - /FL (Figurative Language): 1-5 scale
-    - /VS (Verb Strength): 1-10 scale
-    - /LF (Language Formality): 1-5 scale
-    - /LD (Level of Detail): 1-5 scale
-    - /CF (Content Focus): 1-5 scale
-    - /CRF-C (Conceptual Creative Freedom): 1-10 scale
-    - /CRF-S (Structural Creative Freedom): 1-10 scale
-    - /PS (Persuasiveness): 1-5 scale
-    - /SE (Subject Expertise): 1-5 scale
-    - /AU- (Audience): e.g., /AU-prospective-students
+    - /TN/     : Tone (with letter codes and intensity levels 1-5)
+    - /VL      : Vocabulary Level (1-10 scale)
+    - /SC      : Sentence Complexity (1-5 scale)
+    - /FL      : Figurative Language (1-5 scale)
+    - /LF      : Language Formality (1-5 scale)
+    - /LD      : Level of Detail (1-5 scale)
+    - /VS      : Verb Strength (1-10 scale)
+    - /SE      : Subject Expertise (1-5 scale)
+    - /AU-     : Audience specification
+    
+    Example Code:
+    /TN/A3,P4,EMP2/VL4/SC3/FL2/LF3/LD3/VS6
+    
+    Decoded Output:
+    - Tone: Authoritative (Level 3), Professional (Level 4), Empathetic (Level 2)
+    - Vocabulary Level: 4/10 (Advanced professional vocabulary)
+    - Sentence Complexity: 3/5 (Mix of simple and compound sentences)
+    - Figurative Language: 2/5 (Minimal metaphors, focus on clarity)
+    - Language Formality: 3/5 (Professional but approachable)
+    - Level of Detail: 3/5 (Balanced overview and depth)
+    - Verb Strength: 6/10 (Moderately dynamic verbs)
     """
     
     name: str = "AI Language Code Parser"
     description: str = (
-        "Parses AI Language Code shorthand (like /TN/A3,EMP4/VL3/SC2) into "
-        "structured parameters for content generation with precise stylistic control."
+        "Parse AI Language Code shorthand (e.g., /TN/A3,P4/VL4/SC3) into detailed "
+        "content creation parameters. Returns comprehensive guidelines for tone, "
+        "vocabulary, sentence structure, and style."
     )
     args_schema: Type[BaseModel] = AILanguageCodeInput
     
     # Tone code mappings
     TONE_CODES = {
-        "A": "Authoritative",
-        "AF": "Affluent",
-        "AP": "Approachable",
-        "B": "Bold",
-        "BU": "Bubbly",
-        "C": "Compassionate",
-        "CB": "Cerebral",
-        "CH": "Challenging",
-        "EL": "Elegant",
-        "EM": "Empowering",
-        "EMP": "Empathetic",
-        "EN": "Energetic",
-        "ENC": "Encouraging",
-        "ET": "Enthusiastic",
-        "F": "Friendly",
-        "FA": "Familiar",
-        "H": "Humorous",
-        "HE": "Helpful",
-        "HF": "Heartfelt",
-        "I": "Inspirational",
-        "K": "Knowledgable",
-        "L": "Learning",
-        "N": "Neutral",
-        "O": "Optimistic",
-        "P": "Professional",
-        "R": "Refined",
-        "S": "Sincere",
-        "SO": "Sophisticated",
-        "SU": "Supportive",
-        "T": "Thoughtful",
-        "TH": "Thrilling",
-        "U": "Urgent",
-        "V": "Vibrant",
-        "W": "Whimsical",
-        "X": "Exclusive",
-        "Y": "Youthful"
+        'A': 'Authoritative',
+        'AF': 'Affluent',
+        'AP': 'Approachable',
+        'B': 'Bold',
+        'BU': 'Bubbly',
+        'C': 'Compassionate',
+        'CB': 'Cerebral',
+        'CH': 'Challenging',
+        'EL': 'Elegant',
+        'EM': 'Empowering',
+        'EMP': 'Empathetic',
+        'EN': 'Energetic',
+        'ENC': 'Encouraging',
+        'ET': 'Enthusiastic',
+        'F': 'Friendly',
+        'FA': 'Familiar',
+        'H': 'Humorous',
+        'HE': 'Helpful',
+        'HF': 'Heartfelt',
+        'I': 'Inspirational',
+        'K': 'Knowledgeable',
+        'L': 'Learning',
+        'N': 'Neutral',
+        'O': 'Optimistic',
+        'P': 'Professional',
+        'R': 'Refined',
+        'S': 'Sincere',
+        'SO': 'Sophisticated',
+        'SU': 'Supportive',
+        'T': 'Thoughtful',
+        'TH': 'Thrilling',
+        'U': 'Urgent',
+        'V': 'Vibrant',
+        'W': 'Whimsical',
+        'X': 'Exclusive',
+        'Y': 'Youthful'
     }
     
-    def _run(self, code: str) -> Dict[str, Any]:
+    def _run(self, code: str) -> str:
         """
-        Parse the AI Language Code string into structured parameters.
+        Parse AI Language Code and return detailed parameters.
         
         Args:
-            code: AI Language Code string (e.g., /TN/A3,EMP4/VL3/SC2/FL3)
-            
+            code: AI Language Code string (e.g., /TN/A3,P4,EMP2/VL4/SC3/FL2/LF3)
+        
         Returns:
-            Dictionary containing parsed parameters with descriptions
+            JSON string with parsed parameters and detailed guidelines
         """
-        parsed = {
-            "raw_code": code,
-            "parameters": {},
-            "instructions": []
-        }
+        try:
+            parsed = self._parse_code(code)
+            guidelines = self._generate_guidelines(parsed)
+            
+            result = {
+                "code": code,
+                "parsed_parameters": parsed,
+                "detailed_guidelines": guidelines,
+                "summary": self._generate_summary(parsed)
+            }
+            
+            return json.dumps(result, indent=2)
+            
+        except Exception as e:
+            return json.dumps({
+                "error": f"Failed to parse AI Language Code: {str(e)}",
+                "code": code,
+                "suggestion": "Verify code format matches: /TN/[codes]/VL[num]/SC[num]/..."
+            }, indent=2)
+    
+    def _parse_code(self, code: str) -> Dict[str, Any]:
+        """Parse the AI Language Code string into structured parameters."""
+        parsed = {}
         
-        # Split by forward slash and process each segment
-        segments = [s.strip() for s in code.split('/') if s.strip()]
+        # Extract Tone (/TN/...)
+        tone_match = re.search(r'/TN/([^/]+)', code)
+        if tone_match:
+            parsed['tone'] = self._parse_tone(tone_match.group(1))
         
-        for segment in segments:
-            # Parse Tone (TN)
-            if segment.startswith('TN'):
-                parsed["parameters"]["tone"] = self._parse_tone(segment)
-                parsed["instructions"].append(self._generate_tone_instruction(
-                    parsed["parameters"]["tone"]
-                ))
-            
-            # Parse Vocabulary Level (VL)
-            elif segment.startswith('VL'):
-                level = self._extract_number(segment, 'VL')
-                if level:
-                    parsed["parameters"]["vocabulary_level"] = {
-                        "level": level,
-                        "description": self._get_vocabulary_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Use vocabulary at level {level}/10: {self._get_vocabulary_description(level)}"
-                    )
-            
-            # Parse Sentence Complexity (SC)
-            elif segment.startswith('SC'):
-                level = self._extract_number(segment, 'SC')
-                if level:
-                    parsed["parameters"]["sentence_complexity"] = {
-                        "level": level,
-                        "description": self._get_sentence_complexity_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Sentence complexity level {level}/5: {self._get_sentence_complexity_description(level)}"
-                    )
-            
-            # Parse Figurative Language (FL)
-            elif segment.startswith('FL'):
-                level = self._extract_number(segment, 'FL')
-                if level:
-                    parsed["parameters"]["figurative_language"] = {
-                        "level": level,
-                        "description": self._get_figurative_language_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Figurative language level {level}/5: {self._get_figurative_language_description(level)}"
-                    )
-            
-            # Parse Verb Strength (VS)
-            elif segment.startswith('VS'):
-                level = self._extract_number(segment, 'VS')
-                if level:
-                    parsed["parameters"]["verb_strength"] = {
-                        "level": level,
-                        "description": self._get_verb_strength_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Verb strength level {level}/10: {self._get_verb_strength_description(level)}"
-                    )
-            
-            # Parse Language Formality (LF)
-            elif segment.startswith('LF'):
-                level = self._extract_number(segment, 'LF')
-                if level:
-                    parsed["parameters"]["language_formality"] = {
-                        "level": level,
-                        "description": self._get_formality_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Language formality level {level}/5: {self._get_formality_description(level)}"
-                    )
-            
-            # Parse Level of Detail (LD)
-            elif segment.startswith('LD'):
-                level = self._extract_number(segment, 'LD')
-                if level:
-                    parsed["parameters"]["level_of_detail"] = {
-                        "level": level,
-                        "description": self._get_detail_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Level of detail {level}/5: {self._get_detail_description(level)}"
-                    )
-            
-            # Parse Content Focus (CF)
-            elif segment.startswith('CF'):
-                level = self._extract_number(segment, 'CF')
-                if level:
-                    parsed["parameters"]["content_focus"] = {
-                        "level": level,
-                        "description": self._get_content_focus_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Content focus level {level}/5: {self._get_content_focus_description(level)}"
-                    )
-            
-            # Parse Conceptual Creative Freedom (CRF-C)
-            elif 'CRF-C' in segment or 'CRFC' in segment:
-                level = self._extract_number(segment, 'CRF-C', alt_prefix='CRFC')
-                if level:
-                    parsed["parameters"]["conceptual_creative_freedom"] = {
-                        "level": level,
-                        "description": self._get_conceptual_freedom_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Conceptual creative freedom {level}/10: {self._get_conceptual_freedom_description(level)}"
-                    )
-            
-            # Parse Structural Creative Freedom (CRF-S)
-            elif 'CRF-S' in segment or 'CRFS' in segment:
-                level = self._extract_number(segment, 'CRF-S', alt_prefix='CRFS')
-                if level:
-                    parsed["parameters"]["structural_creative_freedom"] = {
-                        "level": level,
-                        "description": self._get_structural_freedom_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Structural creative freedom {level}/10: {self._get_structural_freedom_description(level)}"
-                    )
-            
-            # Parse Persuasiveness (PS)
-            elif segment.startswith('PS'):
-                level = self._extract_number(segment, 'PS')
-                if level:
-                    parsed["parameters"]["persuasiveness"] = {
-                        "level": level,
-                        "description": self._get_persuasiveness_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Persuasiveness level {level}/5: {self._get_persuasiveness_description(level)}"
-                    )
-            
-            # Parse Subject Expertise (SE)
-            elif segment.startswith('SE'):
-                level = self._extract_number(segment, 'SE')
-                if level:
-                    parsed["parameters"]["subject_expertise"] = {
-                        "level": level,
-                        "description": self._get_expertise_description(level)
-                    }
-                    parsed["instructions"].append(
-                        f"Subject expertise level {level}/5: {self._get_expertise_description(level)}"
-                    )
-            
-            # Parse Audience (AU)
-            elif segment.startswith('AU-') or segment.startswith('AU_'):
-                audience = segment[3:].strip().replace('-', ' ').replace('_', ' ')
-                parsed["parameters"]["audience"] = audience
-                parsed["instructions"].append(
-                    f"Target audience: {audience}"
-                )
+        # Extract Vocabulary Level (/VL[number])
+        vl_match = re.search(r'/VL(\d+)', code)
+        if vl_match:
+            parsed['vocabulary_level'] = int(vl_match.group(1))
         
-        # Generate summary instruction
-        parsed["summary"] = self._generate_summary(parsed["parameters"])
+        # Extract Sentence Complexity (/SC[number])
+        sc_match = re.search(r'/SC(\d+)', code)
+        if sc_match:
+            parsed['sentence_complexity'] = int(sc_match.group(1))
+        
+        # Extract Figurative Language (/FL[number])
+        fl_match = re.search(r'/FL(\d+)', code)
+        if fl_match:
+            parsed['figurative_language'] = int(fl_match.group(1))
+        
+        # Extract Language Formality (/LF[number])
+        lf_match = re.search(r'/LF(\d+)', code)
+        if lf_match:
+            parsed['language_formality'] = int(lf_match.group(1))
+        
+        # Extract Level of Detail (/LD[number])
+        ld_match = re.search(r'/LD(\d+)', code)
+        if ld_match:
+            parsed['level_of_detail'] = int(ld_match.group(1))
+        
+        # Extract Verb Strength (/VS[number])
+        vs_match = re.search(r'/VS(\d+)', code)
+        if vs_match:
+            parsed['verb_strength'] = int(vs_match.group(1))
+        
+        # Extract Subject Expertise (/SE[number])
+        se_match = re.search(r'/SE(\d+)', code)
+        if se_match:
+            parsed['subject_expertise'] = int(se_match.group(1))
+        
+        # Extract Audience (/AU-[text])
+        au_match = re.search(r'/AU-([^/]+)', code)
+        if au_match:
+            parsed['audience_specification'] = au_match.group(1)
         
         return parsed
     
-    def _parse_tone(self, segment: str) -> Dict[str, Any]:
-        """Parse tone parameters like TN/A3,EMP4"""
-        # Remove TN prefix and split by comma
-        tones_str = segment.replace('TN', '').strip('/')
-        tone_parts = [t.strip() for t in tones_str.split(',') if t.strip()]
-        
+    def _parse_tone(self, tone_str: str) -> List[Dict[str, Any]]:
+        """Parse tone codes with intensity levels."""
         tones = []
+        # Split by comma for multiple tones: A3,P4,EMP2
+        tone_parts = tone_str.split(',')
+        
         for part in tone_parts:
-            # Extract tone code and level
-            # Match patterns like A3, EMP4, etc.
-            match = re.match(r'([A-Z]+)(\d+)', part)
+            # Match pattern like "A3" or "EMP2"
+            match = re.match(r'([A-Z]+)(\d+)', part.strip())
             if match:
-                tone_code = match.group(1)
-                level = int(match.group(2))
+                code = match.group(1)
+                intensity = int(match.group(2))
                 
-                if tone_code in self.TONE_CODES:
-                    tones.append({
-                        "code": tone_code,
-                        "name": self.TONE_CODES[tone_code],
-                        "intensity": level
-                    })
+                tone_name = self.TONE_CODES.get(code, f"Unknown ({code})")
+                tones.append({
+                    "code": code,
+                    "name": tone_name,
+                    "intensity": intensity,
+                    "description": self._get_tone_description(code, intensity)
+                })
+        
+        return tones
+    
+    def _get_tone_description(self, code: str, intensity: int) -> str:
+        """Generate description for tone based on code and intensity."""
+        tone_name = self.TONE_CODES.get(code, "Unknown")
+        
+        intensity_desc = {
+            1: "subtle hint",
+            2: "gentle presence",
+            3: "moderate emphasis",
+            4: "strong emphasis",
+            5: "dominant characteristic"
+        }.get(intensity, "moderate emphasis")
+        
+        return f"{tone_name} tone with {intensity_desc}"
+    
+    def _generate_guidelines(self, parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate detailed writing guidelines from parsed parameters."""
+        guidelines = {}
+        
+        # Tone Guidelines
+        if 'tone' in parsed:
+            tone_guidelines = []
+            for tone in parsed['tone']:
+                tone_guidelines.append(self._get_tone_guidelines(tone))
+            guidelines['tone'] = {
+                "layers": tone_guidelines,
+                "application": "Layer these tones with primary tone dominating, secondary supporting, and tertiary as accent."
+            }
+        
+        # Vocabulary Level Guidelines
+        if 'vocabulary_level' in parsed:
+            vl = parsed['vocabulary_level']
+            guidelines['vocabulary'] = self._get_vocabulary_guidelines(vl)
+        
+        # Sentence Complexity Guidelines
+        if 'sentence_complexity' in parsed:
+            sc = parsed['sentence_complexity']
+            guidelines['sentence_structure'] = self._get_sentence_complexity_guidelines(sc)
+        
+        # Figurative Language Guidelines
+        if 'figurative_language' in parsed:
+            fl = parsed['figurative_language']
+            guidelines['figurative_language'] = self._get_figurative_language_guidelines(fl)
+        
+        # Language Formality Guidelines
+        if 'language_formality' in parsed:
+            lf = parsed['language_formality']
+            guidelines['formality'] = self._get_formality_guidelines(lf)
+        
+        # Level of Detail Guidelines
+        if 'level_of_detail' in parsed:
+            ld = parsed['level_of_detail']
+            guidelines['detail_level'] = self._get_detail_guidelines(ld)
+        
+        # Verb Strength Guidelines
+        if 'verb_strength' in parsed:
+            vs = parsed['verb_strength']
+            guidelines['verb_usage'] = self._get_verb_strength_guidelines(vs)
+        
+        # Subject Expertise Guidelines
+        if 'subject_expertise' in parsed:
+            se = parsed['subject_expertise']
+            guidelines['expertise_level'] = self._get_expertise_guidelines(se)
+        
+        return guidelines
+    
+    def _get_tone_guidelines(self, tone: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate specific guidelines for a tone."""
+        tone_strategies = {
+            'Authoritative': {
+                1: "Occasional confident statements with data backing",
+                2: "Regular use of expert language and definitive statements",
+                3: "Strong expertise demonstrations, cite studies and research",
+                4: "Dominant expert voice, command of subject matter clear",
+                5: "Absolute authority, speak as the definitive source"
+            },
+            'Professional': {
+                1: "Polished language, minimal casual expressions",
+                2: "Business-appropriate throughout, avoid slang",
+                3: "Corporate communication standards, formal structure",
+                4: "High-level executive communication style",
+                5: "C-suite level gravitas and polish"
+            },
+            'Empathetic': {
+                1: "Acknowledge reader's perspective occasionally",
+                2: "Regular recognition of challenges and concerns",
+                3: "Demonstrate understanding of pain points consistently",
+                4: "Deep emotional connection, validate feelings",
+                5: "Profound empathy, reader feels truly understood"
+            },
+            'Friendly': {
+                1: "Warm word choices, welcoming tone",
+                2: "Conversational elements, approachable language",
+                3: "Like talking to a knowledgeable friend",
+                4: "Very warm and inviting, personal connection",
+                5: "Best friend energy, deeply relatable"
+            },
+            'Helpful': {
+                1: "Provide useful information clearly",
+                2: "Focus on actionable guidance",
+                3: "Step-by-step support, problem-solving focus",
+                4: "Comprehensive assistance, anticipate needs",
+                5: "Ultimate resource, answer every possible question"
+            }
+        }
+        
+        strategy = tone_strategies.get(tone['name'], {}).get(
+            tone['intensity'],
+            f"Apply {tone['name'].lower()} tone at level {tone['intensity']}"
+        )
         
         return {
-            "tones": tones,
-            "primary": tones[0] if tones else None,
-            "secondary": tones[1] if len(tones) > 1 else None
+            "tone": tone['name'],
+            "intensity": tone['intensity'],
+            "strategy": strategy
         }
     
-    def _extract_number(self, segment: str, prefix: str, alt_prefix: Optional[str] = None) -> Optional[int]:
-        """Extract numeric value from a parameter segment"""
-        # Try main prefix
-        if prefix in segment:
-            num_str = segment.replace(prefix, '').strip('/')
-            try:
-                return int(num_str)
-            except ValueError:
-                pass
+    def _get_vocabulary_guidelines(self, level: int) -> Dict[str, Any]:
+        """Generate vocabulary usage guidelines."""
+        vocab_specs = {
+            1: {
+                "description": "Very basic, everyday language",
+                "common_words": "90-100%",
+                "uncommon_words": "0-10%",
+                "advanced_words": "0%",
+                "example": "help, make, good, easy, people, work"
+            },
+            2: {
+                "description": "Simple but professional",
+                "common_words": "80%",
+                "uncommon_words": "15%",
+                "advanced_words": "5%",
+                "example": "implement, facilitate, enhance, establish"
+            },
+            3: {
+                "description": "Accessible professional vocabulary",
+                "common_words": "70%",
+                "uncommon_words": "20%",
+                "advanced_words": "10%",
+                "example": "optimize, leverage, strategic, comprehensive"
+            },
+            4: {
+                "description": "Advanced professional vocabulary",
+                "common_words": "60%",
+                "uncommon_words": "25%",
+                "advanced_words": "15%",
+                "example": "synthesize, paradigm, methodology, proprietary"
+            },
+            5: {
+                "description": "Sophisticated business vocabulary",
+                "common_words": "50%",
+                "uncommon_words": "30%",
+                "advanced_words": "20%",
+                "example": "nomenclature, synergistic, multifaceted, holistic"
+            },
+            6: {
+                "description": "Specialized professional language",
+                "common_words": "40%",
+                "uncommon_words": "35%",
+                "advanced_words": "25%",
+                "example": "actualize, paradigmatic, architectonic, systematic"
+            },
+            7: {
+                "description": "Industry-specific technical terms",
+                "common_words": "30%",
+                "uncommon_words": "40%",
+                "advanced_words": "30%",
+                "example": "Domain-specific jargon, technical terminology"
+            },
+            8: {
+                "description": "Highly specialized vocabulary",
+                "common_words": "20%",
+                "uncommon_words": "40%",
+                "advanced_words": "40%",
+                "example": "Advanced technical language, field-specific terms"
+            },
+            9: {
+                "description": "Academic/expert-level language",
+                "common_words": "10%",
+                "uncommon_words": "40%",
+                "advanced_words": "50%",
+                "example": "Scholarly terminology, research-specific language"
+            },
+            10: {
+                "description": "Highly technical/academic",
+                "common_words": "0-5%",
+                "uncommon_words": "45%",
+                "advanced_words": "50-55%",
+                "example": "Research papers, highly specialized publications"
+            }
+        }
         
-        # Try alternative prefix
-        if alt_prefix and alt_prefix in segment:
-            num_str = segment.replace(alt_prefix, '').strip('/')
-            try:
-                return int(num_str)
-            except ValueError:
-                pass
+        return vocab_specs.get(level, vocab_specs[5])
+    
+    def _get_sentence_complexity_guidelines(self, level: int) -> Dict[str, Any]:
+        """Generate sentence structure guidelines."""
+        complexity_specs = {
+            1: {
+                "description": "Very simple sentences",
+                "simple": "60-80%",
+                "compound": "10-20%",
+                "complex": "10-20%",
+                "compound_complex": "0%",
+                "avg_length": "10-15 words",
+                "example": "We help businesses grow. Our solutions are effective."
+            },
+            2: {
+                "description": "Mostly simple with some variation",
+                "simple": "50-60%",
+                "compound": "20-25%",
+                "complex": "15-20%",
+                "compound_complex": "0-5%",
+                "avg_length": "12-18 words",
+                "example": "We help businesses grow, and our solutions are effective."
+            },
+            3: {
+                "description": "Balanced mix of structures",
+                "simple": "40-50%",
+                "compound": "30%",
+                "complex": "20-30%",
+                "compound_complex": "0-5%",
+                "avg_length": "15-20 words",
+                "example": "We help businesses grow through solutions that are effective."
+            },
+            4: {
+                "description": "More complex structures",
+                "simple": "25-35%",
+                "compound": "35%",
+                "complex": "30-35%",
+                "compound_complex": "5%",
+                "avg_length": "18-25 words",
+                "example": "While many businesses struggle, we provide solutions that help them grow effectively."
+            },
+            5: {
+                "description": "Sophisticated, varied structures",
+                "simple": "5%",
+                "compound": "50%",
+                "complex": "35%",
+                "compound_complex": "10%",
+                "avg_length": "20-30 words",
+                "example": "Although challenges persist, our comprehensive solutions, which have been tested extensively, help businesses grow."
+            }
+        }
         
-        return None
+        return complexity_specs.get(level, complexity_specs[3])
     
-    def _generate_tone_instruction(self, tone_data: Dict) -> str:
-        """Generate instruction text for tone"""
-        tones_list = tone_data.get("tones", [])
-        if not tones_list:
-            return "Use neutral tone"
+    def _get_figurative_language_guidelines(self, level: int) -> Dict[str, Any]:
+        """Generate figurative language usage guidelines."""
+        fl_specs = {
+            1: {
+                "description": "Minimal figurative language",
+                "frequency": "0-5% of sentences",
+                "usage": "Rare and only when highly effective",
+                "types": "Simple similes only"
+            },
+            2: {
+                "description": "Occasional figurative language",
+                "frequency": "5-15% of sentences",
+                "usage": "Strategic use for emphasis",
+                "types": "Similes and basic metaphors"
+            },
+            3: {
+                "description": "Moderate figurative language",
+                "frequency": "15-25% of sentences",
+                "usage": "Regular enhancement of explanations",
+                "types": "Metaphors, similes, and analogies"
+            },
+            4: {
+                "description": "Frequent figurative language",
+                "frequency": "25-40% of sentences",
+                "usage": "Adds depth and imagery regularly",
+                "types": "Extended metaphors and elaborate analogies"
+            },
+            5: {
+                "description": "Rich, imaginative language",
+                "frequency": "40-60% of sentences",
+                "usage": "Integral to style with layered expressions",
+                "types": "Complex metaphors, personification, vivid imagery"
+            }
+        }
         
-        instructions = []
-        for i, tone in enumerate(tones_list):
-            priority = "Primary" if i == 0 else "Secondary"
-            instructions.append(
-                f"{priority} tone: {tone['name']} at intensity {tone['intensity']}/5"
-            )
+        return fl_specs.get(level, fl_specs[2])
+    
+    def _get_formality_guidelines(self, level: int) -> Dict[str, Any]:
+        """Generate language formality guidelines."""
+        formality_specs = {
+            1: {
+                "description": "Highly informal/colloquial",
+                "characteristics": "Conversational, casual, slang acceptable",
+                "contractions": "Frequent",
+                "personal_pronouns": "Very common (you, we, I)",
+                "example": "Hey, let's dive into this!"
+            },
+            2: {
+                "description": "Informal but professional",
+                "characteristics": "Friendly business communication",
+                "contractions": "Common",
+                "personal_pronouns": "Common (you, we)",
+                "example": "Let's explore how we can help you."
+            },
+            3: {
+                "description": "Balanced professional",
+                "characteristics": "Professional but approachable",
+                "contractions": "Occasional",
+                "personal_pronouns": "Moderate use",
+                "example": "We will explore how to address this challenge."
+            },
+            4: {
+                "description": "Formal business",
+                "characteristics": "Corporate communication standards",
+                "contractions": "Rare",
+                "personal_pronouns": "Limited use",
+                "example": "This analysis will explore the challenges."
+            },
+            5: {
+                "description": "Highly formal/academic",
+                "characteristics": "Academic or legal precision",
+                "contractions": "Never",
+                "personal_pronouns": "Minimal or none",
+                "example": "This document presents an analysis of the challenges."
+            }
+        }
         
-        return "; ".join(instructions)
+        return formality_specs.get(level, formality_specs[3])
     
-    def _get_vocabulary_description(self, level: int) -> str:
-        """Get vocabulary level description"""
-        descriptions = {
-            1: "90-100% common everyday words - very basic, accessible to general audience",
-            2: "80% common, 15% slightly uncommon terms - mostly simple with occasional specific terms",
-            3: "70% common, 20% uncommon, 10% advanced - balanced accessible and sophisticated",
-            4: "60% common, 25% uncommon, 15% advanced - refined vocabulary with technical terms",
-            5: "50% common, 30% uncommon, 20% advanced - professional/academic level",
-            6: "40% common, 35% uncommon, 25% advanced - educated/niche audience",
-            7: "30% common, 40% uncommon, 30% advanced - highly sophisticated vocabulary",
-            8: "20% common, 40% uncommon, 40% advanced - specialized expert language",
-            9: "10% common, 40% uncommon, 50% advanced - expert-level with rich advanced terms",
-            10: "0-5% common, 45% uncommon, 50-55% advanced - extremely technical/academic"
+    def _get_detail_guidelines(self, level: int) -> Dict[str, Any]:
+        """Generate level of detail guidelines."""
+        detail_specs = {
+            1: {
+                "description": "Very concise overview",
+                "overview": "90-100%",
+                "detail": "0-10%",
+                "approach": "Essential points only, minimal elaboration"
+            },
+            2: {
+                "description": "Brief with key details",
+                "overview": "75-85%",
+                "detail": "15-25%",
+                "approach": "Main points with surface-level details"
+            },
+            3: {
+                "description": "Balanced coverage",
+                "overview": "50-60%",
+                "detail": "40-50%",
+                "approach": "Key points with moderate depth and examples"
+            },
+            4: {
+                "description": "Detailed analysis",
+                "overview": "25-35%",
+                "detail": "65-75%",
+                "approach": "Comprehensive with detailed examples and context"
+            },
+            5: {
+                "description": "Exhaustive detail",
+                "overview": "0-10%",
+                "detail": "90-100%",
+                "approach": "Every facet covered with examples and citations"
+            }
         }
-        return descriptions.get(level, "Unknown level")
+        
+        return detail_specs.get(level, detail_specs[3])
     
-    def _get_sentence_complexity_description(self, level: int) -> str:
-        """Get sentence complexity description"""
-        descriptions = {
-            1: "60-80% simple sentences, remainder split between compound and complex",
-            2: "50-60% simple sentences, remainder split between compound and complex",
-            3: "40-50% simple, 30% compound, 20-30% complex - balanced approach",
-            4: "25-35% simple, 35% compound, 30-35% complex, 5% compound-complex",
-            5: "5% simple, 50% compound, 35% complex, 10% compound-complex - sophisticated structure"
-        }
-        return descriptions.get(level, "Unknown level")
-    
-    def _get_figurative_language_description(self, level: int) -> str:
-        """Get figurative language description"""
-        descriptions = {
-            1: "0-5% figurative language - minimal, straightforward and factual",
-            2: "5-15% figurative language - rare use, mostly literal",
-            3: "15-25% figurative language - moderate use for enhancement",
-            4: "25-40% figurative language - frequent use adds depth and vividness",
-            5: "40-60% figurative language - rich, integral to style with layered expressions"
-        }
-        return descriptions.get(level, "Unknown level")
-    
-    def _get_verb_strength_description(self, level: int) -> str:
-        """Get verb strength description"""
-        if level <= 2:
-            return "Basic, common verbs (e.g., 'went', 'said', 'did')"
-        elif level <= 4:
-            return "Moderately descriptive verbs (e.g., 'walked', 'explained', 'completed')"
-        elif level <= 6:
-            return "Strong, specific verbs (e.g., 'strode', 'articulated', 'accomplished')"
-        elif level <= 8:
-            return "Dynamic, impactful verbs (e.g., 'surged', 'revolutionized', 'transformed')"
-        else:
-            return "Powerful, vivid verbs that elevate writing (e.g., 'annihilated', 'catalyzed', 'pioneered')"
-    
-    def _get_formality_description(self, level: int) -> str:
-        """Get language formality description"""
-        descriptions = {
-            1: "Highly informal/colloquial - casual conversation style",
-            2: "Informal but professional - friendly business communication",
-            3: "Balanced formality - standard professional writing",
-            4: "Formal - academic or technical writing",
-            5: "Highly formal/academic - scholarly or legal documents"
-        }
-        return descriptions.get(level, "Unknown level")
-    
-    def _get_detail_description(self, level: int) -> str:
-        """Get level of detail description"""
-        descriptions = {
-            1: "90-100% high-level overview - very concise, essential points only",
-            2: "75-85% overview, 15-25% detail - brief with surface-level examples",
-            3: "50-60% overview, 40-50% detail - balanced depth and breadth",
-            4: "25-35% overview, 65-75% detail - comprehensive with thorough context",
-            5: "0-10% overview, 90-100% detail - exhaustive, technical document level"
-        }
-        return descriptions.get(level, "Unknown level")
-    
-    def _get_content_focus_description(self, level: int) -> str:
-        """Get content focus description"""
-        descriptions = {
-            1: "90-100% broad overview - high-level coverage, minimal depth",
-            2: "75-85% broad, 15-25% specific - includes surface-level subtopic examples",
-            3: "50-60% broad, 40-50% specific - highlights 2-3 subtopics with moderate depth",
-            4: "25-35% broad, 65-75% specific - deep dive into specific subtopic",
-            5: "90-100% niche focus - comprehensive coverage of narrow aspect"
-        }
-        return descriptions.get(level, "Unknown level")
-    
-    def _get_conceptual_freedom_description(self, level: int) -> str:
-        """Get conceptual creative freedom description"""
+    def _get_verb_strength_guidelines(self, level: int) -> Dict[str, Any]:
+        """Generate verb strength guidelines."""
         if level <= 3:
-            return "Stick closely to given ideas and examples"
-        elif level <= 6:
-            return "Some flexibility to add related concepts and connections"
+            desc = "Basic, common verbs"
+            examples_weak = "is, has, gets, does, makes"
+            examples_strong = "helps, creates, provides, shows"
+        elif level <= 5:
+            desc = "Moderate action verbs"
+            examples_weak = "uses, works, gives"
+            examples_strong = "implements, facilitates, delivers, establishes"
+        elif level <= 7:
+            desc = "Strong action verbs"
+            examples_weak = "changes, improves"
+            examples_strong = "transforms, optimizes, revolutionizes, accelerates"
         else:
-            return "High freedom to generate original, imaginative ideas beyond prompt scope"
-    
-    def _get_structural_freedom_description(self, level: int) -> str:
-        """Get structural creative freedom description"""
-        if level <= 3:
-            return "Strict adherence to structural template"
-        elif level <= 6:
-            return "Moderate flexibility to adjust structure while maintaining framework"
-        else:
-            return "High freedom to reorganize and innovate structurally"
-    
-    def _get_persuasiveness_description(self, level: int) -> str:
-        """Get persuasiveness description"""
-        descriptions = {
-            1: "Purely informative - neutral presentation of facts",
-            2: "Mildly persuasive - subtle suggestions and recommendations",
-            3: "Moderately persuasive - clear call to action with supporting arguments",
-            4: "Highly persuasive - compelling arguments designed to influence",
-            5: "Extremely persuasive - powerful rhetoric aimed at driving specific actions"
+            desc = "Dynamic, impactful verbs"
+            examples_weak = "affects, influences"
+            examples_strong = "catalyzes, propels, ignites, amplifies, decimates"
+        
+        return {
+            "level": level,
+            "description": desc,
+            "weak_verbs_to_avoid": examples_weak,
+            "strong_verbs_to_use": examples_strong,
+            "guideline": f"Use verbs at strength level {level}/10"
         }
-        return descriptions.get(level, "Unknown level")
     
-    def _get_expertise_description(self, level: int) -> str:
-        """Get subject expertise description"""
-        descriptions = {
-            1: "Basic understanding - general population knowledge level",
-            2: "Informed layperson - well-researched understanding",
-            3: "Intermediate professional - solid working knowledge",
-            4: "Advanced professional - years of specialized experience",
-            5: "Expert-level - decades of deep industry expertise"
+    def _get_expertise_guidelines(self, level: int) -> Dict[str, Any]:
+        """Generate subject expertise guidelines."""
+        expertise_specs = {
+            1: {
+                "description": "General population knowledge",
+                "depth": "Basic understanding, minimal research",
+                "assumptions": "No prior knowledge assumed",
+                "language": "Explain everything simply"
+            },
+            2: {
+                "description": "Informed consumer level",
+                "depth": "Surface-level industry knowledge",
+                "assumptions": "Basic familiarity with topic",
+                "language": "Some terminology acceptable with context"
+            },
+            3: {
+                "description": "Professional familiarity",
+                "depth": "Working knowledge of concepts",
+                "assumptions": "Audience has relevant experience",
+                "language": "Industry terminology used naturally"
+            },
+            4: {
+                "description": "Subject matter competence",
+                "depth": "Significant expertise demonstrated",
+                "assumptions": "Advanced understanding expected",
+                "language": "Technical language, nuanced discussions"
+            },
+            5: {
+                "description": "Expert-level insights",
+                "depth": "Decades of experience evident",
+                "assumptions": "Expert-to-expert communication",
+                "language": "Cutting-edge concepts, research-level"
+            }
         }
-        return descriptions.get(level, "Unknown level")
+        
+        return expertise_specs.get(level, expertise_specs[3])
     
-    def _generate_summary(self, parameters: Dict) -> str:
-        """Generate a human-readable summary of all parameters"""
+    def _generate_summary(self, parsed: Dict[str, Any]) -> str:
+        """Generate a human-readable summary of the voice parameters."""
         summary_parts = []
         
-        if "tone" in parameters:
-            tone_data = parameters["tone"]
-            if tone_data.get("primary"):
-                primary = tone_data["primary"]
-                summary_parts.append(
-                    f"Primary tone: {primary['name']} (intensity {primary['intensity']})"
-                )
+        if 'tone' in parsed:
+            tones = [f"{t['name']} (Level {t['intensity']})" for t in parsed['tone']]
+            summary_parts.append(f"Tone: {', '.join(tones)}")
         
-        if "vocabulary_level" in parameters:
-            summary_parts.append(
-                f"Vocabulary: Level {parameters['vocabulary_level']['level']}"
-            )
+        if 'vocabulary_level' in parsed:
+            vl = parsed['vocabulary_level']
+            summary_parts.append(f"Vocabulary: Level {vl}/10")
         
-        if "sentence_complexity" in parameters:
-            summary_parts.append(
-                f"Sentence complexity: Level {parameters['sentence_complexity']['level']}"
-            )
+        if 'sentence_complexity' in parsed:
+            sc = parsed['sentence_complexity']
+            summary_parts.append(f"Sentence Complexity: Level {sc}/5")
         
-        if "audience" in parameters:
-            summary_parts.append(f"Audience: {parameters['audience']}")
+        if 'figurative_language' in parsed:
+            fl = parsed['figurative_language']
+            summary_parts.append(f"Figurative Language: Level {fl}/5")
         
-        return " | ".join(summary_parts) if summary_parts else "No parameters parsed"
+        if 'language_formality' in parsed:
+            lf = parsed['language_formality']
+            summary_parts.append(f"Formality: Level {lf}/5")
+        
+        return " | ".join(summary_parts)
 
+
+# =============================================================================
+# TOOL INITIALIZATION
+# =============================================================================
 
 # Create tool instance for import
 ai_language_code_parser = AILanguageCodeParser()
+
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def parse_ai_language_code(code: str) -> Dict[str, Any]:
+    """
+    Utility function to parse AI Language Code without using the tool interface.
+    
+    Args:
+        code: AI Language Code string
+    
+    Returns:
+        Dictionary with parsed parameters
+    """
+    parser = AILanguageCodeParser()
+    result_json = parser._run(code)
+    return json.loads(result_json)
+
+
+def validate_ai_language_code(code: str) -> bool:
+    """
+    Validate if an AI Language Code string is properly formatted.
+    
+    Args:
+        code: AI Language Code string to validate
+    
+    Returns:
+        True if valid, False otherwise
+    """
+    try:
+        # Check for basic structure
+        if not code.startswith('/'):
+            return False
+        
+        # Attempt to parse
+        result = parse_ai_language_code(code)
+        
+        # Check if parsing was successful (no error in result)
+        return 'error' not in result
+    
+    except Exception:
+        return False
+
+
+def generate_example_code(
+    tone_primary: str = 'P',
+    tone_intensity_primary: int = 3,
+    vocabulary_level: int = 4,
+    sentence_complexity: int = 3,
+    figurative_language: int = 2,
+    language_formality: int = 3
+) -> str:
+    """
+    Generate a valid AI Language Code from parameters.
+    
+    Args:
+        tone_primary: Primary tone code (e.g., 'P' for Professional)
+        tone_intensity_primary: Intensity level 1-5
+        vocabulary_level: Vocabulary sophistication 1-10
+        sentence_complexity: Sentence structure complexity 1-5
+        figurative_language: Figurative language frequency 1-5
+        language_formality: Formality level 1-5
+    
+    Returns:
+        Valid AI Language Code string
+    """
+    code_parts = [
+        f"/TN/{tone_primary}{tone_intensity_primary}",
+        f"/VL{vocabulary_level}",
+        f"/SC{sentence_complexity}",
+        f"/FL{figurative_language}",
+        f"/LF{language_formality}"
+    ]
+    
+    return ''.join(code_parts)
+
+
+# =============================================================================
+# EXAMPLE USAGE AND TESTING
+# =============================================================================
+
+if __name__ == "__main__":
+    """
+    Test the AI Language Code Parser with example codes.
+    """
+    
+    print("=" * 80)
+    print("AI LANGUAGE CODE PARSER - TEST EXAMPLES")
+    print("=" * 80)
+    
+    # Example 1: Professional Blog Content
+    print("\n" + "-" * 80)
+    print("Example 1: Professional Blog Content")
+    print("-" * 80)
+    code1 = "/TN/A3,P4,EMP2/VL4/SC3/FL2/LF3/LD3/VS6"
+    result1 = parse_ai_language_code(code1)
+    print(f"\nCode: {code1}")
+    print(f"\nSummary: {result1['summary']}")
+    print("\nParsed Parameters:")
+    print(json.dumps(result1['parsed_parameters'], indent=2))
+    
+    # Example 2: Technical Documentation
+    print("\n" + "-" * 80)
+    print("Example 2: Technical Documentation")
+    print("-" * 80)
+    code2 = "/TN/A4,P5/VL7/SC4/FL1/LF4/LD4/VS5"
+    result2 = parse_ai_language_code(code2)
+    print(f"\nCode: {code2}")
+    print(f"\nSummary: {result2['summary']}")
+    
+    # Example 3: Casual Marketing Content
+    print("\n" + "-" * 80)
+    print("Example 3: Casual Marketing Content")
+    print("-" * 80)
+    code3 = "/TN/F4,ET3,H2/VL3/SC2/FL3/LF2/LD2/VS7"
+    result3 = parse_ai_language_code(code3)
+    print(f"\nCode: {code3}")
+    print(f"\nSummary: {result3['summary']}")
+    
+    # Test code generation
+    print("\n" + "-" * 80)
+    print("Example 4: Generated Code")
+    print("-" * 80)
+    generated_code = generate_example_code(
+        tone_primary='A',
+        tone_intensity_primary=3,
+        vocabulary_level=5,
+        sentence_complexity=3,
+        figurative_language=2,
+        language_formality=3
+    )
+    print(f"\nGenerated Code: {generated_code}")
+    print(f"Valid: {validate_ai_language_code(generated_code)}")
+    
+    print("\n" + "=" * 80)
+    print("TEST COMPLETE")
+    print("=" * 80)
