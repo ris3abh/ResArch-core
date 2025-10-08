@@ -385,18 +385,12 @@ def run():
         print("\n🚀 Initializing SpinScribe Crew...")
         crew_instance = SpinscribeCrew()
         
-        # Run crew based on mode
-        if use_webhooks:
-            print("\n▶️  Starting content creation with webhook monitoring...")
-            print(f"\n💡 TIP: Keep browser open to {webhook_status['dashboard_url']}")
-            print(f"        You'll need it to approve HITL checkpoints\n")
-            
-            result = crew_instance.kickoff_with_webhooks(inputs)
-        else:
-            print("\n▶️  Starting content creation in terminal mode...")
-            print(f"\n💡 TIP: You'll be prompted for approval in this terminal\n")
-            
-            result = crew_instance.crew().kickoff(inputs=inputs)
+        # Run crew - the crew.py run() method handles everything internally
+        print("\n▶️  Starting content creation with webhook monitoring...")
+        print(f"\n💡 TIP: Keep browser open to http://localhost:8000/dashboard")
+        print(f"        You'll need it to approve HITL checkpoints\n")
+
+        result = crew_instance.run() 
         
         # Display results
         print("\n" + "=" * 80)

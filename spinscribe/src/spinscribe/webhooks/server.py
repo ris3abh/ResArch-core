@@ -323,11 +323,13 @@ async def submit_approval(workflow_id: str, response: ApprovalResponse):
     """
     Submit human approval decision for a workflow checkpoint.
     
-    This endpoint processes the human reviewer's decision and:
-    1. Updates workflow state
-    2. Processes the decision through handlers
-    3. Attempts to resume crew execution
-    4. Returns next action information
+    This endpoint:
+    1. Updates workflow state in storage
+    2. Processes the decision through handlers (for logging/audit)
+    3. Returns next action information
+    
+    The crew AUTOMATICALLY RESUMES from the callback in crew.py
+    when wait_for_approval() detects the status change.
     """
     logger.info(f"📝 Received approval decision for workflow: {workflow_id}")
     logger.info(f"   Decision: {response.decision}")
@@ -345,20 +347,21 @@ async def submit_approval(workflow_id: str, response: ApprovalResponse):
                 detail=f"Workflow not awaiting approval. Current status: {state['status']}"
             )
         
-        # Process the approval decision (includes crew resume logic)
+        # Process the approval decision (logging/audit only)
         result = await process_approval_decision(workflow_id, state, response)
         
         # Update workflow status based on decision
         if response.decision == ApprovalDecision.APPROVE:
             new_status = WorkflowStatus.APPROVED
-            logger.info(f"✅ Workflow {workflow_id} approved - proceeding to next stage")
+            logger.info(f"✅ Workflow {workflow_id} approved - crew will auto-resume")
         elif response.decision == ApprovalDecision.REJECT:
             new_status = WorkflowStatus.REJECTED
-            logger.warning(f"❌ Workflow {workflow_id} rejected - will restart")
+            logger.warning(f"❌ Workflow {workflow_id} rejected")
         else:  # REVISE
             new_status = WorkflowStatus.REVISION_REQUESTED
             logger.info(f"🔄 Workflow {workflow_id} revision requested")
         
+        # Update storage (this is what wait_for_approval() checks!)
         update_workflow_status(workflow_id, new_status)
         
         # Update state with approval response
@@ -371,7 +374,8 @@ async def submit_approval(workflow_id: str, response: ApprovalResponse):
             "decision": response.decision,
             "next_action": result.get("next_action"),
             "message": result.get("message"),
-            "crew_resume_status": result.get("crew_resume_status", {})
+            "auto_resume": True,
+            "note": "Crew will automatically resume from callback"
         }
         
     except HTTPException:

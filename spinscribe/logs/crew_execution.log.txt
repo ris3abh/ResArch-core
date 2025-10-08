@@ -611,3 +611,220 @@ Your responsibilities:
 IMPORTANT: This task requires HUMAN APPROVAL before proceeding. A brand  voice expert or client representative must validate that the analyzed  patterns accurately represent the desired brand voice for this content.
 ", agent="Brand Voice Analysis Specialist for Yanmar
 ", status="started"
+2025-10-08 04:17:45: task_name="content_research_task", task="Conduct comprehensive research on AI in Robotics for Yanmar's blog  targeting Business Executives audience.
+Your research must cover:
+1. **Topic Analysis**: Deep dive into AI in Robotics including current trends, 
+   statistics, expert opinions, and recent developments (within last 12 months).
+
+2. **Client Context**: Search the client knowledge base at directory: knowledge/clients/Yanmar
+   - Previous successful content on similar topics
+   - Client's unique positioning and value proposition
+   - Target audience pain points and interests
+   - Industry-specific terminology and preferences
+   
+   **IMPORTANT**: When using the "Search a directory's content" tool, 
+   use this EXACT directory path: knowledge/clients/Yanmar
+
+3. **Competitive Intelligence**: Analyze how competitors cover this topic:
+   - Identify content gaps and opportunities
+   - Note successful content structures and angles
+   - Find areas where client can provide unique value
+
+4. **Source Quality**: Prioritize authoritative sources:
+   - Industry reports and studies
+   - Academic research and peer-reviewed articles
+   - Expert interviews and thought leader content
+   - Government and regulatory publications
+   - Credible news sources and trade publications
+
+5. **SEO Research**: Identify:
+   - Primary and secondary keywords
+   - Related search queries and LSI keywords
+   - Search intent patterns
+   - Featured snippet opportunities
+
+6. **Content Opportunities**: Find:
+   - Statistics and data points to cite
+   - Expert quotes to reference
+   - Case studies or examples to include
+   - Internal linking opportunities to client's existing content
+
+Deliver findings in a structured format that subsequent agents can easily  reference when creating the content outline and draft.
+", agent="Content Research & Competitive Analysis Specialist for Yanmar
+", status="started"
+2025-10-08 04:18:55: task_name="content_research_task", task="Conduct comprehensive research on AI in Robotics for Yanmar's blog  targeting Business Executives audience.
+Your research must cover:
+1. **Topic Analysis**: Deep dive into AI in Robotics including current trends, 
+   statistics, expert opinions, and recent developments (within last 12 months).
+
+2. **Client Context**: Search the client knowledge base at directory: knowledge/clients/Yanmar
+   - Previous successful content on similar topics
+   - Client's unique positioning and value proposition
+   - Target audience pain points and interests
+   - Industry-specific terminology and preferences
+   
+   **IMPORTANT**: When using the "Search a directory's content" tool, 
+   use this EXACT directory path: knowledge/clients/Yanmar
+
+3. **Competitive Intelligence**: Analyze how competitors cover this topic:
+   - Identify content gaps and opportunities
+   - Note successful content structures and angles
+   - Find areas where client can provide unique value
+
+4. **Source Quality**: Prioritize authoritative sources:
+   - Industry reports and studies
+   - Academic research and peer-reviewed articles
+   - Expert interviews and thought leader content
+   - Government and regulatory publications
+   - Credible news sources and trade publications
+
+5. **SEO Research**: Identify:
+   - Primary and secondary keywords
+   - Related search queries and LSI keywords
+   - Search intent patterns
+   - Featured snippet opportunities
+
+6. **Content Opportunities**: Find:
+   - Statistics and data points to cite
+   - Expert quotes to reference
+   - Case studies or examples to include
+   - Internal linking opportunities to client's existing content
+
+Deliver findings in a structured format that subsequent agents can easily  reference when creating the content outline and draft.
+", agent="Content Research & Competitive Analysis Specialist for Yanmar
+", status="completed", output="**Comprehensive Research Report on AI in Robotics for Yanmar**
+
+### 1. Executive Summary
+
+- **Key Insights**:
+  - The integration of AI with robotics is central in 2023, with AI enabling improved capabilities and efficiencies.
+  - The AI in Robotics market is expected to reach $146.8 billion by 2033.
+  - Yanmar can differentiate by emphasizing AI's practical applications in industrial machinery.
+
+- **Recommended Unique Angle**: Yanmar should focus on AI-driven innovations in heavy-duty machinery, spotlighting real-world efficiency improvements.
+
+- **Primary Audience Pain Points to Address**: Concerns about AI integration costs, data security, and proving ROI in industrial contexts.
+
+### 2. Topic Intelligence
+
+- **Current Trends and Statistics**:
+  - Advances in deep learning algorithms have enabled robots to perform more complex tasks (Source: Robotnik).
+  - AI in Robotics market size to grow at a CAGR of 28.12% from 2023-2033 (Source: Market.us).
+
+- **Expert Perspectives and Quotes**:
+  - Forbes states, "AI implementation can revolutionize operational efficiency and drive significant business value."
+
+- **Recent Developments**: AI is increasingly used in robotics for complex industrial tasks and improving operational precision.
+
+- **Common Misconceptions to Address**: AI replacing jobs rather than augmenting human capabilities.
+
+### 3. Competitive Analysis
+
+- **Summary of Competitor Approaches**:
+  - Companies like Boston Dynamics focus on humanoid robots and industrial applications.
+  - NVIDIA provides platforms for developing AI-enabled robots at scale.
+
+- **Identified Content Gaps**:
+  - Few competitors highlight AI applications in heavy machinery, presenting an opportunity for Yanmar.
+
+- **Successful Content Structures**:
+  - Detailed case studies illustrating AI integration benefits resonate well with industry professionals.
+
+- **Differentiators for Yanmar's Content**:
+  - Emphasize Yanmar’s legacy in industrial machinery and innovation with AI technologies.
+
+### 4. Client Context
+
+- **Relevant Previous Client Content**: 
+  - Yanmar’s case studies on innovative industrial solutions.
+- **Brand Positioning Insights**: 
+  - Yanmar focuses on innovative and efficient solutions tailored for industrial needs.
+- **Audience-Specific Language Preferences**:
+  - Use precise, data-backed communication. Avoid jargon where possible unless necessary.
+  
+- **Industry Terminology Requirements**:
+  - Highlight terms like "autonomous machinery", "AI-driven efficiency", and "industrial innovation".
+
+### 5. SEO Foundation
+
+- **Primary Keyword**: 'AI in Robotics' (High search volume, Moderate competition)
+- **Secondary Keywords**: AI robotics applications, industrial robotics technology, AI-driven automation, robotics innovation.
+
+- **LSI Keywords**: 
+  - Autonomous robotics, industrial AI solutions, AI in machinery, smart robots, tech-driven efficiency, advanced robotics.
+
+- **Search Intent**: Informational, some transactional for decision-making executives.
+- **Featured Snippet Opportunity**: Yes, by addressing common industry questions and showcasing proprietary AI applications.
+
+### 6. Content Building Blocks
+
+- **Key Statistics to Include**:
+  - AI in Robotics market expected to grow significantly (Market.us).
+  - Robots with AI can decrease operational costs and improve precision by up to 30%.
+
+- **Expert Quotes or Perspectives**:
+  - Insights from McKinsey and Forbes on AI’s transformative potential.
+  
+- **Case Studies or Examples**:
+  - Integration examples from Yanmar’s existing AI-enhanced machinery.
+
+- **Internal Linking Opportunities**:
+  - Connect to Yanmar’s pages on innovation and technology advancements.
+
+### 7. Credible Sources
+
+- **List of All Sources**:
+  - McKinsey 2023 AI report
+  - Robotnik 2023 trend overview
+  - Market.us projections
+  - Interviews and articles by Forbes on AI in Robotics
+
+This structured report provides actionable insights for crafting content that aligns with Yanmar's strategic goals and addresses the needs of business executives in industrial sectors."
+2025-10-08 04:18:55: task_name="brand_voice_analysis_task", task="Analyze Yanmar's brand voice and generate/validate the AI Language  Code parameters for creating blog content.
+Your responsibilities:
+1. **Knowledge Base Analysis**: Search client knowledge base at directory: knowledge/clients/Yanmar
+   - Style guidelines and brand voice documentation
+   - Sample content that represents desired voice
+   - Previous successful content in same category as blog
+   - Marketing materials and positioning statements
+   - Prohibited language or terminology
+   
+   **IMPORTANT**: When using the "Search a directory's content" tool,
+   use this EXACT directory path: knowledge/clients/Yanmar
+   
+   If the directory is empty or has no documents, proceed with creating
+   a brand voice specification based on industry best practices for
+   Business Executives audience and blog content type.
+
+2. **Stylometric Analysis**: Examine sample content for:
+   - Tone characteristics (authoritative, empathetic, professional, etc.)
+   - Vocabulary sophistication level
+   - Sentence structure complexity patterns
+   - Paragraph length preferences
+   - Use of figurative language (metaphors, analogies)
+   - Technical terminology usage
+   - Formality level
+   - Reading level (Flesch-Kincaid score)
+
+3. **AI Language Code Generation**: Based on analysis, determine:
+   - Tone codes and intensity levels (e.g., /TN/A3,EMP4)
+   - Vocabulary level (/VL1-5)
+   - Sentence complexity (/SC1-5)
+   - Figurative language frequency (/FL1-5)
+   - Other relevant parameters from AI Language Code system
+
+4. **Content Type Adaptation**: Ensure parameters are appropriate for:
+   - The specific blog format requirements
+   - The Business Executives audience expectations
+   - The AI in Robotics subject matter complexity
+
+5. **Style Guide Creation**: Document clear guidelines including:
+   - Preferred and prohibited vocabulary
+   - Sentence structure examples
+   - Tone consistency rules
+   - Formatting requirements
+   - Citation and attribution standards
+
+IMPORTANT: This task requires HUMAN APPROVAL before proceeding. A brand  voice expert or client representative must validate that the analyzed  patterns accurately represent the desired brand voice for this content.
+", agent="Brand Voice Analysis Specialist for Yanmar
+", status="started"
