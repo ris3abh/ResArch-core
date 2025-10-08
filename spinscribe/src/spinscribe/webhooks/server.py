@@ -14,6 +14,12 @@ HITL Checkpoints:
 2. Style Compliance Review (Task 6) - Approve/reject style adherence
 3. Final Quality Assurance (Task 7) - Final approval before delivery
 
+Additional Webhooks:
+4. Agent Activity - Real-time agent step updates
+5. Task Status - Task completion notifications
+6. Agent Completion - Agent finishes work
+7. Error Notifications - Error and failure alerts
+
 Run with:
     uvicorn spinscribe.webhooks.server:app --reload --port 8000
 """
@@ -21,13 +27,15 @@ Run with:
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+from pathlib import Path
 import logging
 import json
 import uuid
+import os
 
 from spinscribe.webhooks.models import (
     WebhookPayload,
@@ -61,6 +69,17 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# TEMPLATE SETUP
+# =============================================================================
+
+# Get the directory where this file is located
+BASE_DIR = Path(__file__).resolve().parent
+
+# Set up Jinja2 templates
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+# =============================================================================
 # FASTAPI APPLICATION SETUP
 # =============================================================================
 
@@ -72,6 +91,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 SpinScribe Webhook Server starting up...")
     logger.info("📋 Initializing workflow storage...")
+    logger.info("🎨 Loading dashboard templates...")
     logger.info("✅ Server ready to handle HITL checkpoints")
     
     yield
@@ -133,25 +153,35 @@ async def root():
         </div>
         
         <div class="endpoint">
-            <h3>🔔 HITL Webhooks</h3>
-            <code>POST /webhooks/brand-voice</code><br>
-            <code>POST /webhooks/style-compliance</code><br>
-            <code>POST /webhooks/final-qa</code>
+            <h3>📋 Review Dashboard</h3>
+            <code>GET /dashboard</code>
+            <p>Interactive dashboard for HITL approvals</p>
+            <p><a href="/dashboard">🎯 Open Dashboard</a></p>
+        </div>
+        
+        <div class="endpoint">
+            <h3>📢 HITL Webhooks</h3>
+            <code>POST /api/v1/webhook/hitl/brand-voice</code><br>
+            <code>POST /api/v1/webhook/hitl/style-compliance</code><br>
+            <code>POST /api/v1/webhook/hitl/final-qa</code>
             <p>Receive checkpoint notifications from agents</p>
         </div>
         
         <div class="endpoint">
-            <h3>✅ Approval Endpoints</h3>
-            <code>POST /approvals/{workflow_id}/submit</code>
-            <p>Submit approval decisions for pending checkpoints</p>
+            <h3>🔔 Activity Webhooks</h3>
+            <code>POST /api/v1/webhook/agent-update</code><br>
+            <code>POST /api/v1/webhook/task-status</code><br>
+            <code>POST /api/v1/webhook/agent-completion</code><br>
+            <code>POST /api/v1/webhook/error-notification</code>
+            <p>Receive activity and status updates</p>
         </div>
         
         <div class="endpoint">
-            <h3>📋 Review Dashboard</h3>
-            <code>GET /dashboard</code><br>
+            <h3>✅ Approval Endpoints</h3>
             <code>GET /approvals/pending</code><br>
-            <code>GET /workflows/{workflow_id}</code>
-            <p>View pending approvals and workflow status</p>
+            <code>GET /workflows/{workflow_id}</code><br>
+            <code>POST /approvals/{workflow_id}/submit</code>
+            <p>Manage approval workflow</p>
         </div>
         
         <h2>Documentation</h2>
@@ -169,7 +199,7 @@ async def health_check():
     Health check endpoint with server statistics.
     """
     pending_count = len(get_pending_approvals())
-    total_workflows = len(workflow_storage)
+    total_workflows = len(workflow_storage._workflows)
     
     return {
         "status": "healthy",
@@ -178,20 +208,187 @@ async def health_check():
         "statistics": {
             "total_workflows": total_workflows,
             "pending_approvals": pending_count,
-            "active_workflows": sum(1 for w in workflow_storage.values() 
-                                   if w["status"] == WorkflowStatus.IN_PROGRESS)
+            "active_workflows": sum(
+                1 for w in workflow_storage._workflows.values() 
+                if w["status"] == WorkflowStatus.IN_PROGRESS
+            )
         }
     }
 
 
 # =============================================================================
-# WEBHOOK ENDPOINTS (Receive from Agents)
+# DASHBOARD ENDPOINTS
 # =============================================================================
 
-@app.post("/webhooks/brand-voice")
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """
+    Serve the interactive HITL approval dashboard.
+    
+    This is the main UI where humans review and approve/reject content
+    at various checkpoints in the workflow.
+    """
+    logger.info("📊 Dashboard accessed")
+    return templates.TemplateResponse("dashboard.html", {"request": request})
+
+
+@app.get("/approvals/pending")
+async def get_pending_approvals_api():
+    """
+    Get list of all pending approvals for dashboard.
+    
+    Returns:
+        List of pending approval requests with metadata
+    """
+    logger.info("📋 Fetching pending approvals")
+    
+    try:
+        pending = get_pending_approvals()
+        
+        # Convert to dict format for JSON response
+        result = []
+        for approval in pending:
+            workflow = get_workflow_state(approval.workflow_id)
+            if not workflow:
+                continue
+                
+            approval_request = workflow.get("approval_request", {})
+            
+            result.append({
+                "workflow_id": approval.workflow_id,
+                "checkpoint_type": approval.checkpoint.value,
+                "checkpoint": approval.checkpoint.value,
+                "client_name": approval.client_name,
+                "topic": approval.topic,
+                "created_at": approval.created_at,
+                "approval_id": approval.approval_id,
+                "title": approval_request.get("title", f"{approval.client_name} - {approval.topic}"),
+                "description": approval_request.get("description", ""),
+                "content": workflow.get("content", ""),
+                "priority": approval_request.get("priority", "normal"),
+                "questions": approval_request.get("questions", [])
+            })
+        
+        logger.info(f"✅ Returning {len(result)} pending approvals")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Error fetching pending approvals: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/workflows/{workflow_id}")
+async def get_workflow_details(workflow_id: str):
+    """
+    Get detailed information about a specific workflow.
+    
+    Used by dashboard modal to show full workflow details.
+    """
+    logger.info(f"🔍 Fetching workflow details: {workflow_id}")
+    
+    try:
+        state = get_workflow_state(workflow_id)
+        
+        if not state:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        
+        approval_request = state.get("approval_request", {})
+        
+        return {
+            "workflow_id": workflow_id,
+            "status": state["status"],
+            "checkpoint_type": state["checkpoint_type"],
+            "created_at": state["created_at"],
+            "updated_at": state["updated_at"],
+            "client_name": state.get("metadata", {}).get("client_name", "Unknown"),
+            "topic": state.get("metadata", {}).get("topic", "Unknown"),
+            "content_type": state.get("metadata", {}).get("content_type", "Unknown"),
+            "audience": state.get("metadata", {}).get("audience", "Unknown"),
+            "title": approval_request.get("title", ""),
+            "description": approval_request.get("description", ""),
+            "content": state.get("content", ""),
+            "questions": approval_request.get("questions", []),
+            "priority": approval_request.get("priority", "normal")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error fetching workflow details: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/approvals/{workflow_id}/submit")
+async def submit_approval(workflow_id: str, response: ApprovalResponse):
+    """
+    Submit human approval decision for a workflow checkpoint.
+    
+    This endpoint processes the human reviewer's decision and:
+    1. Updates workflow state
+    2. Processes the decision through handlers
+    3. Attempts to resume crew execution
+    4. Returns next action information
+    """
+    logger.info(f"📝 Received approval decision for workflow: {workflow_id}")
+    logger.info(f"   Decision: {response.decision}")
+    logger.info(f"   Checkpoint: {response.checkpoint}")
+    
+    try:
+        state = get_workflow_state(workflow_id)
+        
+        if not state:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        
+        if state["status"] != WorkflowStatus.AWAITING_APPROVAL:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Workflow not awaiting approval. Current status: {state['status']}"
+            )
+        
+        # Process the approval decision (includes crew resume logic)
+        result = await process_approval_decision(workflow_id, state, response)
+        
+        # Update workflow status based on decision
+        if response.decision == ApprovalDecision.APPROVE:
+            new_status = WorkflowStatus.APPROVED
+            logger.info(f"✅ Workflow {workflow_id} approved - proceeding to next stage")
+        elif response.decision == ApprovalDecision.REJECT:
+            new_status = WorkflowStatus.REJECTED
+            logger.warning(f"❌ Workflow {workflow_id} rejected - will restart")
+        else:  # REVISE
+            new_status = WorkflowStatus.REVISION_REQUESTED
+            logger.info(f"🔄 Workflow {workflow_id} revision requested")
+        
+        update_workflow_status(workflow_id, new_status)
+        
+        # Update state with approval response
+        state["approval_response"] = response.dict()
+        state["updated_at"] = datetime.utcnow().isoformat()
+        
+        return {
+            "status": "success",
+            "workflow_id": workflow_id,
+            "decision": response.decision,
+            "next_action": result.get("next_action"),
+            "message": result.get("message"),
+            "crew_resume_status": result.get("crew_resume_status", {})
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error processing approval: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# HITL WEBHOOK ENDPOINTS (Human-in-the-Loop Checkpoints)
+# =============================================================================
+
+@app.post("/api/v1/webhook/hitl/brand-voice")
 async def brand_voice_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
     """
-    Webhook endpoint for Brand Voice Analysis checkpoint (Task 2).
+    HITL Checkpoint 1: Brand Voice Analysis (Task 2)
     
     Called when brand_voice_specialist agent completes analysis and
     requires human approval before proceeding.
@@ -222,7 +419,7 @@ async def brand_voice_webhook(payload: WebhookPayload, background_tasks: Backgro
             "checkpoint": "brand_voice",
             "approval_id": approval_request.approval_id,
             "message": "Brand voice analysis ready for review",
-            "review_url": f"/approvals/{payload.workflow_id}"
+            "review_url": f"/dashboard"
         }
         
     except Exception as e:
@@ -230,10 +427,10 @@ async def brand_voice_webhook(payload: WebhookPayload, background_tasks: Backgro
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/webhooks/style-compliance")
+@app.post("/api/v1/webhook/hitl/style-compliance")
 async def style_compliance_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
     """
-    Webhook endpoint for Style Compliance Review checkpoint (Task 6).
+    HITL Checkpoint 2: Style Compliance Review (Task 6)
     
     Called when style_compliance_agent completes review and requires
     human approval before final QA.
@@ -263,7 +460,7 @@ async def style_compliance_webhook(payload: WebhookPayload, background_tasks: Ba
             "checkpoint": "style_compliance",
             "approval_id": approval_request.approval_id,
             "message": "Style compliance review ready for approval",
-            "review_url": f"/approvals/{payload.workflow_id}"
+            "review_url": f"/dashboard"
         }
         
     except Exception as e:
@@ -271,10 +468,10 @@ async def style_compliance_webhook(payload: WebhookPayload, background_tasks: Ba
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/webhooks/final-qa")
+@app.post("/api/v1/webhook/hitl/final-qa")
 async def final_qa_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
     """
-    Webhook endpoint for Final Quality Assurance checkpoint (Task 7).
+    HITL Checkpoint 3: Final Quality Assurance (Task 7)
     
     Called when quality_assurance_editor completes final review and
     requires human approval before content delivery.
@@ -304,7 +501,7 @@ async def final_qa_webhook(payload: WebhookPayload, background_tasks: Background
             "checkpoint": "final_qa",
             "approval_id": approval_request.approval_id,
             "message": "Final QA ready for approval",
-            "review_url": f"/approvals/{payload.workflow_id}"
+            "review_url": f"/dashboard"
         }
         
     except Exception as e:
@@ -313,277 +510,79 @@ async def final_qa_webhook(payload: WebhookPayload, background_tasks: Background
 
 
 # =============================================================================
-# APPROVAL ENDPOINTS (Human Review & Decision)
+# ACTIVITY WEBHOOK ENDPOINTS (Monitoring & Tracking)
 # =============================================================================
 
-@app.get("/approvals/pending")
-async def get_pending_approvals_endpoint():
+@app.post("/api/v1/webhook/agent-update")
+async def agent_update_webhook(payload: Dict[str, Any]):
     """
-    Get all workflows awaiting human approval.
+    Receive real-time agent activity updates.
+    
+    Called on every agent step/thought for real-time monitoring.
     """
-    try:
-        pending = get_pending_approvals()
-        
-        # Format for display
-        formatted_pending = []
-        for workflow_id, state in pending.items():
-            formatted_pending.append({
-                "workflow_id": workflow_id,
-                "checkpoint": state["checkpoint_type"],
-                "client_name": state["metadata"].get("client_name", "Unknown"),
-                "topic": state["metadata"].get("topic", "Unknown"),
-                "created_at": state["created_at"],
-                "approval_id": state["approval_request"]["approval_id"]
+    logger.info(f"🤖 Agent update: {payload.get('agent_name', 'Unknown')} - {payload.get('step_type', 'unknown')}")
+    
+    # Store activity for dashboard (implement as needed)
+    # For now, just log it
+    
+    return {"status": "received", "message": "Agent update logged"}
+
+
+@app.post("/api/v1/webhook/task-status")
+async def task_status_webhook(payload: Dict[str, Any]):
+    """
+    Receive task completion notifications.
+    
+    Called when each task completes.
+    """
+    logger.info(f"📋 Task status: {payload.get('task_id', 'Unknown')} - {payload.get('status', 'unknown')}")
+    
+    # Log task completion
+    workflow_id = payload.get('workflow_id') or payload.get('kickoff_id')
+    if workflow_id:
+        state = get_workflow_state(workflow_id)
+        if state:
+            if 'task_history' not in state:
+                state['task_history'] = []
+            state['task_history'].append({
+                "task_id": payload.get('task_id'),
+                "status": payload.get('status'),
+                "timestamp": datetime.utcnow().isoformat()
             })
-        
-        return {
-            "pending_count": len(formatted_pending),
-            "approvals": formatted_pending
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error fetching pending approvals: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/workflows/{workflow_id}")
-async def get_workflow_details(workflow_id: str):
-    """
-    Get detailed information about a specific workflow.
-    """
-    try:
-        state = get_workflow_state(workflow_id)
-        
-        if not state:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-        
-        return {
-            "workflow_id": workflow_id,
-            "status": state["status"],
-            "checkpoint_type": state["checkpoint_type"],
-            "created_at": state["created_at"],
-            "updated_at": state["updated_at"],
-            "metadata": state["metadata"],
-            "approval_request": state["approval_request"],
-            "content_preview": state["content"][:500] + "..." if len(state["content"]) > 500 else state["content"]
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Error fetching workflow details: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/approvals/{workflow_id}/submit")
-async def submit_approval(workflow_id: str, response: ApprovalResponse):
-    """
-    Submit human approval decision for a workflow checkpoint.
     
-    This endpoint processes the human reviewer's decision and updates
-    the workflow state accordingly.
+    return {"status": "received", "message": "Task status logged"}
+
+
+@app.post("/api/v1/webhook/agent-completion")
+async def agent_completion_webhook(payload: Dict[str, Any]):
     """
-    logger.info(f"📝 Received approval decision for workflow: {workflow_id}")
-    logger.info(f"   Decision: {response.decision}")
+    Receive agent completion notifications.
     
-    try:
-        state = get_workflow_state(workflow_id)
-        
-        if not state:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-        
-        if state["status"] != WorkflowStatus.AWAITING_APPROVAL:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Workflow not awaiting approval. Current status: {state['status']}"
-            )
-        
-        # Process the approval decision
-        result = await process_approval_decision(workflow_id, state, response)
-        
-        # Update workflow status based on decision
-        if response.decision == ApprovalDecision.APPROVE:
-            new_status = WorkflowStatus.APPROVED
-            logger.info(f"✅ Workflow {workflow_id} approved - proceeding to next stage")
-        elif response.decision == ApprovalDecision.REJECT:
-            new_status = WorkflowStatus.REJECTED
-            logger.warning(f"❌ Workflow {workflow_id} rejected - will restart from {result.get('restart_task', 'unknown')}")
-        else:  # REVISE
-            new_status = WorkflowStatus.REVISION_REQUESTED
-            logger.info(f"🔄 Workflow {workflow_id} revision requested")
-        
-        update_workflow_status(workflow_id, new_status)
-        
-        # Update state with approval response
-        state["approval_response"] = response.dict()
-        state["updated_at"] = datetime.utcnow().isoformat()
-        
-        return {
-            "status": "success",
-            "workflow_id": workflow_id,
-            "decision": response.decision,
-            "next_action": result.get("next_action"),
-            "message": result.get("message")
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Error processing approval: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# =============================================================================
-# DASHBOARD ENDPOINT
-# =============================================================================
-
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
+    Called when crew execution completes.
     """
-    Simple dashboard for viewing pending approvals and workflow status.
+    logger.info(f"✅ Agent completion for workflow: {payload.get('workflow_id', 'Unknown')}")
+    
+    workflow_id = payload.get('workflow_id') or payload.get('kickoff_id')
+    if workflow_id:
+        update_workflow_status(workflow_id, WorkflowStatus.COMPLETED)
+    
+    return {"status": "received", "message": "Completion logged"}
+
+
+@app.post("/api/v1/webhook/error-notification")
+async def error_notification_webhook(payload: Dict[str, Any]):
     """
-    try:
-        pending = get_pending_approvals()
-        
-        # Build HTML dashboard
-        html_content = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>SpinScribe - Approval Dashboard</title>
-            <style>
-                body { 
-                    font-family: Arial, sans-serif; 
-                    max-width: 1200px; 
-                    margin: 0 auto; 
-                    padding: 20px;
-                    background: #f5f5f5;
-                }
-                h1 { color: #2c3e50; }
-                .header { 
-                    background: white; 
-                    padding: 20px; 
-                    border-radius: 8px; 
-                    margin-bottom: 20px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }
-                .stats { 
-                    display: flex; 
-                    gap: 20px; 
-                    margin-top: 15px;
-                }
-                .stat-box { 
-                    background: #3498db; 
-                    color: white; 
-                    padding: 15px; 
-                    border-radius: 5px; 
-                    flex: 1;
-                    text-align: center;
-                }
-                .stat-box h3 { margin: 0 0 5px 0; }
-                .stat-box .number { font-size: 32px; font-weight: bold; }
-                .pending-item { 
-                    background: white; 
-                    padding: 20px; 
-                    margin: 10px 0; 
-                    border-radius: 8px;
-                    border-left: 4px solid #e74c3c;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }
-                .pending-item h3 { margin-top: 0; color: #2c3e50; }
-                .checkpoint { 
-                    display: inline-block;
-                    background: #e74c3c; 
-                    color: white; 
-                    padding: 5px 10px; 
-                    border-radius: 3px; 
-                    font-size: 12px;
-                    font-weight: bold;
-                }
-                .meta { color: #7f8c8d; font-size: 14px; margin-top: 10px; }
-                .button { 
-                    display: inline-block;
-                    background: #27ae60; 
-                    color: white; 
-                    padding: 10px 20px; 
-                    text-decoration: none; 
-                    border-radius: 5px;
-                    margin-top: 10px;
-                }
-                .button:hover { background: #229954; }
-                .empty-state {
-                    text-align: center;
-                    padding: 60px 20px;
-                    background: white;
-                    border-radius: 8px;
-                    color: #7f8c8d;
-                }
-                .empty-state h2 { color: #27ae60; }
-            </style>
-        </head>
-        <body>
-            <div class="header">
-                <h1>📋 SpinScribe Approval Dashboard</h1>
-                <div class="stats">
-                    <div class="stat-box">
-                        <h3>Pending Approvals</h3>
-                        <div class="number">""" + str(len(pending)) + """</div>
-                    </div>
-                    <div class="stat-box" style="background: #27ae60;">
-                        <h3>Total Workflows</h3>
-                        <div class="number">""" + str(len(workflow_storage)) + """</div>
-                    </div>
-                    <div class="stat-box" style="background: #9b59b6;">
-                        <h3>Active</h3>
-                        <div class="number">""" + str(sum(1 for w in workflow_storage.values() if w["status"] == WorkflowStatus.IN_PROGRESS)) + """</div>
-                    </div>
-                </div>
-            </div>
-            
-            <h2>⏳ Pending Approvals</h2>
-        """
-        
-        if pending:
-            for workflow_id, state in pending.items():
-                checkpoint_display = {
-                    CheckpointType.BRAND_VOICE: "Brand Voice Analysis",
-                    CheckpointType.STYLE_COMPLIANCE: "Style Compliance",
-                    CheckpointType.FINAL_QA: "Final QA"
-                }.get(state["checkpoint_type"], state["checkpoint_type"])
-                
-                html_content += f"""
-                <div class="pending-item">
-                    <h3>{state["metadata"].get("topic", "Unknown Topic")}</h3>
-                    <span class="checkpoint">{checkpoint_display}</span>
-                    <div class="meta">
-                        <strong>Client:</strong> {state["metadata"].get("client_name", "Unknown")} | 
-                        <strong>Content Type:</strong> {state["metadata"].get("content_type", "Unknown")} | 
-                        <strong>Created:</strong> {state["created_at"][:19].replace('T', ' ')}
-                    </div>
-                    <div class="meta">
-                        <strong>Workflow ID:</strong> {workflow_id}
-                    </div>
-                    <a href="/workflows/{workflow_id}" class="button">View Details & Approve</a>
-                </div>
-                """
-        else:
-            html_content += """
-            <div class="empty-state">
-                <h2>✅ All Caught Up!</h2>
-                <p>No pending approvals at the moment. Great work!</p>
-            </div>
-            """
-        
-        html_content += """
-        </body>
-        </html>
-        """
-        
-        return HTMLResponse(content=html_content)
-        
-    except Exception as e:
-        logger.error(f"❌ Error loading dashboard: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    Receive error and failure notifications.
+    
+    Called when errors occur during execution.
+    """
+    logger.error(f"❌ Error notification: {payload.get('error_type', 'Unknown')} - {payload.get('message', 'No message')}")
+    
+    workflow_id = payload.get('workflow_id') or payload.get('execution_id')
+    if workflow_id:
+        update_workflow_status(workflow_id, WorkflowStatus.FAILED)
+    
+    return {"status": "received", "message": "Error logged"}
 
 
 # =============================================================================
@@ -612,7 +611,7 @@ async def internal_error_handler(request: Request, exc: Exception):
         content={
             "error": "Internal Server Error",
             "message": "An unexpected error occurred",
-            "details": str(exc) if app.debug else "Contact support"
+            "details": str(exc) if os.getenv('DEBUG') == 'true' else "Contact support"
         }
     )
 
@@ -635,6 +634,10 @@ if __name__ == "__main__":
     print("   Dashboard: http://localhost:8000/dashboard")
     print("   API Docs: http://localhost:8000/docs")
     print("   Health: http://localhost:8000/health")
+    print("\n📋 Configured Webhooks:")
+    print("   ✓ HITL: Brand Voice, Style Compliance, Final QA")
+    print("   ✓ Activity: Agent Updates, Task Status, Completions")
+    print("   ✓ Monitoring: Error Notifications")
     print("\n" + "=" * 80 + "\n")
     
     uvicorn.run(

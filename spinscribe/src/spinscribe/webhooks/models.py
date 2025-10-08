@@ -182,53 +182,55 @@ class ApprovalRequest(BaseModel):
 
 class ApprovalResponse(BaseModel):
     """
-    Human reviewer's approval decision.
+    Response from human reviewer with approval decision.
     
-    This is what humans submit when making a decision on content.
+    This is what humans submit through the dashboard or API
+    when making an approval decision.
     """
     decision: ApprovalDecision = Field(
         ...,
-        description="Approval decision (approve, reject, revise)"
+        description="Approval decision (approve/reject/revise)"
+    )
+    
+    checkpoint: CheckpointType = Field(
+        ...,
+        description="Checkpoint type this decision is for"
+    )
+    
+    feedback: str = Field(
+        ...,
+        description="Required feedback explaining the decision"
     )
     
     reviewer_name: Optional[str] = Field(
         None,
-        description="Name or ID of person making the decision"
-    )
-    
-    reviewer_email: Optional[str] = Field(
-        None,
-        description="Email of reviewer for audit trail"
+        description="Name of person making the decision"
     )
     
     comments: Optional[str] = Field(
         None,
-        description="Feedback or explanation for the decision"
+        description="Additional comments (optional)"
     )
     
     specific_changes: Optional[List[str]] = Field(
         default_factory=list,
-        description="List of specific changes required (for revise/reject)"
+        description="List of specific changes requested (for reject/revise)"
     )
     
-    priority_issues: Optional[List[str]] = Field(
-        default_factory=list,
-        description="Critical issues that must be addressed"
-    )
-    
-    timestamp: str = Field(
+    timestamp: Optional[str] = Field(
         default_factory=lambda: datetime.utcnow().isoformat(),
-        description="When this decision was made"
+        description="When the decision was made"
     )
     
     class Config:
         json_schema_extra = {
             "example": {
                 "decision": "approve",
-                "reviewer_name": "John Smith",
-                "reviewer_email": "john@company.com",
-                "comments": "Brand voice parameters look good. Proceed to content creation.",
-                "timestamp": "2025-01-08T10:30:00Z"
+                "checkpoint": "brand_voice",
+                "feedback": "The AI Language Code parameters are excellent!",
+                "reviewer_name": "John Doe",
+                "comments": "Great work on brand voice analysis",
+                "specific_changes": []
             }
         }
 

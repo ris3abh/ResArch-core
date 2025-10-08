@@ -16,30 +16,6 @@ Storage Strategy:
 - Can be replaced with Redis/PostgreSQL for production
 - Thread-safe operations with proper locking
 - Automatic cleanup of old workflows (>30 days)
-
-Data Structure:
-{
-    "workflow_id": {
-        "client_name": str,
-        "topic": str,
-        "content_type": str,
-        "status": WorkflowStatus,
-        "current_checkpoint": CheckpointType,
-        "created_at": datetime,
-        "updated_at": datetime,
-        "task_outputs": {
-            "task_name": "output_content"
-        },
-        "approval_history": [
-            {
-                "checkpoint": CheckpointType,
-                "decision": ApprovalDecision,
-                "feedback": str,
-                "timestamp": datetime
-            }
-        ]
-    }
-}
 """
 
 from typing import Dict, List, Optional, Any
@@ -86,9 +62,9 @@ class WorkflowStorage:
         workflow_id: str,
         client_name: str,
         topic: str,
-        content_type: str,
-        audience: str,
-        ai_language_code: str
+        content_type: str = "unknown",
+        audience: str = "unknown",
+        ai_language_code: str = ""
     ) -> Dict[str, Any]:
         """
         Create a new workflow entry.
@@ -97,12 +73,12 @@ class WorkflowStorage:
             workflow_id: Unique workflow identifier
             client_name: Client name
             topic: Content topic
-            content_type: Type of content (blog, landing_page, local_article)
+            content_type: Type of content (blog, article, etc.)
             audience: Target audience
-            ai_language_code: AI Language Code for brand voice
-        
+            ai_language_code: AI language code parameters
+            
         Returns:
-            Created workflow dict
+            Created workflow dictionary
         """
         with self._lock:
             workflow = {
@@ -112,22 +88,24 @@ class WorkflowStorage:
                 "content_type": content_type,
                 "audience": audience,
                 "ai_language_code": ai_language_code,
-                "status": WorkflowStatus.ACTIVE.value,
+                "status": WorkflowStatus.IN_PROGRESS.value,
                 "current_checkpoint": None,
                 "created_at": datetime.utcnow().isoformat(),
                 "updated_at": datetime.utcnow().isoformat(),
                 "task_outputs": {},
                 "approval_history": [],
-                "metadata": {}
+                "content": "",
+                "metadata": {},
+                "approval_request": None
             }
             
             self._workflows[workflow_id] = workflow
-            logger.info(f"✨ Created workflow {workflow_id} for {client_name}")
+            logger.info(f"✅ Created workflow: {workflow_id} for {client_name}")
             return workflow
     
     def get_workflow(self, workflow_id: str) -> Optional[Dict[str, Any]]:
         """
-        Retrieve workflow by ID.
+        Get workflow by ID.
         
         Args:
             workflow_id: Workflow identifier
@@ -162,7 +140,7 @@ class WorkflowStorage:
             workflow.update(updates)
             workflow["updated_at"] = datetime.utcnow().isoformat()
             
-            logger.debug(f"📝 Updated workflow {workflow_id}: {list(updates.keys())}")
+            logger.debug(f"🔄 Updated workflow {workflow_id}: {list(updates.keys())}")
             return workflow
     
     def update_workflow_status(
@@ -198,6 +176,61 @@ class WorkflowStorage:
             )
             return True
     
+    def save_checkpoint_state(
+        self,
+        workflow_id: str,
+        checkpoint_type: CheckpointType,
+        content: str,
+        metadata: Dict[str, Any],
+        approval_request: ApprovalRequest
+    ) -> bool:
+        """
+        Save workflow state at a checkpoint.
+        
+        This is called when an agent reaches a HITL checkpoint and
+        requires human approval.
+        
+        Args:
+            workflow_id: Workflow identifier
+            checkpoint_type: Type of checkpoint
+            content: Content to review
+            metadata: Additional metadata
+            approval_request: Approval request object
+            
+        Returns:
+            True if successful
+        """
+        with self._lock:
+            # Get or create workflow
+            workflow = self._workflows.get(workflow_id)
+            if not workflow:
+                # Create new workflow from metadata
+                workflow = self.create_workflow(
+                    workflow_id=workflow_id,
+                    client_name=metadata.get("client_name", "Unknown"),
+                    topic=metadata.get("topic", "Unknown"),
+                    content_type=metadata.get("content_type", "unknown"),
+                    audience=metadata.get("audience", "unknown"),
+                    ai_language_code=metadata.get("ai_language_code", "")
+                )
+            
+            # Update workflow with checkpoint data
+            workflow["content"] = content
+            workflow["metadata"] = metadata
+            workflow["checkpoint_type"] = checkpoint_type.value
+            workflow["current_checkpoint"] = checkpoint_type.value
+            workflow["status"] = WorkflowStatus.AWAITING_APPROVAL.value
+            workflow["approval_request"] = approval_request.dict()
+            workflow["updated_at"] = datetime.utcnow().isoformat()
+            
+            # Store approval request for quick lookup
+            self._approvals[approval_request.approval_id] = approval_request
+            
+            logger.info(
+                f"💾 Saved checkpoint state: {workflow_id} @ {checkpoint_type.value}"
+            )
+            return True
+    
     def save_task_output(
         self,
         workflow_id: str,
@@ -209,11 +242,11 @@ class WorkflowStorage:
         
         Args:
             workflow_id: Workflow identifier
-            task_name: Name of completed task
+            task_name: Task name
             output: Task output content
-        
+            
         Returns:
-            True if successful, False otherwise
+            True if successful
         """
         with self._lock:
             workflow = self._workflows.get(workflow_id)
@@ -223,60 +256,10 @@ class WorkflowStorage:
             workflow["task_outputs"][task_name] = output
             workflow["updated_at"] = datetime.utcnow().isoformat()
             
-            logger.debug(f"💾 Saved output for task '{task_name}' in workflow {workflow_id}")
+            logger.debug(f"📝 Saved task output: {task_name} for {workflow_id}")
             return True
     
-    def add_approval_request(
-        self,
-        approval_request: ApprovalRequest
-    ) -> None:
-        """
-        Store a pending approval request.
-        
-        Args:
-            approval_request: ApprovalRequest model instance
-        """
-        with self._lock:
-            self._approvals[approval_request.approval_id] = approval_request
-            logger.info(
-                f"📋 Added approval request {approval_request.approval_id} "
-                f"for workflow {approval_request.workflow_id}"
-            )
-    
-    def get_approval_request(
-        self,
-        approval_id: str
-    ) -> Optional[ApprovalRequest]:
-        """
-        Retrieve an approval request by ID.
-        
-        Args:
-            approval_id: Approval request identifier
-        
-        Returns:
-            ApprovalRequest or None if not found
-        """
-        with self._lock:
-            return self._approvals.get(approval_id)
-    
-    def remove_approval_request(self, approval_id: str) -> bool:
-        """
-        Remove an approval request after decision is made.
-        
-        Args:
-            approval_id: Approval request identifier
-        
-        Returns:
-            True if removed, False if not found
-        """
-        with self._lock:
-            if approval_id in self._approvals:
-                del self._approvals[approval_id]
-                logger.debug(f"🗑️ Removed approval request {approval_id}")
-                return True
-            return False
-    
-    def add_approval_decision(
+    def record_approval_decision(
         self,
         workflow_id: str,
         checkpoint: CheckpointType,
@@ -331,9 +314,13 @@ class WorkflowStorage:
                 if not workflow:
                     continue
                 
+                # Only include workflows awaiting approval
+                if workflow["status"] != WorkflowStatus.AWAITING_APPROVAL.value:
+                    continue
+                
                 summary = PendingApprovalSummary(
                     workflow_id=approval.workflow_id,
-                    checkpoint=approval.checkpoint,
+                    checkpoint=approval.checkpoint_type,
                     client_name=workflow["client_name"],
                     topic=workflow["topic"],
                     created_at=approval.created_at,
@@ -346,128 +333,33 @@ class WorkflowStorage:
             
             return summaries
     
-    def get_dashboard_stats(self) -> DashboardStats:
-        """
-        Get statistics for dashboard display.
-        
-        Returns:
-            DashboardStats object with current metrics
-        """
-        with self._lock:
-            total_workflows = len(self._workflows)
-            pending_approvals = len(self._approvals)
-            
-            active_workflows = sum(
-                1 for w in self._workflows.values()
-                if w["status"] == WorkflowStatus.ACTIVE.value
-            )
-            
-            # Count approvals/rejections today
-            today = datetime.utcnow().date()
-            approved_today = 0
-            rejected_today = 0
-            
-            for workflow in self._workflows.values():
-                for record in workflow["approval_history"]:
-                    record_date = datetime.fromisoformat(record["timestamp"]).date()
-                    if record_date == today:
-                        if record["decision"] == ApprovalDecision.APPROVED.value:
-                            approved_today += 1
-                        elif record["decision"] == ApprovalDecision.REJECTED.value:
-                            rejected_today += 1
-            
-            return DashboardStats(
-                total_workflows=total_workflows,
-                pending_approvals=pending_approvals,
-                active_workflows=active_workflows,
-                approved_today=approved_today,
-                rejected_today=rejected_today
-            )
-    
     def cleanup_old_workflows(self, days: int = 30) -> int:
         """
-        Remove workflows older than specified days.
+        Clean up workflows older than specified days.
         
         Args:
-            days: Number of days to retain workflows
-        
+            days: Retention period in days
+            
         Returns:
             Number of workflows removed
         """
         with self._lock:
             cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff_iso = cutoff.isoformat()
             
             to_remove = []
             for workflow_id, workflow in self._workflows.items():
-                updated_at = datetime.fromisoformat(workflow["updated_at"])
-                if updated_at < cutoff:
+                if workflow["updated_at"] < cutoff_iso:
                     to_remove.append(workflow_id)
             
             for workflow_id in to_remove:
                 del self._workflows[workflow_id]
+                logger.info(f"🗑️  Removed old workflow: {workflow_id}")
             
             if to_remove:
                 logger.info(f"🧹 Cleaned up {len(to_remove)} old workflows")
             
             return len(to_remove)
-    
-    def export_workflow(self, workflow_id: str) -> Optional[str]:
-        """
-        Export workflow as JSON string.
-        
-        Args:
-            workflow_id: Workflow identifier
-        
-        Returns:
-            JSON string or None if not found
-        """
-        with self._lock:
-            workflow = self._workflows.get(workflow_id)
-            if not workflow:
-                return None
-            
-            return json.dumps(workflow, indent=2)
-    
-    def list_workflows(
-        self,
-        client_name: Optional[str] = None,
-        status: Optional[WorkflowStatus] = None,
-        limit: int = 100
-    ) -> List[Dict[str, Any]]:
-        """
-        List workflows with optional filtering.
-        
-        Args:
-            client_name: Filter by client name
-            status: Filter by workflow status
-            limit: Maximum number of results
-        
-        Returns:
-            List of workflow dictionaries
-        """
-        with self._lock:
-            workflows = list(self._workflows.values())
-            
-            # Apply filters
-            if client_name:
-                workflows = [
-                    w for w in workflows
-                    if w["client_name"] == client_name
-                ]
-            
-            if status:
-                workflows = [
-                    w for w in workflows
-                    if w["status"] == status.value
-                ]
-            
-            # Sort by updated_at (most recent first)
-            workflows.sort(
-                key=lambda x: x["updated_at"],
-                reverse=True
-            )
-            
-            return workflows[:limit]
 
 
 # =============================================================================
@@ -479,26 +371,38 @@ workflow_storage = WorkflowStorage()
 
 
 # =============================================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (Convenience Wrappers)
 # =============================================================================
 
 def save_workflow_state(
     workflow_id: str,
-    task_name: str,
-    output: str
+    checkpoint_type: CheckpointType,
+    content: str,
+    metadata: Dict[str, Any],
+    approval_request: ApprovalRequest
 ) -> bool:
     """
-    Convenience function to save task output.
+    Convenience function to save checkpoint state.
+    
+    This is the main function called by webhook endpoints.
     
     Args:
         workflow_id: Workflow identifier
-        task_name: Task name
-        output: Task output
+        checkpoint_type: Type of checkpoint
+        content: Content to review
+        metadata: Additional metadata
+        approval_request: Approval request object
     
     Returns:
         True if successful
     """
-    return workflow_storage.save_task_output(workflow_id, task_name, output)
+    return workflow_storage.save_checkpoint_state(
+        workflow_id=workflow_id,
+        checkpoint_type=checkpoint_type,
+        content=content,
+        metadata=metadata,
+        approval_request=approval_request
+    )
 
 
 def get_workflow_state(workflow_id: str) -> Optional[Dict[str, Any]]:
@@ -543,14 +447,17 @@ def get_pending_approvals() -> List[PendingApprovalSummary]:
     return workflow_storage.get_pending_approvals()
 
 
-def cleanup_old_workflows(days: int = 30) -> int:
+def cleanup_old_workflows(hours: int = 24) -> int:
     """
     Convenience function to cleanup old workflows.
     
     Args:
-        days: Retention period in days
+        hours: Retention period in hours (converted to days)
     
     Returns:
         Number of workflows removed
     """
+    days = hours // 24
+    if days < 1:
+        days = 1
     return workflow_storage.cleanup_old_workflows(days)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # =============================================================================
 # SPINSCRIBE MAIN ENTRY POINT
-# CLI interface for SpinScribe content creation crew
+# CLI interface for SpinScribe content creation crew with webhook integration
 # =============================================================================
 """
 SpinScribe Main Module
@@ -53,14 +53,17 @@ def validate_environment() -> bool:
         'SERPER_API_KEY': 'Serper.dev API key for web search'
     }
     
-    optional_vars = {
-        'HITL_BRAND_VOICE_WEBHOOK': 'Webhook for brand voice approval',
-        'HITL_STYLE_COMPLIANCE_WEBHOOK': 'Webhook for style compliance approval',
-        'HITL_FINAL_APPROVAL_WEBHOOK': 'Webhook for final QA approval'
+    optional_webhook_vars = {
+        'AGENT_WEBHOOK_URL': 'Real-time agent activity tracking',
+        'HITL_BRAND_VOICE_WEBHOOK': 'Brand voice approval webhook',
+        'HITL_STYLE_COMPLIANCE_WEBHOOK': 'Style compliance approval webhook',
+        'HITL_FINAL_APPROVAL_WEBHOOK': 'Final QA approval webhook',
+        'TASK_STATUS_WEBHOOK': 'Task progress notifications',
+        'AGENT_COMPLETION_WEBHOOK': 'Agent completion notifications',
+        'ERROR_NOTIFICATION_WEBHOOK': 'Error notification webhook'
     }
     
     missing_required = []
-    missing_optional = []
     
     print("\n" + "=" * 80)
     print("ENVIRONMENT VALIDATION")
@@ -78,15 +81,16 @@ def validate_environment() -> bool:
             print(f"   ✗ {var}: NOT SET - {description}")
             missing_required.append(var)
     
-    # Check optional variables
+    # Check optional webhook variables
     print("\n🔗 Optional Environment Variables (HITL Webhooks):")
-    for var, description in optional_vars.items():
+    configured_webhooks = 0
+    for var, description in optional_webhook_vars.items():
         value = os.getenv(var)
         if value:
             print(f"   ✓ {var}: {value}")
+            configured_webhooks += 1
         else:
-            print(f"   ⚠ {var}: Not configured - {description}")
-            missing_optional.append(var)
+            print(f"   ⚠ {var}: Not configured")
     
     # Report validation results
     if missing_required:
@@ -99,15 +103,144 @@ def validate_environment() -> bool:
         print("   SERPER_API_KEY=your_serper_api_key")
         return False
     
-    if missing_optional:
-        print(f"\nℹ️  Note: HITL webhooks not configured. Human approval checkpoints will be skipped.")
-        print("   To enable HITL, set these environment variables in your .env file.")
+    if configured_webhooks == 0:
+        print(f"\nℹ️  No webhooks configured - will use terminal HITL mode")
+    elif configured_webhooks < len(optional_webhook_vars):
+        print(f"\nℹ️  {configured_webhooks}/{len(optional_webhook_vars)} webhooks configured")
+    else:
+        print(f"\n✅ All {configured_webhooks} webhooks configured")
     
     print("\n" + "=" * 80)
     print("✅ VALIDATION SUCCESSFUL")
     print("=" * 80)
     
     return True
+
+
+# =============================================================================
+# WEBHOOK SERVER HEALTH CHECK
+# =============================================================================
+
+def check_webhook_server() -> Dict[str, Any]:
+    """
+    Check if the webhook server is running and accessible.
+    
+    Returns:
+        Dict with status information
+    """
+    # Get any webhook URL to test (prefer agent webhook as it's the base)
+    webhook_base = os.getenv('AGENT_WEBHOOK_URL')
+    
+    if not webhook_base:
+        return {
+            'running': False,
+            'reason': 'No webhook URLs configured',
+            'can_continue': True,
+            'mode': 'terminal'
+        }
+    
+    # Extract base URL (e.g., http://localhost:8000)
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(webhook_base)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        health_url = f"{base_url}/health"
+    except Exception as e:
+        return {
+            'running': False,
+            'reason': f'Invalid webhook URL: {str(e)}',
+            'can_continue': True,
+            'mode': 'terminal'
+        }
+    
+    # Try to ping the health endpoint
+    try:
+        import requests
+        response = requests.get(health_url, timeout=3)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                'running': True,
+                'base_url': base_url,
+                'dashboard_url': f"{base_url}/dashboard",
+                'api_docs_url': f"{base_url}/docs",
+                'status': data.get('status', 'unknown'),
+                'can_continue': True,
+                'mode': 'webhook'
+            }
+        else:
+            return {
+                'running': False,
+                'reason': f'Health check returned {response.status_code}',
+                'can_continue': True,
+                'mode': 'terminal'
+            }
+    
+    except ImportError:
+        return {
+            'running': False,
+            'reason': 'requests library not installed',
+            'can_continue': True,
+            'mode': 'terminal'
+        }
+    
+    except Exception as e:
+        return {
+            'running': False,
+            'reason': f'Cannot connect to webhook server: {str(e)}',
+            'can_continue': True,
+            'mode': 'terminal',
+            'help': 'Start webhook server: python -m spinscribe.webhooks.server'
+        }
+
+
+def display_webhook_status() -> Dict[str, Any]:
+    """
+    Display webhook server status and instructions.
+    
+    Returns:
+        Status dictionary from check_webhook_server()
+    """
+    print("\n" + "=" * 80)
+    print("WEBHOOK SERVER STATUS")
+    print("=" * 80)
+    
+    status = check_webhook_server()
+    
+    if status['running']:
+        print(f"\n✅ Webhook server is running")
+        print(f"\n🌐 Access Points:")
+        print(f"   Dashboard:  {status['dashboard_url']}")
+        print(f"   API Docs:   {status['api_docs_url']}")
+        print(f"   Health:     {status['base_url']}/health")
+        
+        print(f"\n💡 How to Use:")
+        print(f"   1. Keep this terminal for crew execution")
+        print(f"   2. Open in browser: {status['dashboard_url']}")
+        print(f"   3. Approve/reject HITL checkpoints in dashboard")
+        print(f"   4. Crew auto-resumes after your decision")
+        
+    else:
+        print(f"\n⚠️  Webhook server not running")
+        print(f"   Reason: {status['reason']}")
+        
+        if status.get('help'):
+            print(f"\n💡 Quick Start:")
+            print(f"   {status['help']}")
+            print(f"\n   In separate terminal:")
+            print(f"   1. cd to project directory")
+            print(f"   2. python -m spinscribe.webhooks.server")
+            print(f"   3. Keep that terminal open")
+            print(f"   4. Return here and run crew")
+        
+        print(f"\n📝 Fallback: Terminal HITL mode")
+        print(f"   - Prompted for approval in this terminal")
+        print(f"   - No dashboard interface")
+    
+    print("\n" + "=" * 80)
+    
+    return status
 
 
 # =============================================================================
@@ -155,7 +288,8 @@ def get_user_inputs(interactive: bool = True) -> Dict[str, Any]:
     content_type = input("Content Type [blog]: ").strip().lower()
     if not content_type or content_type not in ['blog', 'landing_page', 'local_article']:
         content_type = "blog"
-        print(f"   Using default: {content_type}")
+        if content_type not in ['blog', 'landing_page', 'local_article']:
+            print(f"   Using default: {content_type}")
     
     # Collect audience
     audience = input("Target Audience [Business executives and technology decision makers]: ").strip()
@@ -186,7 +320,7 @@ def get_user_inputs(interactive: bool = True) -> Dict[str, Any]:
     print("=" * 80)
     
     confirm = input("\nProceed with these inputs? [Y/n]: ").strip().lower()
-    if confirm and confirm != 'y' and confirm != 'yes':
+    if confirm and confirm != 'y' and confirm != 'yes' and confirm != '':
         print("Operation cancelled by user.")
         sys.exit(0)
     
@@ -203,9 +337,10 @@ def run():
     
     This function:
     1. Validates environment variables
-    2. Collects user inputs (interactively or uses defaults)
-    3. Initializes and runs the crew
-    4. Handles errors and displays results
+    2. Checks webhook server status
+    3. Collects user inputs
+    4. Runs crew (with webhooks if available, terminal mode otherwise)
+    5. Handles errors and displays results
     
     Usage:
         crewai run
@@ -221,26 +356,51 @@ def run():
             print("\n❌ Environment validation failed. Please fix the issues above.")
             sys.exit(1)
         
+        # Check webhook server status
+        webhook_status = display_webhook_status()
+        use_webhooks = webhook_status['running']
+        
+        # Ask user to confirm mode if webhooks available
+        if use_webhooks:
+            print(f"\n🚀 Ready to start in WEBHOOK mode")
+            mode_confirm = input("Continue with webhook monitoring? [Y/n]: ").strip().lower()
+            
+            if mode_confirm and mode_confirm not in ['y', 'yes', '']:
+                print(f"\n📝 Switching to TERMINAL mode")
+                use_webhooks = False
+        else:
+            print(f"\n📝 Starting in TERMINAL mode")
+        
         # Determine if running interactively
         interactive = sys.stdout.isatty() and sys.stdin.isatty()
         
         # Collect inputs
         inputs = get_user_inputs(interactive=interactive)
         
-        # Create output directory if it doesn't exist
+        # Create output directory
         output_dir = Path(f"content_output/{inputs['client_name']}")
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize and run crew
+        # Initialize crew
         print("\n🚀 Initializing SpinScribe Crew...")
         crew_instance = SpinscribeCrew()
         
-        print("\n▶️  Starting content creation workflow...\n")
-        result = crew_instance.crew().kickoff(inputs=inputs)
+        # Run crew based on mode
+        if use_webhooks:
+            print("\n▶️  Starting content creation with webhook monitoring...")
+            print(f"\n💡 TIP: Keep browser open to {webhook_status['dashboard_url']}")
+            print(f"        You'll need it to approve HITL checkpoints\n")
+            
+            result = crew_instance.kickoff_with_webhooks(inputs)
+        else:
+            print("\n▶️  Starting content creation in terminal mode...")
+            print(f"\n💡 TIP: You'll be prompted for approval in this terminal\n")
+            
+            result = crew_instance.crew().kickoff(inputs=inputs)
         
         # Display results
         print("\n" + "=" * 80)
-        print("EXECUTION COMPLETE")
+        print("✅ EXECUTION COMPLETE")
         print("=" * 80)
         print(f"\n✅ Content creation completed successfully!")
         
@@ -507,6 +667,54 @@ def test():
 
 
 # =============================================================================
+# UTILITY COMMANDS
+# =============================================================================
+
+def check_webhooks_command():
+    """
+    CLI command to check webhook server status.
+    
+    Usage: python -m spinscribe.main --check-webhooks
+    """
+    print("\n🔍 Checking webhook server status...")
+    status = check_webhook_server()
+    
+    if status['running']:
+        print(f"\n✅ Webhook server is healthy")
+        print(f"   Base URL: {status['base_url']}")
+        print(f"   Status: {status['status']}")
+        print(f"\n🌐 Available Endpoints:")
+        print(f"   Dashboard: {status['dashboard_url']}")
+        print(f"   API Docs: {status['api_docs_url']}")
+    else:
+        print(f"\n❌ Webhook server is not available")
+        print(f"   Reason: {status['reason']}")
+        if status.get('help'):
+            print(f"\n💡 {status['help']}")
+    
+    return status
+
+
+def show_dashboard_command():
+    """
+    CLI command to open dashboard in browser.
+    
+    Usage: python -m spinscribe.main --dashboard
+    """
+    status = check_webhook_server()
+    
+    if status['running']:
+        import webbrowser
+        dashboard_url = status['dashboard_url']
+        print(f"\n🌐 Opening dashboard: {dashboard_url}")
+        webbrowser.open(dashboard_url)
+    else:
+        print(f"\n❌ Cannot open dashboard - webhook server is not running")
+        if status.get('help'):
+            print(f"\n💡 {status['help']}")
+
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
@@ -535,15 +743,24 @@ USAGE:
     crewai replay -t <task_id>        # Replay from specific task
     crewai test -n 3 -m gpt-4o-mini  # Test with 3 iterations
 
+UTILITY COMMANDS:
+    python -m spinscribe.main --check-webhooks    # Check webhook server
+    python -m spinscribe.main --dashboard         # Open dashboard
+
 ENVIRONMENT VARIABLES:
     Required:
         OPENAI_API_KEY               OpenAI API key for GPT-4o
         SERPER_API_KEY               Serper.dev API key for web search
     
-    Optional (for HITL):
-        HITL_BRAND_VOICE_WEBHOOK     Brand voice approval webhook
-        HITL_STYLE_COMPLIANCE_WEBHOOK Style compliance approval webhook
-        HITL_FINAL_APPROVAL_WEBHOOK   Final QA approval webhook
+    Optional (Webhook Monitoring):
+        AGENT_WEBHOOK_URL            Agent activity tracking
+        TASK_STATUS_WEBHOOK          Task progress notifications
+        AGENT_COMPLETION_WEBHOOK     Agent completion notifications
+        HITL_BRAND_VOICE_WEBHOOK     Brand voice approval
+        HITL_STYLE_COMPLIANCE_WEBHOOK Style compliance approval
+        HITL_FINAL_APPROVAL_WEBHOOK  Final QA approval
+        ERROR_NOTIFICATION_WEBHOOK   Error notifications
+        WEBHOOK_AUTH_TOKEN           Authentication token
 
 WORKFLOW:
     1. Content Research           - Gather comprehensive information
@@ -553,6 +770,13 @@ WORKFLOW:
     5. SEO Optimization           - Enhance search performance
     6. Style Compliance           - Verify brand adherence (HITL)
     7. Quality Assurance          - Final review and polish (HITL)
+
+WEBHOOK MODE:
+    When webhook server is running (python -m spinscribe.webhooks.server):
+    - Real-time dashboard at http://localhost:8000/dashboard
+    - Approve HITL checkpoints in browser
+    - Monitor agent activity in real-time
+    - Get notifications for task completions
 
 EXAMPLES:
     # Run with interactive input
@@ -569,6 +793,9 @@ EXAMPLES:
     
     # Test crew consistency
     crewai test -n 5
+
+    # Check webhook server status
+    python -m spinscribe.main --check-webhooks
 
 DOCUMENTATION:
     For more information, visit: https://docs.crewai.com
@@ -591,9 +818,18 @@ def main():
     Handles command routing and argument parsing.
     """
     # Check for help flag
-    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']:
-        show_help()
-        sys.exit(0)
+    if len(sys.argv) > 1:
+        command = sys.argv[1]
+        
+        if command in ['-h', '--help', 'help']:
+            show_help()
+            sys.exit(0)
+        elif command == '--check-webhooks':
+            check_webhooks_command()
+            sys.exit(0)
+        elif command == '--dashboard':
+            show_dashboard_command()
+            sys.exit(0)
     
     # Default to run command
     run()
@@ -614,70 +850,13 @@ if __name__ == "__main__":
 # MODULE EXPORTS
 # =============================================================================
 
-__all__ = ['run', 'train', 'replay', 'test', 'validate_environment', 'get_user_inputs']
-
-
-# =============================================================================
-# CONFIGURATION NOTES
-# =============================================================================
-"""
-PROJECT STRUCTURE:
-spinscribe/
-├── .env                          # Environment variables (create from .env.example)
-├── pyproject.toml                # Project dependencies and scripts
-├── README.md                     # Project documentation
-├── knowledge/                    # Client knowledge bases
-│   └── clients/
-│       └── {client_name}/
-│           ├── 01_brand_voice_analysis/
-│           ├── 02_style_guidelines/
-│           ├── 03_sample_content/
-│           ├── 04_marketing_materials/
-│           └── 05_previous_work/
-├── content_output/               # Generated content (auto-created)
-│   └── {client_name}/
-├── logs/                         # Execution logs (auto-created)
-└── src/
-    └── spinscribe/
-        ├── __init__.py
-        ├── main.py               # This file
-        ├── crew.py               # Crew orchestration
-        ├── config/
-        │   ├── agents.yaml       # Agent definitions
-        │   └── tasks.yaml        # Task definitions
-        └── tools/
-            ├── __init__.py
-            └── custom_tool.py    # AI Language Code Parser
-
-COMMAND LINE SCRIPTS:
-The following commands are available after installation:
-    - spinscribe        → runs spinscribe.main:run
-    - run_crew          → runs spinscribe.main:run (alias)
-    - train             → runs spinscribe.main:train
-    - replay            → runs spinscribe.main:replay
-    - test              → runs spinscribe.main:test
-
-These are defined in pyproject.toml [project.scripts] section.
-
-TRAINING MODE:
-Training mode allows the crew to learn from human feedback:
-1. Crew executes a task
-2. Human provides feedback on the output
-3. Feedback is stored and used to improve future performance
-4. Process repeats for n_iterations
-5. Training data is saved to a pickle file
-
-REPLAY MODE:
-Replay mode allows resuming execution from a specific task:
-1. Previous execution states are automatically saved
-2. Use 'crewai log-tasks-outputs' to view available task IDs
-3. Use 'crewai replay -t <task_id>' to resume from that task
-4. All subsequent tasks will execute with previous context
-
-TEST MODE:
-Test mode evaluates crew consistency and quality:
-1. Crew is executed multiple times with same inputs
-2. Results are compared for consistency
-3. Quality metrics are generated
-4. Test report shows performance across iterations
-"""
+__all__ = [
+    'run',
+    'train',
+    'replay',
+    'test',
+    'validate_environment',
+    'get_user_inputs',
+    'check_webhook_server',
+    'display_webhook_status'
+]

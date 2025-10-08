@@ -45,11 +45,14 @@ content_research_task:
     1. **Topic Analysis**: Deep dive into {topic} including current trends, 
        statistics, expert opinions, and recent developments (within last 12 months).
     
-    2. **Client Context**: Search the client knowledge base for:
+    2. **Client Context**: Search the client knowledge base at directory: {client_knowledge_directory}
        - Previous successful content on similar topics
        - Client's unique positioning and value proposition
        - Target audience pain points and interests
        - Industry-specific terminology and preferences
+       
+       **IMPORTANT**: When using the "Search a directory's content" tool, 
+       use this EXACT directory path: {client_knowledge_directory}
     
     3. **Competitive Intelligence**: Analyze how competitors cover this topic:
        - Identify content gaps and opportunities
@@ -141,12 +144,19 @@ brand_voice_analysis_task:
     
     Your responsibilities:
     
-    1. **Knowledge Base Analysis**: Search client knowledge base for:
+    1. **Knowledge Base Analysis**: Search client knowledge base at directory: {client_knowledge_directory}
        - Style guidelines and brand voice documentation
        - Sample content that represents desired voice
        - Previous successful content in same category as {content_type}
        - Marketing materials and positioning statements
        - Prohibited language or terminology
+       
+       **IMPORTANT**: When using the "Search a directory's content" tool,
+       use this EXACT directory path: {client_knowledge_directory}
+       
+       If the directory is empty or has no documents, proceed with creating
+       a brand voice specification based on industry best practices for
+       {audience} audience and {content_type} content type.
     
     2. **Stylometric Analysis**: Examine sample content for:
        - Tone characteristics (authoritative, empathetic, professional, etc.)
