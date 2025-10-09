@@ -1,24 +1,22 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-SpinScribe Content Creation Crew
+SpinScribe Content Creation Crew - Cloud Deployment Ready
 
 A multi-agent AI system for creating high-quality, brand-aligned content
-with Human-in-the-Loop (HITL) approval checkpoints.
+with dual workflow modes (CREATION and REVISION).
 
 Author: SpinScribe Team
-Version: 2.0.0 - Webhook Integration with Callbacks
+Version: 3.0.0 - Cloud Deployment (Phase 1 - No HITL)
 """
 
 import os
 import sys
-import requests
-import time
 from datetime import datetime
 from typing import Dict, Any
 
 from crewai import Agent, Crew, Process, Task
-from crewai.project import CrewBase, agent, crew, task
+from crewai.project import CrewBase, agent, crew, task, before_kickoff
 from crewai_tools import SerperDevTool
 
 import logging
@@ -30,269 +28,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global execution ID for tracking workflows across callbacks
+# Global execution ID for tracking workflows
 _current_execution_id = None
-
-
-# =============================================================================
-# CALLBACK FUNCTIONS FOR WEBHOOK INTEGRATION
-# =============================================================================
-
-def agent_step_callback(step_output):
-    """
-    Callback executed after each agent step.
-    Sends webhook to: AGENT_WEBHOOK_URL
-    """
-    webhook_url = os.getenv("AGENT_WEBHOOK_URL")
-    if not webhook_url:
-        return
-
-    try:
-        # Handle both dict or object formats
-        agent_name = (
-            getattr(step_output, "agent", None) and getattr(step_output.agent, "role", "Unknown Agent")
-        ) or "Unknown Agent"
-
-        output_str = str(getattr(step_output, "output", None) or step_output)
-
-        payload = {
-            "workflow_id": os.getenv("EXECUTION_ID", "unknown"),
-            "agent_name": agent_name,
-            "step_type": "agent_step",
-            "step_data": output_str,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        response = requests.post(webhook_url, json=payload, timeout=5)
-        response.raise_for_status()
-        logger.debug(f"📤 Agent step webhook sent: {response.status_code}")
-
-    except Exception as e:
-        logger.warning(f"⚠️  Failed to send agent step webhook: {e}")
-
-
-def task_status_callback(task_output):
-    """
-    Callback executed after each task completes.
-    Sends webhook to: TASK_STATUS_WEBHOOK
-    """
-    webhook_url = os.getenv("TASK_STATUS_WEBHOOK")
-    if not webhook_url:
-        return
-
-    try:
-        task_obj = getattr(task_output, "task", None)
-        task_id = getattr(task_obj, "id", "unknown")
-        task_description = getattr(task_obj, "description", "No description")
-
-        output_text = (
-            getattr(task_output, "output", None)
-            or getattr(task_output, "raw", None)
-            or "No output"
-        )
-
-        payload = {
-            "workflow_id": os.getenv("EXECUTION_ID", "unknown"),
-            "task_id": str(task_id),
-            "task_description": task_description,
-            "status": "completed",
-            "output_preview": output_text[:500],  # Preview only
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        response = requests.post(webhook_url, json=payload, timeout=5)
-        response.raise_for_status()
-        logger.info(f"✅ Task completed webhook sent: {response.status_code}")
-
-    except Exception as e:
-        logger.warning(f"⚠️  Failed to send task status webhook: {e}")
-
-
-
-# =============================================================================
-# HITL (Human-in-the-Loop) CHECKPOINT CALLBACKS
-# =============================================================================
-
-def wait_for_approval(execution_id: str, checkpoint_name: str, timeout: int = 3600) -> Dict[str, Any]:
-    """
-    Poll webhook server for human approval decision.
-    """
-    print("\n" + "="*80)
-    print(f"⏸️  PAUSED at checkpoint: {checkpoint_name}")
-    print("="*80)
-    print(f"🔗 Review at: http://localhost:8000/dashboard")
-    print("⏳ Waiting for human approval...")
-    print("="*80 + "\n")
-    
-    start_time = time.time()
-    poll_interval = 5
-    
-    while (time.time() - start_time) < timeout:
-        try:
-            response = requests.get(
-                f"http://localhost:8000/workflows/{execution_id}",
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                workflow = response.json()
-                status = workflow.get("status")
-                
-                if status == "approved":
-                    approval_response = workflow.get("approval_response", {})
-                    feedback = approval_response.get("feedback", "Approved")
-                    
-                    print("\n" + "="*80)
-                    print(f"✅ CHECKPOINT APPROVED: {checkpoint_name}")
-                    print("="*80)
-                    print(f"📝 Feedback: {feedback}")
-                    print("="*80 + "\n")
-                    
-                    return approval_response
-                
-                elif status == "rejected":
-                    approval_response = workflow.get("approval_response", {})
-                    feedback = approval_response.get("feedback", "Rejected")
-                    
-                    print("\n" + "="*80)
-                    print(f"❌ CHECKPOINT REJECTED: {checkpoint_name}")
-                    print("="*80)
-                    print(f"📝 Reason: {feedback}")
-                    print("="*80 + "\n")
-                    
-                    raise Exception(f"Workflow rejected at {checkpoint_name}: {feedback}")
-                
-                elif status == "revision_requested":
-                    approval_response = workflow.get("approval_response", {})
-                    feedback = approval_response.get("feedback", "Revision requested")
-                    
-                    print("\n" + "="*80)
-                    print(f"🔄 REVISION REQUESTED: {checkpoint_name}")
-                    print("="*80)
-                    print(f"📝 Changes needed: {feedback}")
-                    print("="*80 + "\n")
-                    
-                    raise Exception(f"Revision requested at {checkpoint_name}: {feedback}")
-            
-            time.sleep(poll_interval)
-            
-        except requests.RequestException as e:
-            logger.warning(f"⚠️  Error polling for approval: {e}")
-            time.sleep(poll_interval)
-            continue
-    
-    raise TimeoutError(f"No approval received for {checkpoint_name} within {timeout} seconds")
-
-
-def brand_voice_hitl_callback(task_output):
-    """HITL Checkpoint 1: Brand Voice Analysis"""
-    logger.info("📋 Brand Voice Analysis complete - triggering HITL checkpoint")
-    
-    webhook_url = os.getenv("HITL_BRAND_VOICE_WEBHOOK")
-    if not webhook_url:
-        logger.warning("⚠️  No brand voice webhook configured, skipping HITL")
-        return task_output
-    
-    payload = {
-        "workflow_id": _current_execution_id,
-        "checkpoint_type": "brand_voice",
-        "content": task_output.raw,
-        "metadata": {
-            "task_description": task_output.description,
-            "timestamp": datetime.utcnow().isoformat()
-        },
-        "agent_name": "brand_voice_specialist"
-    }
-    
-    try:
-        response = requests.post(webhook_url, json=payload, timeout=10)
-        
-        if response.status_code == 200:
-            logger.info("✅ HITL checkpoint webhook sent successfully")
-            approval = wait_for_approval(_current_execution_id, "brand_voice")
-            logger.info(f"📥 Human feedback received: {approval.get('feedback', 'N/A')}")
-        else:
-            logger.warning(f"⚠️  Webhook returned status {response.status_code}")
-            
-    except Exception as e:
-        logger.error(f"❌ Error in HITL checkpoint: {e}")
-        raise
-    
-    return task_output
-
-
-def style_compliance_hitl_callback(task_output):
-    """HITL Checkpoint 2: Style Compliance Review"""
-    logger.info("📋 Style Compliance Review complete - triggering HITL checkpoint")
-    
-    webhook_url = os.getenv("HITL_STYLE_COMPLIANCE_WEBHOOK")
-    if not webhook_url:
-        logger.warning("⚠️  No style compliance webhook configured, skipping HITL")
-        return task_output
-    
-    payload = {
-        "workflow_id": _current_execution_id,
-        "checkpoint_type": "style_compliance",
-        "content": task_output.raw,
-        "metadata": {
-            "task_description": task_output.description,
-            "timestamp": datetime.utcnow().isoformat()
-        },
-        "agent_name": "style_compliance_agent"
-    }
-    
-    try:
-        response = requests.post(webhook_url, json=payload, timeout=10)
-        
-        if response.status_code == 200:
-            logger.info("✅ HITL checkpoint webhook sent successfully")
-            approval = wait_for_approval(_current_execution_id, "style_compliance")
-            logger.info(f"📥 Human feedback received: {approval.get('feedback', 'N/A')}")
-        else:
-            logger.warning(f"⚠️  Webhook returned status {response.status_code}")
-            
-    except Exception as e:
-        logger.error(f"❌ Error in HITL checkpoint: {e}")
-        raise
-    
-    return task_output
-
-
-def final_qa_hitl_callback(task_output):
-    """HITL Checkpoint 3: Final Quality Assurance"""
-    logger.info("📋 Final QA complete - triggering HITL checkpoint")
-    
-    webhook_url = os.getenv("HITL_FINAL_APPROVAL_WEBHOOK")
-    if not webhook_url:
-        logger.warning("⚠️  No final QA webhook configured, skipping HITL")
-        return task_output
-    
-    payload = {
-        "workflow_id": _current_execution_id,
-        "checkpoint_type": "final_qa",
-        "content": task_output.raw,
-        "metadata": {
-            "task_description": task_output.description,
-            "timestamp": datetime.utcnow().isoformat()
-        },
-        "agent_name": "quality_assurance_editor"
-    }
-    
-    try:
-        response = requests.post(webhook_url, json=payload, timeout=10)
-        
-        if response.status_code == 200:
-            logger.info("✅ HITL checkpoint webhook sent successfully")
-            approval = wait_for_approval(_current_execution_id, "final_qa")
-            logger.info(f"📥 Human feedback received: {approval.get('feedback', 'N/A')}")
-        else:
-            logger.warning(f"⚠️  Webhook returned status {response.status_code}")
-            
-    except Exception as e:
-        logger.error(f"❌ Error in HITL checkpoint: {e}")
-        raise
-    
-    return task_output
 
 
 # =============================================================================
@@ -302,10 +39,14 @@ def final_qa_hitl_callback(task_output):
 @CrewBase
 class SpinscribeCrew:
     """
-    SpinScribe Content Creation Crew
+    SpinScribe Content Creation Crew - Cloud Deployment Ready
     
     A multi-agent system with 7 specialized agents working sequentially to create
-    high-quality, brand-aligned content with three HITL approval checkpoints.
+    high-quality, brand-aligned content with dual workflow mode support:
+    - CREATION: Build content from scratch (no initial_draft provided)
+    - REVISION: Enhance existing draft (initial_draft provided)
+    
+    Workflow mode is automatically detected based on inputs.
     """
     
     agents_config = 'config/agents.yaml'
@@ -325,17 +66,95 @@ class SpinscribeCrew:
             logger.error(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
             sys.exit(1)
         
-        # Check for webhook URLs (optional but recommended)
-        webhook_vars = [
-            'AGENT_WEBHOOK_URL',
-            'TASK_STATUS_WEBHOOK',
-            'HITL_BRAND_VOICE_WEBHOOK',
-            'HITL_STYLE_COMPLIANCE_WEBHOOK',
-            'HITL_FINAL_APPROVAL_WEBHOOK'
-        ]
+        # Check for SerperDev API key (recommended for web search)
+        if not os.getenv('SERPER_API_KEY'):
+            logger.warning("⚠️  SERPER_API_KEY not set - web search tools may not work optimally")
         
-        configured_webhooks = [var for var in webhook_vars if os.getenv(var)]
-        logger.info(f"✅ {len(configured_webhooks)}/{len(webhook_vars)} webhooks configured")
+        logger.info("✅ Environment validation complete")
+
+    # =========================================================================
+    # INPUT PREPROCESSING - Workflow Mode Detection
+    # =========================================================================
+    
+    @before_kickoff
+    def prepare_workflow(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Detect workflow mode and enrich inputs before crew execution.
+        
+        Automatically determines whether to use CREATION or REVISION mode based
+        on the presence of initial_draft input.
+        
+        Args:
+            inputs: Raw input dictionary from API or CLI
+            
+        Returns:
+            Enriched inputs with workflow mode and metadata
+        """
+        global _current_execution_id
+        
+        # Generate unique execution ID
+        _current_execution_id = f"exec_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        logger.info("="*80)
+        logger.info("🚀 SPINSCRIBE WORKFLOW INITIALIZATION")
+        logger.info("="*80)
+        logger.info(f"🔗 Execution ID: {_current_execution_id}")
+        
+        # Extract initial draft
+        initial_draft = inputs.get('initial_draft', '').strip()
+        has_initial_draft = bool(initial_draft)
+        
+        # Determine workflow mode
+        # Priority: explicit workflow_mode > auto-detect from initial_draft
+        explicit_mode = inputs.get('workflow_mode', '').lower()
+        
+        if explicit_mode in ['revision', 'creation', 'refinement']:
+            # Map 'refinement' to 'revision' for consistency
+            workflow_mode = 'revision' if explicit_mode in ['refinement', 'revision'] else 'creation'
+        else:
+            # Auto-detect based on initial_draft presence
+            workflow_mode = 'revision' if has_initial_draft else 'creation'
+        
+        # Enrich inputs with mode and metadata
+        inputs['workflow_mode'] = workflow_mode
+        inputs['has_initial_draft'] = has_initial_draft
+        
+        if has_initial_draft:
+            # Revision mode metadata
+            inputs['draft_length'] = len(initial_draft)
+            inputs['draft_word_count'] = len(initial_draft.split())
+            inputs['draft_source'] = inputs.get('draft_source', 'human_provided')
+            
+            logger.info(f"📝 WORKFLOW MODE: REVISION")
+            logger.info(f"   ├─ Draft Length: {inputs['draft_length']} characters")
+            logger.info(f"   ├─ Word Count: {inputs['draft_word_count']} words")
+            logger.info(f"   └─ Source: {inputs['draft_source']}")
+        else:
+            # Creation mode metadata
+            inputs['draft_length'] = 0
+            inputs['draft_word_count'] = 0
+            inputs['initial_draft'] = ""  # Ensure empty string, not None
+            inputs['draft_source'] = 'ai_generated'
+            
+            logger.info(f"✨ WORKFLOW MODE: CREATION")
+            logger.info(f"   └─ Generating content from scratch")
+        
+        # Set defaults for optional fields
+        inputs.setdefault('content_length', '1500')
+        inputs.setdefault('ai_language_code', '/TN/A3,P4/VL4/SC3/FL2/LF3')
+        inputs.setdefault('client_knowledge_directory', 
+                         f"./knowledge/clients/{inputs.get('client_name', 'default')}")
+        
+        # Log configuration
+        logger.info(f"🎯 Configuration:")
+        logger.info(f"   ├─ Client: {inputs.get('client_name', 'N/A')}")
+        logger.info(f"   ├─ Topic: {inputs.get('topic', 'N/A')}")
+        logger.info(f"   ├─ Content Type: {inputs.get('content_type', 'N/A')}")
+        logger.info(f"   ├─ Audience: {inputs.get('audience', 'N/A')}")
+        logger.info(f"   └─ AI Language Code: {inputs.get('ai_language_code', 'N/A')}")
+        logger.info("="*80)
+        
+        return inputs
 
     # =========================================================================
     # AGENTS - Matching agents.yaml exactly
@@ -402,7 +221,7 @@ class SpinscribeCrew:
         )
 
     # =========================================================================
-    # TASKS - Matching tasks.yaml exactly with HITL callbacks
+    # TASKS - Matching tasks.yaml exactly
     # =========================================================================
 
     @task
@@ -414,10 +233,9 @@ class SpinscribeCrew:
 
     @task
     def brand_voice_analysis_task(self) -> Task:
-        """Task 2: Brand Voice Analysis with HITL checkpoint"""
+        """Task 2: Brand Voice Analysis"""
         return Task(
-            config=self.tasks_config['brand_voice_analysis_task'],
-            callback=brand_voice_hitl_callback  # ← HITL Checkpoint 1
+            config=self.tasks_config['brand_voice_analysis_task']
         )
 
     @task
@@ -443,231 +261,144 @@ class SpinscribeCrew:
 
     @task
     def style_compliance_review_task(self) -> Task:
-        """Task 6: Style Compliance Review with HITL checkpoint"""
+        """Task 6: Style Compliance Review"""
         return Task(
-            config=self.tasks_config['style_compliance_review_task'],
-            callback=style_compliance_hitl_callback  # ← HITL Checkpoint 2
+            config=self.tasks_config['style_compliance_review_task']
         )
 
     @task
     def final_quality_assurance_task(self) -> Task:
-        """Task 7: Final Quality Assurance with HITL checkpoint"""
+        """Task 7: Final Quality Assurance"""
         return Task(
-            config=self.tasks_config['final_quality_assurance_task'],
-            callback=final_qa_hitl_callback  # ← HITL Checkpoint 3
+            config=self.tasks_config['final_quality_assurance_task']
         )
 
     # =========================================================================
-    # CREW DEFINITION WITH CALLBACKS
+    # CREW DEFINITION
     # =========================================================================
 
     @crew
     def crew(self) -> Crew:
         """
-        Creates the SpinScribe crew with webhook monitoring callbacks.
+        Creates the SpinScribe crew with sequential workflow.
         
         Returns:
-            Crew: Configured crew with 7 agents, 7 tasks, and callback functions
+            Crew: Configured crew with 7 agents and 7 tasks
         """
         return Crew(
             agents=self.agents,
             tasks=self.tasks,
             process=Process.sequential,
             verbose=True,
-            step_callback=agent_step_callback,  # ← Monitor agent steps
-            task_callback=task_status_callback,  # ← Monitor task completions
         )
 
-    # =========================================================================
-    # EXECUTION METHODS
-    # =========================================================================
 
-    def get_inputs(self) -> Dict[str, Any]:
-        """Collect inputs from user for content creation."""
-        print("\n" + "="*80)
-        print("SPINSCRIBE CONTENT CREATION - INPUT COLLECTION")
-        print("="*80)
-        print("\nPlease provide the following information:")
-        print("(Press Enter to use default values shown in brackets)\n")
-        
-        client_name = input("Client Name [Demo Client]: ").strip() or "Demo Client"
-        topic = input("Content Topic [Artificial Intelligence in Modern Business]: ").strip() or "Artificial Intelligence in Modern Business"
-        
-        print("\nContent Type Options: blog, landing_page, local_article")
-        content_type = input("Content Type [blog]: ").strip() or "blog"
-        
-        audience = input("Target Audience [Business executives and technology decision makers]: ").strip() or "Business executives and technology decision makers"
-        
-        print("\nAI Language Code defines tone, vocabulary, and style.")
-        print("Example: /TN/P3,A2/VL3/SC3/FL2/LF3")
-        ai_language_code = input("AI Language Code [/TN/P3,A2/VL3/SC3/FL2/LF3]: ").strip() or "/TN/P3,A2/VL3/SC3/FL2/LF3"
-
-        print("\n📄 Initial Draft (Optional):")
-        print("Do you have an initial draft to refine? [Y/n]: ", end="")
-        has_draft = input().strip().lower() in ['y', 'yes', '']
-        
-        initial_draft = None
-        draft_source = None
-        
-        if has_draft:
-            print("\nHow would you like to provide the draft?")
-            print("1. Paste text directly")
-            print("2. Provide file path")
-            print("3. Provide URL")
-            draft_option = input("Choose option [1/2/3]: ").strip() or "1"
-            
-            if draft_option == "1":
-                print("\nPaste your draft (press Ctrl+D or Ctrl+Z when done):")
-                print("-" * 80)
-                lines = []
-                try:
-                    while True:
-                        lines.append(input())
-                except EOFError:
-                    pass
-                initial_draft = "\n".join(lines)
-                draft_source = "pasted_text"
-                
-            elif draft_option == "2":
-                file_path = input("Enter file path: ").strip()
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        initial_draft = f.read()
-                    draft_source = f"file:{file_path}"
-                except Exception as e:
-                    print(f"⚠️  Error reading file: {e}")
-                    print("Proceeding without initial draft...")
-                    has_draft = False
-                    
-            elif draft_option == "3":
-                url = input("Enter URL: ").strip()
-                try:
-                    import requests
-                    response = requests.get(url, timeout=10)
-                    initial_draft = response.text
-                    draft_source = f"url:{url}"
-                except Exception as e:
-                    print(f"⚠️  Error fetching URL: {e}")
-                    print("Proceeding without initial draft...")
-                    has_draft = False
-
-        # Add client_knowledge_directory based on client_name
-        client_knowledge_directory = f"knowledge/clients/{client_name.replace(' ', '_').lower()}"
-        
-        inputs = {
-            'client_name': client_name,
-            'topic': topic,
-            'content_type': content_type,
-            'audience': audience,
-            'ai_language_code': ai_language_code,
-            'client_knowledge_directory': client_knowledge_directory,
-            "has_initial_draft": has_draft,
-            "initial_draft": initial_draft if has_draft else "",
-            "draft_source": draft_source if has_draft else "none",
-            "workflow_mode": "refinement" if has_draft else "creation"
-        }
-        
-        print("\n" + "="*80)
-        print("INPUT SUMMARY")
-        print("="*80)
-        print(f"   Client Name: {client_name}")
-        print(f"   Topic: {topic}")
-        print(f"   Content Type: {content_type}")
-        print(f"   Audience: {audience}")
-        print(f"   AI Language Code: {ai_language_code}")
-        print(f"   Knowledge Directory: {client_knowledge_directory}")
-        print(f"   Workflow Mode: {'🔄 Refinement (with draft)' if has_draft else '✨ Creation (from scratch)'}")
-        if has_draft:
-            print(f"   Draft Source: {draft_source}")
-            print(f"   Draft Length: {len(initial_draft)} characters")
-        print("="*80)
-        print("="*80 + "\n")
-        
-        confirm = input("Proceed with these inputs? [Y/n]: ").strip().lower()
-        if confirm and confirm != 'y':
-            print("❌ Execution cancelled by user")
-            sys.exit(0)
-        
-        return inputs
-
-    def run(self, inputs: Dict[str, Any]) -> str:
-        """Execute the SpinScribe crew with webhook monitoring."""
-        global _current_execution_id
-        
-        try:
-            # Generate unique execution ID
-            _current_execution_id = f"exec_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
-            logger.info("🚀 Starting SpinScribe crew execution...")
-            logger.info(f"   Execution ID: {_current_execution_id}")
-            
-            # ✅ Use inputs passed as parameter, don't collect again
-            
-            # Get crew instance
-            crew_instance = self.crew()
-            
-            print("\n" + "="*80)
-            print("🚀 Starting crew execution with webhook monitoring...")
-            print(f"   Execution ID: {_current_execution_id}")
-            print("="*80 + "\n")
-            
-            print("💡 TIP: Keep browser open to http://localhost:8000/dashboard")
-            print("        You'll need it to approve HITL checkpoints\n")
-            
-            # Execute crew with standard kickoff (callbacks handle webhooks!)
-            result = crew_instance.kickoff(inputs=inputs)
-            
-            logger.info("✅ Crew execution completed successfully")
-            
-            # Send completion webhook
-            completion_webhook = os.getenv("AGENT_COMPLETION_WEBHOOK")
-            if completion_webhook:
-                try:
-                    requests.post(
-                        completion_webhook,
-                        json={
-                            "workflow_id": _current_execution_id,
-                            "status": "completed",
-                            "timestamp": datetime.utcnow().isoformat()
-                        },
-                        timeout=5
-                    )
-                    logger.info("📤 Completion notification sent")
-                except:
-                    pass
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Error during crew execution: {str(e)}")
-            
-            # Send error webhook
-            error_webhook = os.getenv("ERROR_NOTIFICATION_WEBHOOK")
-            if error_webhook:
-                try:
-                    requests.post(
-                        error_webhook,
-                        json={
-                            "workflow_id": _current_execution_id or "unknown",
-                            "error_type": type(e).__name__,
-                            "message": str(e),
-                            "timestamp": datetime.utcnow().isoformat()
-                        },
-                        timeout=5
-                    )
-                except:
-                    pass
-            
-            raise
-
+# =============================================================================
+# MAIN EXECUTION FUNCTION
+# =============================================================================
 
 def run():
     """
     Entry point for the SpinScribe crew.
     
-    This function is called by the CLI: `crewai run`
+    This function is called by:
+    - CLI: `crewai run`
+    - API: crew.kickoff(inputs={...})
     """
-    SpinscribeCrew().run()
+    try:
+        # Initialize crew
+        crew_instance = SpinscribeCrew()
+        
+        # Example inputs for testing
+        # In production, these come from API or CLI
+        inputs = {
+            'client_name': 'Yanmar',
+            'topic': 'The Future of AI in Agriculture and Robotics',
+            'content_type': 'blog',
+            'audience': 'Agricultural Business Executives and Technology Decision-Makers',
+            'ai_language_code': '/TN/A3,P4,EMP2/VL4/SC3/FL2/LF3',
+            'content_length': '2000',
+            # For REVISION mode, uncomment and provide initial_draft:
+            # 'initial_draft': 'Your existing draft content here...',
+        }
+        
+        logger.info("🚀 Starting SpinScribe crew execution...")
+        
+        # Execute crew
+        result = crew_instance.crew().kickoff(inputs=inputs)
+        
+        logger.info("="*80)
+        logger.info("✅ SPINSCRIBE EXECUTION COMPLETE")
+        logger.info("="*80)
+        logger.info(f"📊 Result preview: {str(result)[:200]}...")
+        logger.info("="*80)
+        
+        return result
+        
+    except Exception as e:
+        logger.error("="*80)
+        logger.error("❌ SPINSCRIBE EXECUTION FAILED")
+        logger.error("="*80)
+        logger.error(f"Error: {str(e)}")
+        logger.error("="*80)
+        raise
+
+
+# =============================================================================
+# TRAINING AND TESTING FUNCTIONS (OPTIONAL)
+# =============================================================================
+
+def train():
+    """
+    Train the crew for improved performance.
+    Usage: crewai train <n_iterations> <filename>
+    """
+    inputs = {
+        "topic": "AI in Healthcare",
+        "audience": "Healthcare Executives",
+        "content_type": "blog",
+        "client_name": "TestClient"
+    }
+    try:
+        SpinscribeCrew().crew().train(
+            n_iterations=int(sys.argv[1]),
+            filename=sys.argv[2],
+            inputs=inputs
+        )
+    except Exception as e:
+        raise Exception(f"An error occurred while training the crew: {e}")
+
+
+def replay():
+    """
+    Replay the crew execution from a specific task.
+    Usage: crewai replay <task_id>
+    """
+    try:
+        SpinscribeCrew().crew().replay(task_id=sys.argv[1])
+    except Exception as e:
+        raise Exception(f"An error occurred while replaying the crew: {e}")
+
+
+def test():
+    """
+    Test the crew execution and returns the results.
+    Usage: crewai test <n_iterations> <openai_model_name>
+    """
+    inputs = {
+        "topic": "Test Topic",
+        "audience": "Test Audience",
+        "content_type": "blog",
+        "client_name": "TestClient"
+    }
+    try:
+        SpinscribeCrew().crew().test(
+            n_iterations=int(sys.argv[1]),
+            openai_model_name=sys.argv[2],
+            inputs=inputs
+        )
+    except Exception as e:
+        raise Exception(f"An error occurred while testing the crew: {e}")
 
 
 if __name__ == "__main__":
