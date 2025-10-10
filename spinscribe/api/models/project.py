@@ -29,7 +29,7 @@ class Project(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     completed_at = Column(DateTime(timezone=True))
-    metadata = Column(JSON, default={})
+    project_metadata = Column(JSON, default={})
     
     # Relationships
     client = relationship("Client", backref="projects")

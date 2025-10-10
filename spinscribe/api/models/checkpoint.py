@@ -31,7 +31,7 @@ class HITLCheckpoint(Base):
     reviewed_by = Column(UUID(as_uuid=True), ForeignKey('users.user_id'))
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     reviewed_at = Column(DateTime(timezone=True))
-    metadata = Column(JSON, default={})
+    checkpoint_metadata = Column(JSON, default={})
     
     # Relationships
     execution = relationship("CrewExecution", backref="checkpoints")

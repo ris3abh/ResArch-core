@@ -26,7 +26,7 @@ class AgentActivity(Base):
     activity_type = Column(Enum(ActivityType), nullable=False, index=True)
     message = Column(Text, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-    metadata = Column(JSON, default={})
+    activity_metadata = Column(JSON, default={})
     
     # Relationships
     execution = relationship("CrewExecution", backref="activities")

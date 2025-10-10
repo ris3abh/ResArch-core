@@ -1,5 +1,5 @@
 # api/models/document.py
-from sqlalchemy import Column, String, Integer, BigInteger, DateTime, ForeignKey, JSON, Enum, UniqueConstraint
+from sqlalchemy import Column, String, Integer, BigInteger, DateTime, ForeignKey, JSON, Enum, UniqueConstraint, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -31,7 +31,7 @@ class Document(Base):
     version = Column(Integer, default=1)
     uploaded_by = Column(UUID(as_uuid=True), ForeignKey('users.user_id'), nullable=False)
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
-    metadata = Column(JSON, default={})
+    document_metadata = Column(JSON, default={})
     
     # Relationships
     client = relationship("Client", backref="documents")

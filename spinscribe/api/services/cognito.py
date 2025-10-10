@@ -166,4 +166,4 @@ class CognitoService:
             raise ValueError(f"User deletion failed: {e.response['Error']['Message']}")
 
 # Singleton instance
-cognito_service = CognitoService()
+# cognito_service = CognitoService()
