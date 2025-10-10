@@ -72,7 +72,7 @@ async def signup(
     try:
         # Create user in Cognito
         logger.info(f"Creating Cognito user for: {signup_data.email}")
-        cognito_response = cognito.sign_up(
+        cognito_response = cognito.signup(
             email=signup_data.email,
             password=signup_data.password,
             name=signup_data.name
