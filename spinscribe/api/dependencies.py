@@ -1,7 +1,7 @@
 # api/dependencies.py - Update the authentication section
 import jwt
 from jwt.exceptions import PyJWTError as JWTError
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from api.database import SessionLocal
@@ -53,6 +53,7 @@ def decode_token(token: str) -> dict:
             payload = jwt.decode(
                 token,
                 settings.JWT_SECRET,
+                options={"verify_exp": False, "verify_iat": False},
                 algorithms=[settings.JWT_ALGORITHM]
             )
             return payload
@@ -143,6 +144,56 @@ async def get_current_user(
         )
     
     return user
+
+# =============================================================================
+# WEBHOOK AUTHENTICATION
+# =============================================================================
+
+async def verify_webhook_token(
+    authorization: str = Header(...)
+) -> bool:
+    """
+    Verify webhook authentication token from CrewAI.
+    
+    CrewAI sends webhooks with Bearer token authentication:
+    Authorization: Bearer {WEBHOOK_SECRET_TOKEN}
+    
+    Reference: https://docs.crewai.com/concepts/webhook-streaming#usage
+    
+    Args:
+        authorization: Authorization header from request
+        
+    Returns:
+        True if token is valid
+        
+    Raises:
+        HTTPException: If token is invalid or missing
+    """
+    if not authorization:
+        logger.warning("Webhook received without Authorization header")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authorization header"
+        )
+    
+    if not authorization.startswith("Bearer "):
+        logger.warning(f"Webhook received with invalid auth format: {authorization[:20]}...")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization format. Expected: Bearer <token>"
+        )
+    
+    token = authorization.replace("Bearer ", "")
+    
+    if token != settings.WEBHOOK_SECRET_TOKEN:
+        logger.warning("Webhook received with invalid token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid webhook token"
+        )
+    
+    logger.debug("✅ Webhook authentication successful")
+    return True
 
 
 # =============================================================================

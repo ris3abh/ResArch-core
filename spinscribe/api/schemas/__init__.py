@@ -13,13 +13,20 @@ from api.schemas.document import (
     DocumentUploadRequest, DocumentUploadResponse,
     DocumentResponse, DocumentDownloadResponse, DocumentListResponse
 )
-from api.schemas.execution import (
-    StartCrewRequest, ExecutionResponse, ExecutionStatusResponse
-)
 from api.schemas.webhook import (
     HITLWebhookPayload, WebhookEvent, WebhookEventsPayload,
     HITLApprovalRequest, HITLApprovalResponse,
     CheckpointResponse, PendingCheckpointsResponse
+)
+from api.schemas.execution import (
+    StartExecutionRequest,
+    StartExecutionResponse,
+    ExecutionStatusResponse,
+    ExecutionStatusEnum,
+    WorkflowModeEnum,
+    MessagesResponse,
+    MessageResponse,
+    CancelExecutionResponse
 )
 
 __all__ = [
@@ -34,9 +41,10 @@ __all__ = [
     "DocumentUploadRequest", "DocumentUploadResponse",
     "DocumentResponse", "DocumentDownloadResponse", "DocumentListResponse",
     # Execution
-    "StartCrewRequest", "ExecutionResponse", "ExecutionStatusResponse",
+    "StartExecutionRequest", "StartExecutionResponse", "ExecutionStatusEnum", "ExecutionStatusResponse", 
+    "WorkflowModeEnum", "MessagesResponse", "MessageResponse", "CancelExecutionResponse"
     # Webhook
     "HITLWebhookPayload", "WebhookEvent", "WebhookEventsPayload",
     "HITLApprovalRequest", "HITLApprovalResponse",
-    "CheckpointResponse", "PendingCheckpointsResponse"
+    "CheckpointResponse", "PendingCheckpointsResponse",
 ]
