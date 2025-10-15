@@ -200,7 +200,7 @@ async def root():
 # =============================================================================
 
 # Import routers (we'll create these next)
-from api.routers import health, auth, clients, projects, webhooks, checkpoints, executions
+from api.routers import health, auth, clients, projects, webhooks, checkpoints, executions, documents
 
 # Register routers
 app.include_router(health.router, prefix="/health", tags=["Health"])
@@ -210,15 +210,7 @@ app.include_router(projects.router, prefix="/api/v1/projects", tags=["Projects"]
 app.include_router(webhooks.router, prefix="/api/v1/webhook", tags=["Webhooks"])
 app.include_router(checkpoints.router, prefix="/api/v1/checkpoints", tags=["Checkpoints"])
 app.include_router(executions.router, prefix="/api/v1/executions", tags=["Executions"])
-
-
-
-# TODO: Import and register additional routers as they're created
-# from api.routers import clients, projects, documents, executions, checkpoints, webhooks
-# app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"])
-# app.include_router(executions.router, prefix="/api/v1/executions", tags=["Executions"])
-# app.include_router(checkpoints.router, prefix="/api/v1/checkpoints", tags=["Checkpoints"])
-# app.include_router(webhooks.router, prefix="/api/v1/webhook", tags=["Webhooks"])
+app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"])
 
 
 # =============================================================================

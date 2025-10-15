@@ -562,7 +562,7 @@ Resources:
       TaskRoleArn: !GetAtt ECSTaskRole.Arn
       ContainerDefinitions:
         - Name: api
-          Image: public.ecr.aws/docker/library/nginx:latest  # PLACEHOLDER - Replace with your image
+          Image: 748257756264.dkr.ecr.us-east-1.amazonaws.com/spinscribe-api:latest
           PortMappings:
             - ContainerPort: 8000
               Protocol: tcp
@@ -573,8 +573,24 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: api
           Secrets:
-            - Name: APP_SECRETS
-              ValueFrom: !Ref AppSecrets
+            - Name: DATABASE_URL
+              ValueFrom: !Sub '${AppSecrets}:database_url::'
+            - Name: REDIS_URL
+              ValueFrom: !Sub '${AppSecrets}:redis_url::'
+            - Name: CREWAI_API_URL
+              ValueFrom: !Sub '${AppSecrets}:crewai_api_url::'
+            - Name: CREWAI_BEARER_TOKEN
+              ValueFrom: !Sub '${AppSecrets}:crewai_bearer_token::'
+            - Name: CREWAI_USER_BEARER_TOKEN
+              ValueFrom: !Sub '${AppSecrets}:crewai_user_bearer_token::'
+            - Name: OPENAI_API_KEY
+              ValueFrom: !Sub '${AppSecrets}:openai_api_key::'
+            - Name: SERPER_API_KEY
+              ValueFrom: !Sub '${AppSecrets}:serper_api_key::'
+            - Name: DOCUMENTS_BUCKET
+              ValueFrom: !Sub '${AppSecrets}:documents_bucket::'
+            - Name: OUTPUTS_BUCKET
+              ValueFrom: !Sub '${AppSecrets}:outputs_bucket::'
           Environment:
             - Name: ENVIRONMENT
               Value: !Ref Environment

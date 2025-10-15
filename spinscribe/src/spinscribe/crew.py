@@ -1,13 +1,17 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-SpinScribe Content Creation Crew - Cloud Deployment Ready
+SpinScribe Content Creation Crew - WITH HITL CHECKPOINTS
 
-A multi-agent AI system for creating high-quality, brand-aligned content
-with dual workflow modes (CREATION and REVISION).
+Multi-agent system with Human-in-the-Loop at 3 critical decision points:
+1. Brand Voice Analysis - After agent analyzes brand voice
+2. Style Compliance Review - After style guide verification
+3. Final Quality Assurance - Before content delivery
 
-Author: SpinScribe Team
-Version: 3.0.0 - Cloud Deployment (Phase 1 - No HITL)
+Version: 4.0.0 - HITL Enabled
+References:
+- HITL Docs: https://docs.crewai.com/concepts/hitl-workflows
+- Task Configuration: https://docs.crewai.com/core-concepts/tasks
 """
 
 import os
@@ -28,25 +32,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global execution ID for tracking workflows
+# Global execution tracking
 _current_execution_id = None
 
 
 # =============================================================================
-# SPINSCRIBE CREW DEFINITION
+# SPINSCRIBE CREW WITH HITL CHECKPOINTS
 # =============================================================================
 
 @CrewBase
 class SpinscribeCrew:
     """
-    SpinScribe Content Creation Crew - Cloud Deployment Ready
+    SpinScribe Content Creation Crew with HITL Checkpoints
     
-    A multi-agent system with 7 specialized agents working sequentially to create
-    high-quality, brand-aligned content with dual workflow mode support:
-    - CREATION: Build content from scratch (no initial_draft provided)
-    - REVISION: Enhance existing draft (initial_draft provided)
+    7 specialized agents working sequentially with 3 human approval checkpoints:
     
-    Workflow mode is automatically detected based on inputs.
+    WORKFLOW:
+    1. Content Research           → Agent completes
+    2. Brand Voice Analysis       → Agent completes → 🔴 CHECKPOINT #1 (human reviews)
+    3. Content Strategy           → Agent completes
+    4. Content Generation         → Agent completes
+    5. SEO Optimization           → Agent completes
+    6. Style Compliance Review    → Agent completes → 🔴 CHECKPOINT #2 (human reviews)
+    7. Final Quality Assurance    → Agent completes → 🔴 CHECKPOINT #3 (human approves)
+    
+    HITL CHECKPOINTS:
+    - When crew reaches a task with human_input=True, it:
+      1. Completes the task
+      2. Sends webhook to backend with task output
+      3. Enters "Pending Human Input" state
+      4. Waits for backend to call /resume endpoint
+    
+    - Your backend receives the checkpoint at: /api/v1/webhook/hitl
+    - User approves/rejects via: /api/v1/checkpoints/{id}/approve or /reject
+    - Backend calls CrewAI resume endpoint to continue
+    
+    Reference: https://docs.crewai.com/concepts/hitl-workflows
     """
     
     agents_config = 'config/agents.yaml'
@@ -66,7 +87,6 @@ class SpinscribeCrew:
             logger.error(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
             sys.exit(1)
         
-        # Check for SerperDev API key (recommended for web search)
         if not os.getenv('SERPER_API_KEY'):
             logger.warning("⚠️  SERPER_API_KEY not set - web search tools may not work optimally")
         
@@ -96,7 +116,7 @@ class SpinscribeCrew:
         _current_execution_id = f"exec_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         logger.info("="*80)
-        logger.info("🚀 SPINSCRIBE WORKFLOW INITIALIZATION")
+        logger.info("🚀 SPINSCRIBE WORKFLOW WITH HITL CHECKPOINTS")
         logger.info("="*80)
         logger.info(f"🔗 Execution ID: {_current_execution_id}")
         
@@ -105,14 +125,11 @@ class SpinscribeCrew:
         has_initial_draft = bool(initial_draft)
         
         # Determine workflow mode
-        # Priority: explicit workflow_mode > auto-detect from initial_draft
         explicit_mode = inputs.get('workflow_mode', '').lower()
         
         if explicit_mode in ['revision', 'creation', 'refinement']:
-            # Map 'refinement' to 'revision' for consistency
             workflow_mode = 'revision' if explicit_mode in ['refinement', 'revision'] else 'creation'
         else:
-            # Auto-detect based on initial_draft presence
             workflow_mode = 'revision' if has_initial_draft else 'creation'
         
         # Enrich inputs with mode and metadata
@@ -133,7 +150,7 @@ class SpinscribeCrew:
             # Creation mode metadata
             inputs['draft_length'] = 0
             inputs['draft_word_count'] = 0
-            inputs['initial_draft'] = ""  # Ensure empty string, not None
+            inputs['initial_draft'] = ""
             inputs['draft_source'] = 'ai_generated'
             
             logger.info(f"✨ WORKFLOW MODE: CREATION")
@@ -152,6 +169,11 @@ class SpinscribeCrew:
         logger.info(f"   ├─ Content Type: {inputs.get('content_type', 'N/A')}")
         logger.info(f"   ├─ Audience: {inputs.get('audience', 'N/A')}")
         logger.info(f"   └─ AI Language Code: {inputs.get('ai_language_code', 'N/A')}")
+        logger.info("")
+        logger.info("🔴 HITL CHECKPOINTS ENABLED:")
+        logger.info("   ├─ Checkpoint #1: Brand Voice Analysis")
+        logger.info("   ├─ Checkpoint #2: Style Compliance Review")
+        logger.info("   └─ Checkpoint #3: Final Quality Assurance")
         logger.info("="*80)
         
         return inputs
@@ -221,7 +243,7 @@ class SpinscribeCrew:
         )
 
     # =========================================================================
-    # TASKS - Matching tasks.yaml exactly
+    # TASKS - WITH HITL CHECKPOINTS
     # =========================================================================
 
     @task
@@ -233,10 +255,22 @@ class SpinscribeCrew:
 
     @task
     def brand_voice_analysis_task(self) -> Task:
-        """Task 2: Brand Voice Analysis"""
-        return Task(
-            config=self.tasks_config['brand_voice_analysis_task']
-        )
+        """
+        Task 2: Brand Voice Analysis
+        
+        🔴 CHECKPOINT #1: Brand Voice Review
+        
+        After this task completes, CrewAI will:
+        1. Send webhook to /api/v1/webhook/hitl with brand voice analysis
+        2. Pause execution
+        3. Wait for human approval/rejection
+        4. Resume when backend calls /resume endpoint
+        
+        Human reviews: Brand voice parameters, tone accuracy, style guidelines
+        """
+        task_config = self.tasks_config['brand_voice_analysis_task'].copy()
+        task_config['human_input'] = True  # 🔴 ENABLE HITL CHECKPOINT
+        return Task(config=task_config)
 
     @task
     def content_strategy_task(self) -> Task:
@@ -261,17 +295,41 @@ class SpinscribeCrew:
 
     @task
     def style_compliance_review_task(self) -> Task:
-        """Task 6: Style Compliance Review"""
-        return Task(
-            config=self.tasks_config['style_compliance_review_task']
-        )
+        """
+        Task 6: Style Compliance Review
+        
+        🔴 CHECKPOINT #2: Style Compliance Review
+        
+        After this task completes, CrewAI will:
+        1. Send webhook to /api/v1/webhook/hitl with compliance report
+        2. Pause execution
+        3. Wait for human approval/rejection
+        4. Resume when backend calls /resume endpoint
+        
+        Human reviews: Style adherence, brand consistency, formatting
+        """
+        task_config = self.tasks_config['style_compliance_review_task'].copy()
+        task_config['human_input'] = True  # 🔴 ENABLE HITL CHECKPOINT
+        return Task(config=task_config)
 
     @task
     def final_quality_assurance_task(self) -> Task:
-        """Task 7: Final Quality Assurance"""
-        return Task(
-            config=self.tasks_config['final_quality_assurance_task']
-        )
+        """
+        Task 7: Final Quality Assurance
+        
+        🔴 CHECKPOINT #3: Final Approval
+        
+        After this task completes, CrewAI will:
+        1. Send webhook to /api/v1/webhook/hitl with final content
+        2. Pause execution
+        3. Wait for human final approval
+        4. Resume (and complete) when backend calls /resume endpoint
+        
+        Human reviews: Overall quality, accuracy, publication readiness
+        """
+        task_config = self.tasks_config['final_quality_assurance_task'].copy()
+        task_config['human_input'] = True  # 🔴 ENABLE HITL CHECKPOINT
+        return Task(config=task_config)
 
     # =========================================================================
     # CREW DEFINITION
@@ -280,10 +338,23 @@ class SpinscribeCrew:
     @crew
     def crew(self) -> Crew:
         """
-        Creates the SpinScribe crew with sequential workflow.
+        Creates the SpinScribe crew with sequential workflow and HITL checkpoints.
+        
+        When deployed to CrewAI and kicked off with webhook URLs, the crew will:
+        1. Execute tasks sequentially
+        2. Pause at tasks with human_input=True
+        3. Send webhooks to your backend
+        4. Wait for resume calls
+        5. Continue execution after approval
+        
+        Your backend must:
+        - Receive webhooks at: /api/v1/webhook/hitl
+        - Store checkpoints for user review
+        - Call CrewAI /resume endpoint when approved
+        - Re-provide webhook URLs in resume call
         
         Returns:
-            Crew: Configured crew with 7 agents and 7 tasks
+            Crew: Configured crew with 7 agents, 7 tasks, 3 HITL checkpoints
         """
         return Crew(
             agents=self.agents,
@@ -301,16 +372,24 @@ def run():
     """
     Entry point for the SpinScribe crew.
     
-    This function is called by:
-    - CLI: `crewai run`
-    - API: crew.kickoff(inputs={...})
+    IMPORTANT: When deploying to CrewAI, your backend will kickoff the crew
+    with webhook URLs. This local run() is mainly for testing.
+    
+    For production with HITL:
+    1. Deploy this crew to CrewAI
+    2. Your backend calls /kickoff with humanInputWebhook config
+    3. Crew executes and sends webhooks to your backend
+    4. Users approve via your frontend
+    5. Backend calls /resume to continue
+    
+    Reference: https://docs.crewai.com/deployment/kickoff-crew
     """
     try:
         # Initialize crew
         crew_instance = SpinscribeCrew()
         
-        # Example inputs for testing
-        # In production, these come from API or CLI
+        # Example inputs for local testing
+        # In production, these come from your backend API
         inputs = {
             'client_name': 'Yanmar',
             'topic': 'The Future of AI in Agriculture and Robotics',
@@ -318,11 +397,16 @@ def run():
             'audience': 'Agricultural Business Executives and Technology Decision-Makers',
             'ai_language_code': '/TN/A3,P4,EMP2/VL4/SC3/FL2/LF3',
             'content_length': '2000',
-            # For REVISION mode, uncomment and provide initial_draft:
+            # For REVISION mode, uncomment:
             # 'initial_draft': 'Your existing draft content here...',
         }
         
         logger.info("🚀 Starting SpinScribe crew execution...")
+        logger.info("")
+        logger.info("⚠️  NOTE: HITL checkpoints require webhook configuration!")
+        logger.info("   For local testing, crew will pause and wait for manual input.")
+        logger.info("   In production, deploy to CrewAI and use backend kickoff.")
+        logger.info("")
         
         # Execute crew
         result = crew_instance.crew().kickoff(inputs=inputs)
@@ -345,14 +429,11 @@ def run():
 
 
 # =============================================================================
-# TRAINING AND TESTING FUNCTIONS (OPTIONAL)
+# TRAINING AND TESTING FUNCTIONS
 # =============================================================================
 
 def train():
-    """
-    Train the crew for improved performance.
-    Usage: crewai train <n_iterations> <filename>
-    """
+    """Train the crew for improved performance."""
     inputs = {
         "topic": "AI in Healthcare",
         "audience": "Healthcare Executives",
@@ -370,10 +451,7 @@ def train():
 
 
 def replay():
-    """
-    Replay the crew execution from a specific task.
-    Usage: crewai replay <task_id>
-    """
+    """Replay the crew execution from a specific task."""
     try:
         SpinscribeCrew().crew().replay(task_id=sys.argv[1])
     except Exception as e:
@@ -381,10 +459,7 @@ def replay():
 
 
 def test():
-    """
-    Test the crew execution and returns the results.
-    Usage: crewai test <n_iterations> <openai_model_name>
-    """
+    """Test the crew execution and returns the results."""
     inputs = {
         "topic": "Test Topic",
         "audience": "Test Audience",
